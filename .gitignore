@@ -1,5 +1,6 @@
 .makepp/
-NS3/build/
-User-space/ICC/.makepp/
-User-space/ICC/scratch/uplinkLog/
-User-space/ICC/scratch/downlinkLog/
+NS3.27/build/
+NS3.27/.waf*
+GenericCC/ICC/.makepp/
+GenericCC/ICC/scratch/uplinkLog/
+GenericCC/ICC/scratch/downlinkLog/

@@ -1,0 +1,41 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/test.dir/__/__/build-support/empty.cc.o"
+  "CMakeFiles/test.dir/__/__/build-support/empty.cc.o.d"
+  "CMakeFiles/test.dir/csma-system-test-suite.cc.o"
+  "CMakeFiles/test.dir/csma-system-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tc/fq-cobalt-queue-disc-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tc/fq-cobalt-queue-disc-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tc/fq-codel-queue-disc-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tc/fq-codel-queue-disc-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tc/fq-pie-queue-disc-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tc/fq-pie-queue-disc-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tc/pfifo-fast-queue-disc-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tc/pfifo-fast-queue-disc-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-cubic-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-cubic-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-loss-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-loss-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-no-delay-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-no-delay-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-socket-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-socket-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-socket-writer.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-socket-writer.cc.o.d"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-state-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3tcp/ns3tcp-state-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3wifi/wifi-ac-mapping-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3wifi/wifi-ac-mapping-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3wifi/wifi-issue-211-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3wifi/wifi-issue-211-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/ns3wifi/wifi-msdu-aggregator-test-suite.cc.o"
+  "CMakeFiles/test.dir/ns3wifi/wifi-msdu-aggregator-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/traced/traced-callback-typedef-test-suite.cc.o"
+  "CMakeFiles/test.dir/traced/traced-callback-typedef-test-suite.cc.o.d"
+  "CMakeFiles/test.dir/traced/traced-value-callback-typedef-test-suite.cc.o"
+  "CMakeFiles/test.dir/traced/traced-value-callback-typedef-test-suite.cc.o.d"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/test.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

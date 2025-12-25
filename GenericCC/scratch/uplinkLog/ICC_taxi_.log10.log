@@ -1,0 +1,1475 @@
+Using ICC.
+Will do slow start
+Using Compete Mode
+Using Automatic Theta Mode
+Using Automatic Mode with default lamda = 1
+Set Bd= 10ms
+Set_Rc= 30mbps
+Assigning Source ID: 64879873
+Assuming training link rate of: 2666.67 pkts/sec
+Could not establish connection
+Could not establish connection
+Connection Established.
+init: min_rtt= 1.79769e+308
+Received incorrect ack for src -1 to 64879873 for flow -1 to 0
+Received incorrect ack for src -1 to 64879873 for flow -1 to 0
+new_RTT_at: 22.0965 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2 target= inf rtt= 22.0691
+new_RTT_at: 49.2652 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.92702 target= inf rtt= 21.5502
+new_RTT_at: 73.367 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.44389 target= 57.7106 rtt= 23.0109
+new_RTT_at: 116.369 cur_dir= 4 prev_v= 1 cur_v= 2 window= 10.8571 target= -13.0425 rtt= 36.9959
+new_RTT_at: 174.479 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.88483 target= -37.7939 rtt= 56.7973
+new_RTT_at: 224.21 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.43126 target= -30.3188 rtt= 49.0234
+new_RTT_at: 266.787 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.6591 target= -16.935 rtt= 39.1359
+new_RTT_at: 326.972 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.93386 target= -33.1718 rtt= 51.7644
+new_RTT_at: 356.685 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.03007 target= 53.7343 rtt= 23.2179
+new_RTT_at: 391.401 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.72503 target= 38.1691 rtt= 24.352
+new_RTT_at: 443.069 cur_dir= -4 prev_v= 1 cur_v= 1 window= 4.74724 target= -24.8141 rtt= 44.4178
+new_RTT_at: 469.844 cur_dir= -3 prev_v= 1 cur_v= 1 window= 3.94797 target= 67.7087 rtt= 22.5969
+new_RTT_at: 549.003 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.27646 target= -50.4559 rtt= 75.3059
+new_RTT_at: 638.256 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.74841 target= -37.3971 rtt= 56.3341
+new_RTT_at: 671.891 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.08863 target= 27.0359 rtt= 25.611
+new_RTT_at: 701.375 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.49913 target= 39.7111 rtt= 24.2117
+new_RTT_at: 805.185 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.77663 target= -63.0235 rtt= 103.276
+new_RTT_at: 860.681 cur_dir= -6 prev_v= 1 cur_v= 1 window= 2.59098 target= 7.32102 rtt= 29.3848
+new_RTT_at: 893.203 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.61117 target= -1.87411 rtt= 32.1948
+new_RTT_at: 934.528 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.37317 target= -14.439 rtt= 37.732
+new_RTT_at: 964.077 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.80927 target= 23.6695 rtt= 26.0933
+new_RTT_at: 1007.66 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.0526 target= -22.9102 rtt= 43.0116
+
+debug1:sec: 1 throughput: 1.27729 RTT: 47.6709
+new_RTT_at: 1192.98 cur_dir= -7 prev_v= 1 cur_v= 1 window= 2.36534 target= -23.7819 rtt= 43.6444
+new_RTT_at: 1263.99 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -27.9523 rtt= 46.9395
+new_RTT_at: 1368.78 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -3.03305 rtt= 32.6141
+new_RTT_at: 1487.85 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -24.0393 rtt= 43.8347
+new_RTT_at: 1597.93 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -27.1426 rtt= 46.2634
+new_RTT_at: 1683.12 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 46.1444 rtt= 23.698
+new_RTT_at: 1706.21 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 57.0087 rtt= 23.0454
+new_RTT_at: 1740.82 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.91544 target= -1.20084 rtt= 31.9586
+new_RTT_at: 1823.76 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= -38.7798 rtt= 57.9748
+new_RTT_at: 1947.51 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -18.0137 rtt= 39.7797
+new_RTT_at: 2044.56 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 8.51114 rtt= 29.0801
+
+debug1:sec: 2 throughput: 0.296565 RTT: 59.9223
+new_RTT_at: 2082.57 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= -14.8675 rtt= 37.9648
+new_RTT_at: 2164.11 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -45.1681 rtt= 66.6189
+new_RTT_at: 2284.79 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -33.2386 rtt= 51.8317
+new_RTT_at: 2389.43 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -29.9847 rtt= 48.7191
+new_RTT_at: 2500.57 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -33.513 rtt= 52.1099
+new_RTT_at: 2681.59 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -70.2038 rtt= 125.376
+new_RTT_at: 2804.52 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -3.5265 rtt= 32.7976
+new_RTT_at: 2924.84 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -26.0374 rtt= 45.3696
+new_RTT_at: 3016.52 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 8.06581 rtt= 29.1927
+
+debug1:sec: 3 throughput: 0.149875 RTT: 45.2703
+new_RTT_at: 3053.89 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= -13.6522 rtt= 37.3131
+new_RTT_at: 3109.62 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -19.8011 rtt= 40.8988
+new_RTT_at: 3245.58 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -46.6105 rtt= 68.8388
+new_RTT_at: 3316.69 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -1.87933 rtt= 32.1967
+new_RTT_at: 3605.06 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -88.5319 rtt= 212.813
+new_RTT_at: 3648.28 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -19.2256 rtt= 40.5312
+new_RTT_at: 3766.75 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -32.3988 rtt= 50.9958
+new_RTT_at: 3851.43 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 12.3523 rtt= 28.1751
+new_RTT_at: 3874.68 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 53.9926 rtt= 23.2036
+new_RTT_at: 3902.55 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.16446 target= 26.2657 rtt= 25.7166
+new_RTT_at: 3947.5 cur_dir= 3 prev_v= 1 cur_v= 2 window= 11.8928 target= -13.3167 rtt= 37.1378
+new_RTT_at: 4008.15 cur_dir= -12 prev_v= 1 cur_v= 1 window= 9.63704 target= -38.9587 rtt= 58.1927
+
+debug1:sec: 4 throughput: 0.369301 RTT: 50.501
+new_RTT_at: 4061.66 cur_dir= -11 prev_v= 1 cur_v= 1 window= 7.6495 target= -32.4689 rtt= 51.0647
+new_RTT_at: 4105.45 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.80404 target= -20.5854 rtt= 41.4113
+new_RTT_at: 4148.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.05435 target= -15.2115 rtt= 38.154
+new_RTT_at: 4184.66 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.343 target= 5.42635 rtt= 29.8956
+new_RTT_at: 4230.24 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.45952 target= -21.6697 rtt= 42.1423
+new_RTT_at: 4266.43 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.25431 target= 7.8946 rtt= 29.2364
+new_RTT_at: 4290.71 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.82653 target= 61.997 rtt= 22.8164
+new_RTT_at: 4313.7 cur_dir= 3 prev_v= 1 cur_v= 2 window= 5.98073 target= 85.8003 rtt= 22.1229
+new_RTT_at: 4344.35 cur_dir= 6 prev_v= 2 cur_v= 4 window= 10.259 target= 22.2333 rtt= 26.316
+new_RTT_at: 4390.59 cur_dir= -1 prev_v= 1 cur_v= 1 window= 14.0474 target= -15.1745 rtt= 38.1336
+new_RTT_at: 4459.59 cur_dir= -15 prev_v= 1 cur_v= 1 window= 11.9649 target= -42.7626 rtt= 63.1463
+new_RTT_at: 4534.29 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.1312 target= -42.6905 rtt= 63.0464
+new_RTT_at: 4615.46 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.11221 target= -50.4973 rtt= 75.38
+new_RTT_at: 4654.47 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.84794 target= -6.81408 rtt= 34.1002
+new_RTT_at: 4706.63 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.38479 target= -33.3273 rtt= 51.9214
+new_RTT_at: 4739.78 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.35562 target= 37.2261 rtt= 24.4415
+new_RTT_at: 4767.56 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.83754 target= 84.7773 rtt= 22.1427
+new_RTT_at: 4801.73 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.15156 target= 14.9146 rtt= 27.6328
+new_RTT_at: 4898.51 cur_dir= -5 prev_v= 1 cur_v= 1 window= 7.45657 target= -59.7845 rtt= 94.9118
+new_RTT_at: 4961.39 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.6642 target= -37.5032 rtt= 56.4573
+new_RTT_at: 5002.58 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.00845 target= -16.7533 rtt= 39.0297
+
+debug1:sec: 5 throughput: 1.79528 RTT: 49.6894
+new_RTT_at: 5042.59 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.25778 target= 11.4103 rtt= 28.3865
+new_RTT_at: 5067.48 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.36327 target= 97.9441 rtt= 21.9322
+new_RTT_at: 5093.65 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.34748 target= 56.348 rtt= 23.0787
+new_RTT_at: 5130.39 cur_dir= 4 prev_v= 1 cur_v= 2 window= 9.59288 target= 1.53837 rtt= 31.0503
+new_RTT_at: 5189.83 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.6831 target= -34.4801 rtt= 53.1111
+new_RTT_at: 5242.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.89014 target= -32.5852 rtt= 51.1793
+new_RTT_at: 5296.49 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.29026 target= -30.2309 rtt= 48.943
+new_RTT_at: 5331.86 cur_dir= -6 prev_v= 1 cur_v= 1 window= 2.51775 target= 28.9318 rtt= 25.3623
+new_RTT_at: 5355.48 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.43186 target= inf rtt= 21.5291
+new_RTT_at: 5379.59 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.57014 target= 99.2537 rtt= 21.8949
+new_RTT_at: 5415.44 cur_dir= 7 prev_v= 2 cur_v= 4 window= 11.2203 target= 3.53655 rtt= 30.4171
+new_RTT_at: 5476.61 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.81846 target= -35.691 rtt= 54.3901
+new_RTT_at: 5531.42 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.17313 target= -32.8665 rtt= 51.4374
+new_RTT_at: 5583.76 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.30145 target= -31.7683 rtt= 50.3624
+new_RTT_at: 5632.64 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.4274 target= -25.615 rtt= 45.0154
+new_RTT_at: 5667.53 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.65725 target= -5.18528 rtt= 33.4159
+new_RTT_at: 5711.92 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.38615 target= -2.24882 rtt= 32.3076
+new_RTT_at: 5757.39 cur_dir= 2 prev_v= 1 cur_v= 2 window= 2.64203 target= -6.23146 rtt= 33.8378
+new_RTT_at: 5897.43 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -28.8692 rtt= 47.7064
+new_RTT_at: 5987.42 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 4.79096 rtt= 30.0532
+new_RTT_at: 6029.45 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= -21.4705 rtt= 41.985
+
+debug1:sec: 6 throughput: 1.26223 RTT: 41.5272
+new_RTT_at: 6083.61 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -4.96324 rtt= 33.3283
+new_RTT_at: 6132.69 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2 target= 5.03234 rtt= 29.9848
+new_RTT_at: 6176.53 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.4213 target= -20.5658 rtt= 41.3773
+new_RTT_at: 6499.61 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2 target= -69.8196 rtt= 124.033
+new_RTT_at: 6630.74 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -17.9495 rtt= 39.7197
+new_RTT_at: 6734.3 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -10.6447 rtt= 35.7884
+new_RTT_at: 6830.98 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 33.343 rtt= 24.82
+new_RTT_at: 6875.45 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= -24.8394 rtt= 44.416
+new_RTT_at: 6925.3 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 2.34505 rtt= 30.7772
+new_RTT_at: 6948.33 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.9117 target= 86.6209 rtt= 22.0864
+new_RTT_at: 6978.34 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.07344 target= 42.4238 rtt= 23.9605
+
+debug1:sec: 7 throughput: 0.375408 RTT: 45.8304
+new_RTT_at: 7026.71 cur_dir= 5 prev_v= 1 cur_v= 2 window= 11.1025 target= -7.90171 rtt= 34.5425
+new_RTT_at: 7189.89 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.11368 target= -76.0622 rtt= 147.745
+new_RTT_at: 7273.65 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.90922 target= -54.1587 rtt= 82.3466
+new_RTT_at: 7306.43 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.76127 target= 10.5383 rtt= 28.567
+new_RTT_at: 7349.34 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.65954 target= 94.9601 rtt= 21.9511
+new_RTT_at: 7449.87 cur_dir= -4 prev_v= 1 cur_v= 1 window= 7.44616 target= -58.4537 rtt= 91.7077
+new_RTT_at: 7540.18 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.65633 target= -56.4334 rtt= 87.1372
+new_RTT_at: 7605.11 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.93756 target= -25.2954 rtt= 44.7666
+new_RTT_at: 7690.56 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.07349 target= -48.1492 rtt= 71.3063
+new_RTT_at: 7733.72 cur_dir= 1 prev_v= 1 cur_v= 1 window= 3.16781 target= 56.2106 rtt= 23.0647
+new_RTT_at: 7778.9 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.77615 target= 39.5988 rtt= 24.2006
+new_RTT_at: 7851.82 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.71298 target= -46.2206 rtt= 68.2071
+new_RTT_at: 7880.2 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.97377 target= 11.5762 rtt= 28.3277
+new_RTT_at: 7903.52 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.82328 target= 151.243 rtt= 21.5938
+new_RTT_at: 7934.55 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.10014 target= 32.2736 rtt= 24.9394
+new_RTT_at: 7972.49 cur_dir= 0 prev_v= 1 cur_v= 1 window= 10.7068 target= -6.83362 rtt= 34.0873
+
+debug1:sec: 8 throughput: 1.35537 RTT: 62.6525
+new_RTT_at: 8005.7 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.93094 target= -1.22302 rtt= 31.9452
+new_RTT_at: 8091.52 cur_dir= -10 prev_v= 1 cur_v= 1 window= 6.50123 target= -54.6305 rtt= 83.3105
+new_RTT_at: 8277.83 cur_dir= -8 prev_v= 1 cur_v= 1 window= 4.19857 target= -75.0434 rtt= 143.531
+new_RTT_at: 8356.11 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.66686 target= -6.12389 rtt= 33.7937
+new_RTT_at: 8428.61 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 13.7497 rtt= 27.8526
+new_RTT_at: 8453.52 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.06422 target= 32.834 rtt= 24.8763
+new_RTT_at: 8500.73 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.05909 target= -28.2422 rtt= 47.165
+new_RTT_at: 8593.28 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.04649 target= -46.6152 rtt= 68.8251
+Timeout
+Finished while in slow-start at window 2
+init: min_rtt= 21.5291
+Timeout
+init: min_rtt= 21.5291
+new_RTT_at: 12662.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2 target= 81.4965 rtt= 22.1902
+
+debug1:sec: 9 throughput: inf RTT: 22.1902
+
+debug1:sec: 10 throughput: 188.36 RTT: 11.1558
+new_RTT_at: 12686.7 cur_dir= 2 prev_v= 1 cur_v= 1 window= 20.0098 target= 60.3672 rtt= 22.866
+
+debug1:sec: 11 throughput: 1.43412 RTT: 7.62201
+
+debug1:sec: 12 throughput: 1.78211 RTT: 5.88428
+new_RTT_at: 12740.2 cur_dir= -3 prev_v= 1 cur_v= 1 window= 21.6007 target= -23.2691 rtt= 43.2489
+new_RTT_at: 12841.3 cur_dir= -18 prev_v= 1 cur_v= 1 window= 19.4259 target= -61.8255 rtt= 100.056
+new_RTT_at: 12919.3 cur_dir= -12 prev_v= 1 cur_v= 1 window= 17.8753 target= -51.425 rtt= 77.0496
+new_RTT_at: 12999.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 15.8903 target= -48.4799 rtt= 71.8582
+
+debug1:sec: 13 throughput: 2.09543 RTT: 63.5282
+new_RTT_at: 13073.5 cur_dir= -15 prev_v= 1 cur_v= 1 window= 14.181 target= -49.2105 rtt= 73.0989
+new_RTT_at: 13138.2 cur_dir= -15 prev_v= 1 cur_v= 1 window= 12.4205 target= -41.9561 rtt= 62.0219
+new_RTT_at: 13179.7 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.8641 target= -18.576 rtt= 40.1036
+new_RTT_at: 13204.5 cur_dir= 7 prev_v= 1 cur_v= 1 window= 12.1246 target= 52.8205 rtt= 23.2484
+new_RTT_at: 13229.5 cur_dir= 12 prev_v= 1 cur_v= 2 window= 14.1402 target= 87.0594 rtt= 22.0783
+new_RTT_at: 13263.4 cur_dir= 14 prev_v= 2 cur_v= 4 window= 18.5969 target= 11.5686 rtt= 28.3294
+new_RTT_at: 13343.4 cur_dir= -15 prev_v= 1 cur_v= 1 window= 16.5854 target= -47.9492 rtt= 70.9757
+new_RTT_at: 13423.3 cur_dir= -5 prev_v= 1 cur_v= 1 window= 15.4717 target= -50.8619 rtt= 76.0171
+new_RTT_at: 13497.3 cur_dir= -4 prev_v= 1 cur_v= 1 window= 13.6696 target= -49.3963 rtt= 73.4192
+new_RTT_at: 13569.3 cur_dir= -13 prev_v= 1 cur_v= 1 window= 11.903 target= -45.041 rtt= 66.4073
+new_RTT_at: 13621.1 cur_dir= -11 prev_v= 1 cur_v= 1 window= 10.2415 target= -30.3017 rtt= 48.9867
+new_RTT_at: 13662.8 cur_dir= -12 prev_v= 1 cur_v= 1 window= 7.98841 target= -9.86726 rtt= 35.4237
+new_RTT_at: 13693.9 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.23702 target= 6.87985 rtt= 29.4798
+new_RTT_at: 13721.5 cur_dir= 7 prev_v= 1 cur_v= 1 window= 8.45196 target= 20.2764 rtt= 26.6162
+new_RTT_at: 13762.4 cur_dir= 9 prev_v= 1 cur_v= 2 window= 10.7516 target= -4.69978 rtt= 33.2251
+new_RTT_at: 13863.3 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.39966 target= -48.2813 rtt= 71.5261
+new_RTT_at: 13934.3 cur_dir= -3 prev_v= 1 cur_v= 1 window= 6.65225 target= -47.352 rtt= 70.0011
+new_RTT_at: 13996.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.01372 target= -38.9985 rtt= 58.2203
+
+debug1:sec: 14 throughput: 2.16042 RTT: 50.0533
+new_RTT_at: 14034.3 cur_dir= -7 prev_v= 1 cur_v= 1 window= 2.99036 target= 23.7235 rtt= 26.064
+new_RTT_at: 14056.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.22333 target= 135.034 rtt= 21.6401
+new_RTT_at: 14088.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.1159 target= 27.0113 rtt= 25.5933
+new_RTT_at: 14124.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 10.7495 target= -2.08945 rtt= 32.2505
+new_RTT_at: 14163.5 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.78067 target= -14.813 rtt= 37.9139
+new_RTT_at: 14198.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.33529 target= -5.16163 rtt= 33.4066
+new_RTT_at: 14229.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.91329 target= 14.2875 rtt= 27.7402
+new_RTT_at: 14255.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.76429 target= 31.0598 rtt= 25.0803
+new_RTT_at: 14287.5 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.89564 target= 14.0799 rtt= 27.7834
+new_RTT_at: 14326.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 10.2664 target= -6.30504 rtt= 33.868
+new_RTT_at: 14364 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.55927 target= -3.57426 rtt= 32.7944
+new_RTT_at: 14395.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.68476 target= 7.24763 rtt= 29.3829
+new_RTT_at: 14423.5 cur_dir= 7 prev_v= 1 cur_v= 1 window= 8.42416 target= 22.9938 rtt= 26.1757
+new_RTT_at: 14455.6 cur_dir= 9 prev_v= 1 cur_v= 2 window= 10.5986 target= 8.7587 rtt= 28.9972
+new_RTT_at: 14508.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.92713 target= -20.8299 rtt= 41.5528
+new_RTT_at: 14550.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.25289 target= -19.5732 rtt= 40.7314
+new_RTT_at: 14588.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.4431 target= -7.19335 rtt= 34.2388
+new_RTT_at: 14620.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 4.91984 target= 13.5725 rtt= 27.89
+new_RTT_at: 14649 cur_dir= 5 prev_v= 1 cur_v= 1 window= 6.93429 target= 34.1746 rtt= 24.73
+new_RTT_at: 14684.6 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.43505 target= 4.63048 rtt= 30.0989
+new_RTT_at: 14727 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.41439 target= -16.7167 rtt= 38.9874
+new_RTT_at: 14764.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.59389 target= -9.47687 rtt= 35.244
+new_RTT_at: 14794.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 5.08019 target= 16.542 rtt= 27.2906
+new_RTT_at: 14823.7 cur_dir= 5 prev_v= 1 cur_v= 1 window= 6.92268 target= 27.8445 rtt= 25.482
+new_RTT_at: 14875.2 cur_dir= -1 prev_v= 1 cur_v= 1 window= 7.4068 target= -23.718 rtt= 43.5763
+new_RTT_at: 14940.2 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.41344 target= -42.415 rtt= 62.646
+new_RTT_at: 14985.1 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.75871 target= -19.2445 rtt= 40.5221
+
+debug1:sec: 15 throughput: 2.38541 RTT: 35.1602
+new_RTT_at: 15025.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= -16.9726 rtt= 39.1369
+new_RTT_at: 15070.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 7.17266 rtt= 29.4026
+new_RTT_at: 15093.4 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 62.3599 rtt= 22.7801
+new_RTT_at: 15132.4 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.83092 target= -16.6782 rtt= 38.9649
+new_RTT_at: 15165.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 146.529 rtt= 21.6048
+new_RTT_at: 15188.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.97788 target= 62.8763 rtt= 22.7588
+new_RTT_at: 15215.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.34885 target= 41.9365 rtt= 24.0003
+new_RTT_at: 15259.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 10.6081 target= -8.24913 rtt= 34.6941
+new_RTT_at: 15318.7 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.4777 target= -34.105 rtt= 52.6979
+new_RTT_at: 15366.8 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.64289 target= -27.2921 rtt= 46.3658
+new_RTT_at: 15406.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.24355 target= -17.324 rtt= 39.3443
+new_RTT_at: 15447.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.19845 target= -2.50705 rtt= 32.4007
+new_RTT_at: 15486 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.27182 target= 39.4632 rtt= 24.2127
+new_RTT_at: 15522.8 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.04697 target= 5.48805 rtt= 29.8574
+new_RTT_at: 15579.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.06615 target= -28.7665 rtt= 47.617
+new_RTT_at: 15633.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.14585 target= -24.5253 rtt= 44.1777
+new_RTT_at: 15665.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.38236 target= 26.5631 rtt= 25.6545
+new_RTT_at: 15824.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.72076 target= -78.3912 rtt= 157.934
+
+debug1:sec: 16 throughput: 1.08995 RTT: 48.4726
+new_RTT_at: 16107.2 cur_dir= -8 prev_v= 1 cur_v= 1 window= 3.63198 target= -67.131 rtt= 115.247
+new_RTT_at: 16148.1 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.05923 target= -16.6268 rtt= 38.9351
+new_RTT_at: 16187.2 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.72527 target= 45.2325 rtt= 23.7432
+new_RTT_at: 16223.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.08493 target= 42.3263 rtt= 23.9684
+new_RTT_at: 16260.2 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.08486 target= -0.972741 rtt= 31.8587
+new_RTT_at: 16355.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 4.67675 target= -54.159 rtt= 82.3472
+new_RTT_at: 16435.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.00767 target= -49.4233 rtt= 73.4659
+new_RTT_at: 16572.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2 target= 14.8292 rtt= 27.6291
+new_RTT_at: 16601.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.17175 target= 14.8292 rtt= 27.6291
+new_RTT_at: 16640.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.60564 target= -10.4738 rtt= 35.7074
+new_RTT_at: 16701.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 3.63286 target= -29.8037 rtt= 48.5347
+new_RTT_at: 16764.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.27103 target= -28.664 rtt= 47.528
+new_RTT_at: 16815.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 33.4807 rtt= 24.8049
+new_RTT_at: 16838.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.06302 target= 58.4253 rtt= 22.9554
+new_RTT_at: 16899 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.9621 target= -38.677 rtt= 57.8291
+new_RTT_at: 16976.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 2.8929 target= -45.3738 rtt= 66.908
+
+debug1:sec: 17 throughput: 0.919913 RTT: 62.7295
+new_RTT_at: 17089.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -63.4584 rtt= 104.448
+new_RTT_at: 17213.1 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -57.5718 rtt= 89.6746
+new_RTT_at: 17356.1 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -35.3461 rtt= 54.0145
+new_RTT_at: 17432 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 69.5501 rtt= 22.5135
+new_RTT_at: 17453.7 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 127.673 rtt= 21.671
+new_RTT_at: 17487.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.02739 target= 5.0979 rtt= 29.9664
+new_RTT_at: 17657.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 7.68559 target= -80.5503 rtt= 168.113
+new_RTT_at: 17712.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 6.93981 target= -34.9642 rtt= 53.6036
+new_RTT_at: 17798.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 4.02102 target= -52.3377 rtt= 78.7646
+new_RTT_at: 17888.3 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.00509 target= -36.5608 rtt= 55.3568
+new_RTT_at: 17963.9 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 4.82709 rtt= 30.0429
+new_RTT_at: 17986.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.25623 target= 70.5749 rtt= 22.4805
+new_RTT_at: 18012.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.52778 target= 68.8488 rtt= 22.5368
+
+debug1:sec: 18 throughput: 0.472473 RTT: 61.9361
+new_RTT_at: 18049 cur_dir= 7 prev_v= 2 cur_v= 4 window= 12.8257 target= 3.91466 rtt= 30.3058
+new_RTT_at: 18099.7 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.6743 target= -26.4954 rtt= 45.7149
+new_RTT_at: 18141.5 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.80021 target= -16.75 rtt= 39.0067
+new_RTT_at: 18175.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.25999 target= -5.06109 rtt= 33.3668
+new_RTT_at: 18204.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 6.98246 target= 24.5083 rtt= 25.9469
+new_RTT_at: 18232.4 cur_dir= 7 prev_v= 1 cur_v= 1 window= 9.12817 target= 38.6221 rtt= 24.289
+new_RTT_at: 18274.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 9.44306 target= -12.3126 rtt= 36.6036
+new_RTT_at: 18331.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.3437 target= -36.0349 rtt= 54.7689
+new_RTT_at: 18397.2 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.78821 target= -44.435 rtt= 65.5099
+new_RTT_at: 18422.9 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.51707 target= 53.9724 rtt= 23.1837
+new_RTT_at: 18459.8 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.76862 target= 46.6191 rtt= 23.6432
+new_RTT_at: 18582.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.88082 target= -68.9872 rtt= 121.228
+new_RTT_at: 18617.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.40331 target= 12.7237 rtt= 28.0726
+new_RTT_at: 18707.1 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.38051 target= -44.7843 rtt= 66.025
+new_RTT_at: 18799.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.76775 target= -15.3243 rtt= 38.1956
+new_RTT_at: 18829.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.69469 target= 89.8251 rtt= 22.0299
+new_RTT_at: 18867.2 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.62543 target= 30.3964 rtt= 25.1597
+new_RTT_at: 18968.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 5.40614 target= -54.4552 rtt= 82.9506
+
+debug1:sec: 19 throughput: 1.64202 RTT: 50.1275
+new_RTT_at: 19019.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.05713 target= -31.0186 rtt= 49.6508
+new_RTT_at: 19127.9 cur_dir= -6 prev_v= 1 cur_v= 1 window= 2 target= -29.8324 rtt= 48.5605
+new_RTT_at: 19167.1 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2.37763 target= 60.9813 rtt= 22.8389
+new_RTT_at: 19205.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.3207 target= 65.4963 rtt= 22.6559
+new_RTT_at: 19265.1 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.66342 target= -38.8131 rtt= 57.9942
+new_RTT_at: 19290.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.6704 target= 70.545 rtt= 22.4814
+new_RTT_at: 19313.9 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.6083 target= 108.666 rtt= 21.7964
+new_RTT_at: 19338.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.22285 target= 57.5752 rtt= 22.9964
+new_RTT_at: 19366.5 cur_dir= 9 prev_v= 2 cur_v= 4 window= 13.6873 target= 95.3329 rtt= 21.8418
+new_RTT_at: 19426.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 18.374 target= -32.3759 rtt= 50.8482
+new_RTT_at: 19504.2 cur_dir= -17 prev_v= 1 cur_v= 1 window= 16.5157 target= -48.2298 rtt= 71.3362
+new_RTT_at: 19571.6 cur_dir= -17 prev_v= 1 cur_v= 1 window= 14.8439 target= -45.5978 rtt= 67.144
+new_RTT_at: 19625.1 cur_dir= -15 prev_v= 1 cur_v= 1 window= 13.3427 target= -33.6673 rtt= 52.1424
+new_RTT_at: 19668.8 cur_dir= -14 prev_v= 1 cur_v= 1 window= 11.6763 target= -22.0242 rtt= 42.2619
+new_RTT_at: 19717.3 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.85048 target= -28.0385 rtt= 46.8874
+new_RTT_at: 19744.3 cur_dir= -7 prev_v= 1 cur_v= 1 window= 9.33679 target= 20.5222 rtt= 26.4706
+new_RTT_at: 19768.8 cur_dir= 8 prev_v= 1 cur_v= 1 window= 10.6936 target= 42.5531 rtt= 23.846
+new_RTT_at: 19800 cur_dir= 11 prev_v= 1 cur_v= 2 window= 12.7241 target= 10.2844 rtt= 28.5227
+new_RTT_at: 19839.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 12.5798 target= -11.4744 rtt= 36.0842
+new_RTT_at: 19876.3 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.8669 target= -11.0306 rtt= 35.8689
+new_RTT_at: 19909.2 cur_dir= -5 prev_v= 1 cur_v= 1 window= 9.99389 target= 5.60564 rtt= 29.7207
+new_RTT_at: 19974.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 8.24645 target= -40.3314 rtt= 59.7831
+new_RTT_at: 19999.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 7.68592 target= 33.9706 rtt= 24.6478
+
+debug1:sec: 20 throughput: 2.49141 RTT: 46.2653
+new_RTT_at: 20023.6 cur_dir= 7 prev_v= 1 cur_v= 1 window= 9.31696 target= 90.1885 rtt= 21.9198
+new_RTT_at: 20052.8 cur_dir= 10 prev_v= 1 cur_v= 2 window= 11.5132 target= 42.3815 rtt= 23.8598
+new_RTT_at: 20100.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 13.7888 target= -17.8175 rtt= 39.5357
+new_RTT_at: 20141.4 cur_dir= -14 prev_v= 1 cur_v= 1 window= 12.1841 target= -18.3072 rtt= 39.8338
+new_RTT_at: 20175.9 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.397 target= -3.59386 rtt= 32.6977
+new_RTT_at: 20201.8 cur_dir= 6 prev_v= 1 cur_v= 1 window= 11.5053 target= 30.5518 rtt= 25.0368
+new_RTT_at: 20232.7 cur_dir= 11 prev_v= 1 cur_v= 2 window= 13.6094 target= 24.8627 rtt= 25.791
+new_RTT_at: 20314.8 cur_dir= -11 prev_v= 1 cur_v= 1 window= 11.5171 target= -52.1661 rtt= 78.3341
+new_RTT_at: 20349 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.0196 target= -3.12545 rtt= 32.5231
+new_RTT_at: 20378.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 9.7794 target= 29.7534 rtt= 25.1342
+new_RTT_at: 20404.6 cur_dir= 10 prev_v= 1 cur_v= 1 window= 11.7751 target= 60.0161 rtt= 22.7777
+new_RTT_at: 20439.9 cur_dir= 10 prev_v= 1 cur_v= 2 window= 13.398 target= 5.8423 rtt= 29.6555
+new_RTT_at: 20526.4 cur_dir= -14 prev_v= 1 cur_v= 1 window= 10.7256 target= -50.4236 rtt= 75.1228
+new_RTT_at: 20679.3 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.52802 target= -75.0911 rtt= 143.621
+new_RTT_at: 20731.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.53471 target= -33.0158 rtt= 51.4826
+new_RTT_at: 20780 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.49659 target= 0.0393768 rtt= 31.4119
+new_RTT_at: 20810.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.29895 target= 12.2396 rtt= 28.0749
+new_RTT_at: 20836.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.24826 target= 128.931 rtt= 21.561
+new_RTT_at: 20860.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.27701 target= 80.5472 rtt= 22.1073
+new_RTT_at: 20891.6 cur_dir= 9 prev_v= 2 cur_v= 4 window= 13.656 target= 32.523 rtt= 24.8071
+new_RTT_at: 20936.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 14.0913 target= -20.0234 rtt= 40.9176
+new_RTT_at: 20988.5 cur_dir= -15 prev_v= 1 cur_v= 1 window= 12.2871 target= -29.1544 rtt= 47.8524
+
+debug1:sec: 21 throughput: 2.73174 RTT: 44.5326
+new_RTT_at: 21027.6 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.6501 target= -15.5003 rtt= 38.1895
+new_RTT_at: 21063.9 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.77314 target= -3.4322 rtt= 32.6371
+new_RTT_at: 21090.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 8.403 target= 22.56 rtt= 26.1393
+new_RTT_at: 21117.9 cur_dir= 7 prev_v= 1 cur_v= 1 window= 10.0659 target= 35.5531 rtt= 24.4822
+new_RTT_at: 21149.5 cur_dir= 11 prev_v= 1 cur_v= 2 window= 12.1906 target= 7.63604 rtt= 29.1778
+new_RTT_at: 21201.4 cur_dir= -10 prev_v= 1 cur_v= 1 window= 10.4176 target= -26.9587 rtt= 45.9872
+new_RTT_at: 21239.8 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.83944 target= -12.9291 rtt= 36.8126
+new_RTT_at: 21273.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.52524 target= -5.72282 rtt= 33.5267
+new_RTT_at: 21300.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 7.50374 target= 34.0904 rtt= 24.6349
+new_RTT_at: 21325.6 cur_dir= 8 prev_v= 1 cur_v= 1 window= 9.45529 target= 76.6541 rtt= 22.2019
+new_RTT_at: 21360.7 cur_dir= 10 prev_v= 1 cur_v= 2 window= 11.9148 target= 3.81123 rtt= 30.232
+new_RTT_at: 21407.4 cur_dir= -12 prev_v= 1 cur_v= 1 window= 9.80607 target= -22.5739 rtt= 42.6472
+new_RTT_at: 21447.7 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.32963 target= -16.2452 rtt= 38.611
+new_RTT_at: 21481.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.69581 target= 1.65304 rtt= 30.8889
+new_RTT_at: 21506.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.32333 target= 53.1452 rtt= 23.1258
+new_RTT_at: 21534.6 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.73042 target= 38.393 rtt= 24.2061
+new_RTT_at: 21577.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 10.9297 target= -14.4441 rtt= 37.6096
+new_RTT_at: 21626.3 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.17641 target= -28.9262 rtt= 47.6521
+new_RTT_at: 21670.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.42283 target= -17.9434 rtt= 39.6119
+new_RTT_at: 21705.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.6766 target= -5.37449 rtt= 33.387
+new_RTT_at: 21731.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 6.41331 target= 58.7535 rtt= 22.8358
+new_RTT_at: 21760.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 8.71142 target= 49.7504 rtt= 23.2804
+new_RTT_at: 21799.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 11.8862 target= -4.11822 rtt= 32.8473
+new_RTT_at: 21843.7 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.1197 target= -22.6082 rtt= 42.6224
+new_RTT_at: 21883.3 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.50146 target= -9.89712 rtt= 35.2842
+new_RTT_at: 21914.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.6501 target= 3.76476 rtt= 30.1965
+new_RTT_at: 21941.9 cur_dir= 7 prev_v= 1 cur_v= 1 window= 8.55521 target= 68.7343 rtt= 22.3874
+new_RTT_at: 21989.9 cur_dir= 1 prev_v= 1 cur_v= 2 window= 9.12798 target= -15.3756 rtt= 38.0708
+
+debug1:sec: 22 throughput: 3.0084 RTT: 34.6051
+new_RTT_at: 22043.3 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.28546 target= -32.9033 rtt= 51.3209
+new_RTT_at: 22081.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.74511 target= -9.62845 rtt= 35.1602
+new_RTT_at: 22106.2 cur_dir= 2 prev_v= 1 cur_v= 1 window= 6.70816 target= 46.7161 rtt= 23.4831
+new_RTT_at: 22135.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.16619 target= 62.8598 rtt= 22.6062
+new_RTT_at: 22172.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 11.7916 target= -8.12657 rtt= 34.4871
+new_RTT_at: 22221 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.0047 target= -26.7897 rtt= 45.8001
+new_RTT_at: 22267.6 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.16528 target= -20.973 rtt= 41.4953
+new_RTT_at: 22304.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.46457 target= -7.15806 rtt= 34.0706
+new_RTT_at: 22331.3 cur_dir= 1 prev_v= 1 cur_v= 1 window= 6.75378 target= 52.9602 rtt= 23.0872
+new_RTT_at: 22357.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.88268 target= 59.53 rtt= 22.7506
+new_RTT_at: 22396.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 11.9299 target= -3.63242 rtt= 32.663
+new_RTT_at: 22448 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.1343 target= -28.6646 rtt= 47.3752
+new_RTT_at: 22487.7 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.71857 target= -1.21705 rtt= 31.7899
+new_RTT_at: 22515.4 cur_dir= 1 prev_v= 1 cur_v= 1 window= 8.58442 target= 28.3556 rtt= 25.262
+new_RTT_at: 22545.6 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.63778 target= 29.9261 rtt= 25.0638
+new_RTT_at: 22584.6 cur_dir= 6 prev_v= 1 cur_v= 2 window= 11.2081 target= -7.78659 rtt= 34.3394
+new_RTT_at: 22630.5 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.2409 target= -21.4632 rtt= 41.8267
+new_RTT_at: 22669.5 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.39099 target= -8.58175 rtt= 34.6876
+new_RTT_at: 22699.6 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.53191 target= 12.4329 rtt= 27.983
+new_RTT_at: 22727.5 cur_dir= 9 prev_v= 1 cur_v= 1 window= 9.51175 target= 17.2284 rtt= 27.007
+new_RTT_at: 22759.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 10.2259 target= 4.64648 rtt= 29.941
+new_RTT_at: 22806.9 cur_dir= -12 prev_v= 1 cur_v= 1 window= 9.17994 target= -14.2538 rtt= 37.4581
+new_RTT_at: 22841.6 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.30995 target= 4.09576 rtt= 30.0997
+new_RTT_at: 22872.8 cur_dir= 3 prev_v= 1 cur_v= 1 window= 8.14596 target= 20.7776 rtt= 26.3787
+new_RTT_at: 22906.4 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.40944 target= 2.19228 rtt= 30.6712
+new_RTT_at: 22949.8 cur_dir= -11 prev_v= 1 cur_v= 1 window= 7.20804 target= -14.0617 rtt= 37.3554
+new_RTT_at: 22987.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.44238 target= 1.37218 rtt= 30.9288
+
+debug1:sec: 23 throughput: 2.98966 RTT: 35.0174
+new_RTT_at: 23017.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.29383 target= 24.7092 rtt= 25.7642
+new_RTT_at: 23050.6 cur_dir= 7 prev_v= 1 cur_v= 1 window= 7.96516 target= 10.3139 rtt= 28.4666
+new_RTT_at: 23125 cur_dir= -4 prev_v= 1 cur_v= 1 window= 6.31075 target= -42.814 rtt= 63.0432
+new_RTT_at: 23190.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.88185 target= -42.3732 rtt= 62.4356
+new_RTT_at: 23242.1 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.43551 target= -30.7271 rtt= 49.2255
+new_RTT_at: 23300.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= -23.3383 rtt= 43.1458
+new_RTT_at: 23361.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2.14414 target= -9.29265 rtt= 35.0068
+new_RTT_at: 23404.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 64.6041 rtt= 22.5367
+new_RTT_at: 23438.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2.78328 target= -0.742918 rtt= 31.6266
+new_RTT_at: 23469.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.13669 target= 46.7007 rtt= 23.4842
+new_RTT_at: 23500.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.47131 target= 25.3134 rtt= 25.6767
+new_RTT_at: 23572.3 cur_dir= -1 prev_v= 1 cur_v= 1 window= 7.2058 target= -44.726 rtt= 65.7854
+new_RTT_at: 23629.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.59188 target= -36.28 rtt= 54.8884
+new_RTT_at: 23784.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.38159 target= -77.4526 rtt= 153.579
+new_RTT_at: 23828.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.3255 target= -14.3696 rtt= 37.5203
+new_RTT_at: 23876.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 4.22254 rtt= 30.0629
+new_RTT_at: 23907.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.17872 target= 4.22254 rtt= 30.0629
+new_RTT_at: 23945 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.90392 target= -11.1955 rtt= 35.8994
+new_RTT_at: 23991.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 27.1917 rtt= 25.4157
+
+debug1:sec: 24 throughput: 0.995745 RTT: 50.4462
+new_RTT_at: 24017.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.55872 target= 52.349 rtt= 23.1224
+new_RTT_at: 24053.8 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.87072 target= 4.78486 rtt= 29.9016
+new_RTT_at: 24099.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 6.33347 target= -24.5211 rtt= 44.0212
+new_RTT_at: 24141.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.06778 target= -19.6012 rtt= 40.596
+new_RTT_at: 24201.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 2.87438 target= 15.3673 rtt= 27.3674
+new_RTT_at: 24226.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.32577 target= 31.7586 rtt= 24.8452
+new_RTT_at: 24266.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 7.91461 target= 1.80458 rtt= 30.7921
+new_RTT_at: 24307.2 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.90358 target= -16.5942 rtt= 38.7629
+new_RTT_at: 24345.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.32787 target= 0.445336 rtt= 31.2285
+new_RTT_at: 24378.3 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.08329 target= 21.5831 rtt= 26.2461
+new_RTT_at: 24413.9 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.87379 target= 1.4976 rtt= 30.8889
+new_RTT_at: 24457.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.82696 target= -19.2451 rtt= 40.3692
+new_RTT_at: 24492.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.43625 target= -4.02512 rtt= 32.8118
+new_RTT_at: 24526.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.14457 target= 23.2463 rtt= 25.9835
+new_RTT_at: 24557.3 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.77524 target= 11.9041 rtt= 28.1006
+new_RTT_at: 24596.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 6.49815 target= -16.6243 rtt= 38.7804
+new_RTT_at: 24637.2 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.68659 target= -16.0889 rtt= 38.4725
+new_RTT_at: 24678.2 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.24892 target= -2.03626 rtt= 32.0782
+new_RTT_at: 24752.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 115.022 rtt= 21.5921
+new_RTT_at: 24780.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.34789 target= 43.0276 rtt= 23.7588
+new_RTT_at: 24813.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.54169 target= 0.047125 rtt= 31.3602
+new_RTT_at: 24863.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.24262 target= -29.5815 rtt= 48.1821
+new_RTT_at: 24912.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.45035 target= -25.6494 rtt= 44.8892
+new_RTT_at: 24949.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.42828 target= -8.2059 rtt= 34.5219
+new_RTT_at: 25035.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 19.4601 rtt= 26.6033
+
+debug1:sec: 25 throughput: 1.46869 RTT: 36.0067
+new_RTT_at: 25072.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.61429 target= -13.1716 rtt= 36.8883
+new_RTT_at: 25124.7 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.71511 target= -23.4507 rtt= 43.2275
+new_RTT_at: 25183.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 3.21694 rtt= 30.3591
+new_RTT_at: 25214.7 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.04405 target= 16.8574 rtt= 27.0771
+new_RTT_at: 25246.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.97326 target= -0.37075 rtt= 31.5002
+new_RTT_at: 25296.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 4.80923 target= -22.4793 rtt= 42.5313
+new_RTT_at: 25333.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.17865 target= -7.15981 rtt= 34.0714
+new_RTT_at: 25368.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.2168 target= 29.7917 rtt= 25.0803
+new_RTT_at: 25400.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.74852 target= 22.915 rtt= 26.0347
+new_RTT_at: 25442.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.81324 target= -11.5929 rtt= 36.0931
+new_RTT_at: 25481.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.12581 target= -13.5356 rtt= 37.0776
+new_RTT_at: 25523.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.17752 target= 2.54427 rtt= 30.5628
+new_RTT_at: 25557.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.63632 target= 8.11974 rtt= 29.0047
+new_RTT_at: 25599.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.19019 target= -15.5816 rtt= 38.1859
+new_RTT_at: 25636.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.18215 target= -4.04452 rtt= 32.8192
+new_RTT_at: 25674.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 3.31001 target= 51.9167 rtt= 23.1477
+new_RTT_at: 25700.6 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.26207 target= 43.28 rtt= 23.7389
+new_RTT_at: 25737.5 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.50972 target= -0.332257 rtt= 31.4873
+new_RTT_at: 25786.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.71178 target= -26.1343 rtt= 45.2723
+new_RTT_at: 25828.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.97117 target= -19.6686 rtt= 40.6393
+new_RTT_at: 25865.1 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.55056 target= -8.618 rtt= 34.7037
+new_RTT_at: 25900.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 53.5819 rtt= 23.0521
+new_RTT_at: 25927.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.72892 target= 39.9576 rtt= 24.0156
+new_RTT_at: 25966.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 6.48715 target= -5.20591 rtt= 33.2709
+
+debug1:sec: 26 throughput: 1.37778 RTT: 34.8328
+new_RTT_at: 26020.8 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.08257 target= -28.9421 rtt= 47.6168
+new_RTT_at: 26064.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2 target= -13.7609 rtt= 37.196
+new_RTT_at: 26119.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 21.4803 rtt= 26.2629
+new_RTT_at: 26146.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.40154 target= 17.7325 rtt= 26.9132
+new_RTT_at: 26185.7 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.62461 target= -15.8612 rtt= 38.3432
+new_RTT_at: 26235.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.24171 target= -14.695 rtt= 37.6963
+new_RTT_at: 26294.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 27.5351 rtt= 25.3697
+new_RTT_at: 26321.6 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.27435 target= 16.9133 rtt= 27.0665
+new_RTT_at: 26357.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 7.31223 target= -11.0296 rtt= 35.8193
+new_RTT_at: 26406.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 4.40406 target= -16.6229 rtt= 38.7795
+new_RTT_at: 26446.9 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.19604 target= -5.38729 rtt= 33.343
+new_RTT_at: 26485.4 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.17326 target= 33.7202 rtt= 24.6256
+new_RTT_at: 26514.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 5.177 target= 17.5065 rtt= 26.955
+new_RTT_at: 26556.9 cur_dir= 0 prev_v= 1 cur_v= 1 window= 6.71206 target= -12.8137 rtt= 36.7043
+new_RTT_at: 26605.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 4.68587 target= -22.0412 rtt= 42.2246
+new_RTT_at: 26642.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.68072 target= -11.6909 rtt= 36.1412
+new_RTT_at: 26677.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.1083 target= 25.029 rtt= 25.7177
+new_RTT_at: 26702.8 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.04351 target= 48.6189 rtt= 23.3536
+new_RTT_at: 26742.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.09132 target= -2.73449 rtt= 32.3302
+new_RTT_at: 26803.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 4.93275 target= -27.6435 rtt= 46.5052
+new_RTT_at: 26843.9 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.22928 target= -17.6445 rtt= 39.3824
+new_RTT_at: 26877.5 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.95012 target= 29.3028 rtt= 25.1412
+new_RTT_at: 26908.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.37765 target= 45.6015 rtt= 23.5629
+new_RTT_at: 26949.5 cur_dir= 3 prev_v= 1 cur_v= 2 window= 7.52137 target= -11.1759 rtt= 35.8899
+new_RTT_at: 26994 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.53915 target= -22.7986 rtt= 42.7577
+
+debug1:sec: 27 throughput: 1.40073 RTT: 35.547
+new_RTT_at: 27038.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.76386 target= -14.5621 rtt= 37.6242
+new_RTT_at: 27072.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.67787 target= 5.55139 rtt= 29.6865
+new_RTT_at: 27100.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.57322 target= 46.4982 rtt= 23.4985
+new_RTT_at: 27130.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.46104 target= 24.2442 rtt= 25.8327
+new_RTT_at: 27170.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 7.1544 target= -11.3728 rtt= 35.9855
+new_RTT_at: 27213.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.34483 target= -18.5543 rtt= 39.9369
+new_RTT_at: 27254.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.43101 target= -3.13067 rtt= 32.4758
+new_RTT_at: 27297.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.36057 target= 17.9802 rtt= 26.8676
+new_RTT_at: 27330.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.891 target= 17.6075 rtt= 26.9363
+new_RTT_at: 27368.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.5422 target= -6.40684 rtt= 33.7567
+new_RTT_at: 27408.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.60313 target= -12.4305 rtt= 36.5098
+new_RTT_at: 27446.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.85252 target= 5.56259 rtt= 29.6834
+new_RTT_at: 27473.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.71864 target= 21.517 rtt= 26.2569
+new_RTT_at: 27504.6 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.05279 target= 18.9527 rtt= 26.6925
+new_RTT_at: 27543.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 9.90315 target= -8.21905 rtt= 34.5276
+new_RTT_at: 27588.7 cur_dir= -11 prev_v= 1 cur_v= 1 window= 7.76405 target= -19.7152 rtt= 40.6692
+new_RTT_at: 27624.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.42803 target= -6.76341 rtt= 33.9047
+new_RTT_at: 27658.9 cur_dir= -1 prev_v= 1 cur_v= 1 window= 5.45288 target= 15.7419 rtt= 27.293
+new_RTT_at: 27691.3 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.89605 target= 18.6002 rtt= 26.7553
+new_RTT_at: 27728.6 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.87568 target= -4.12836 rtt= 32.8512
+new_RTT_at: 27771.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.41973 target= -20.7422 rtt= 41.3411
+new_RTT_at: 27812.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.33927 target= -8.3211 rtt= 34.5724
+new_RTT_at: 27857.3 cur_dir= -7 prev_v= 1 cur_v= 1 window= 2.46572 target= -9.59332 rtt= 35.1441
+new_RTT_at: 27894.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.81795 target= 56.8809 rtt= 22.8775
+new_RTT_at: 27926.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 6.05937 target= 12.45 rtt= 27.9793
+new_RTT_at: 27962.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 8.20675 target= -3.72052 rtt= 32.6962
+
+debug1:sec: 28 throughput: 1.96667 RTT: 33.7174
+new_RTT_at: 28016.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 5.65297 target= -28.5146 rtt= 47.2456
+new_RTT_at: 28052.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.72796 target= -7.066 rtt= 34.0317
+new_RTT_at: 28077.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.16622 target= 59.6961 rtt= 22.743
+new_RTT_at: 28109.7 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.38644 target= 16.7687 rtt= 27.0939
+new_RTT_at: 28149.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 8.57701 target= -11.5844 rtt= 36.0889
+new_RTT_at: 28195.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.55923 target= -20.1638 rtt= 40.9599
+new_RTT_at: 28229.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.58182 target= 1.65714 rtt= 30.8385
+new_RTT_at: 28261.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 6.02747 target= 8.88497 rtt= 28.8125
+new_RTT_at: 28290.5 cur_dir= 7 prev_v= 1 cur_v= 1 window= 7.28309 target= 20.0962 rtt= 26.4936
+new_RTT_at: 28326.9 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.34192 target= -0.660558 rtt= 31.5985
+new_RTT_at: 28370.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.11339 target= -17.5709 rtt= 39.3383
+new_RTT_at: 28416.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.98205 target= -12.6869 rtt= 36.6396
+new_RTT_at: 28451 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.06629 target= -1.6906 rtt= 31.9556
+new_RTT_at: 28493.8 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.76382 target= 7.28303 rtt= 29.2204
+new_RTT_at: 28526.9 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.10162 target= 9.04872 rtt= 28.772
+new_RTT_at: 28571 cur_dir= -5 prev_v= 1 cur_v= 1 window= 6.24119 target= -15.9846 rtt= 38.4132
+new_RTT_at: 28614.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.04978 target= -12.4382 rtt= 36.5136
+new_RTT_at: 28648.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.44777 target= 8.83015 rtt= 28.8261
+new_RTT_at: 28674.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.08176 target= 24.1855 rtt= 25.8415
+new_RTT_at: 28703.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.97809 target= 20.5345 rtt= 26.4194
+new_RTT_at: 28739.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 7.82119 target= -7.41672 rtt= 34.1805
+new_RTT_at: 28775.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.49221 target= -10.3898 rtt= 35.5145
+new_RTT_at: 28805.4 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.19282 target= 9.67602 rtt= 28.619
+new_RTT_at: 28833.8 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.77043 target= 33.7668 rtt= 24.6206
+new_RTT_at: 28868.4 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.573 target= 5.89653 rtt= 29.5915
+new_RTT_at: 28910.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 8.368 target= -14.972 rtt= 37.8477
+new_RTT_at: 28949.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.9338 target= -10.6498 rtt= 35.6376
+new_RTT_at: 28983.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.41138 target= 3.37307 rtt= 30.3124
+
+debug1:sec: 29 throughput: 2.24743 RTT: 34.0977
+new_RTT_at: 29013.6 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.89111 target= 28.6436 rtt= 25.2248
+new_RTT_at: 29049.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.3548 target= -0.792118 rtt= 31.6434
+new_RTT_at: 29090.9 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.03455 target= -17.5441 rtt= 39.3223
+new_RTT_at: 29123.2 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.00535 target= -2.52539 rtt= 32.2541
+new_RTT_at: 29152.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.98372 target= 11.015 rtt= 28.3028
+new_RTT_at: 29179.6 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.17332 target= 38.4442 rtt= 24.1522
+new_RTT_at: 29215.9 cur_dir= 8 prev_v= 1 cur_v= 2 window= 9.99439 target= 4.30074 rtt= 30.0403
+new_RTT_at: 29260.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.5969 target= -17.8288 rtt= 39.4934
+new_RTT_at: 29298.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.56997 target= -12.9414 rtt= 36.7697
+new_RTT_at: 29331.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.41952 target= 10.7977 rtt= 28.3532
+new_RTT_at: 29356.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.74451 target= 72.3049 rtt= 22.2739
+new_RTT_at: 29388.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.32343 target= 29.8955 rtt= 25.0675
+new_RTT_at: 29430.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 9.55382 target= -15.3408 rtt= 38.0515
+new_RTT_at: 29472.7 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.50278 target= -20.0546 rtt= 40.8887
+new_RTT_at: 29510.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.84409 target= -8.99479 rtt= 34.8721
+new_RTT_at: 29537.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 5.18888 target= 23.4857 rtt= 25.9469
+new_RTT_at: 29564.6 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.87846 target= 42.8141 rtt= 23.7758
+new_RTT_at: 29600.6 cur_dir= 4 prev_v= 1 cur_v= 2 window= 9.69444 target= 0.338193 rtt= 31.2638
+new_RTT_at: 29647.6 cur_dir= -10 prev_v= 1 cur_v= 1 window= 7.17983 target= -24.9659 rtt= 44.3595
+new_RTT_at: 29690.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.09182 target= -20.0572 rtt= 40.8904
+new_RTT_at: 29725.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.05497 target= 1.94947 rtt= 30.7467
+new_RTT_at: 29756.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.3618 target= 26.5739 rtt= 25.4997
+new_RTT_at: 29789.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.80866 target= 15.0623 rtt= 27.4286
+new_RTT_at: 29830.6 cur_dir= -2 prev_v= 1 cur_v= 1 window= 8.35874 target= -16.3098 rtt= 38.5989
+new_RTT_at: 29873.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.17494 target= -18.5921 rtt= 39.9603
+new_RTT_at: 29911.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.02047 target= 1.16751 rtt= 30.9942
+new_RTT_at: 29944.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 3.98451 target= 90.6557 rtt= 21.863
+new_RTT_at: 29976.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.24027 target= 28.9163 rtt= 25.19
+
+debug1:sec: 30 throughput: 2.26704 RTT: 34.2615
+new_RTT_at: 30018.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 10.7369 target= -10.811 rtt= 35.7144
+new_RTT_at: 30064.4 cur_dir= -11 prev_v= 1 cur_v= 1 window= 8.56795 target= -24.8263 rtt= 44.2528
+new_RTT_at: 30103.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.49498 target= -16.3447 rtt= 38.6189
+new_RTT_at: 30137.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 4.79938 target= 0.471 rtt= 31.2201
+new_RTT_at: 30169.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.48557 target= 68.8616 rtt= 22.3831
+new_RTT_at: 30197.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.89013 target= 37.152 rtt= 24.2744
+new_RTT_at: 30238.9 cur_dir= 1 prev_v= 1 cur_v= 2 window= 11.1786 target= -11.7157 rtt= 36.1534
+new_RTT_at: 30291.5 cur_dir= -12 prev_v= 1 cur_v= 1 window= 8.88177 target= -28.1826 rtt= 46.9608
+new_RTT_at: 30335.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.34757 target= -20.4555 rtt= 41.1512
+new_RTT_at: 30370.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.29689 target= -5.99331 rtt= 33.5872
+new_RTT_at: 30397.2 cur_dir= 1 prev_v= 1 cur_v= 1 window= 6.6088 target= 31.4604 rtt= 24.8799
+new_RTT_at: 30423.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 7.80729 target= 74.9673 rtt= 22.1976
+new_RTT_at: 30456.5 cur_dir= 8 prev_v= 2 cur_v= 4 window= 10.2642 target= 5.91944 rtt= 29.5852
+new_RTT_at: 30500.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 9.5195 target= -17.8803 rtt= 39.5245
+new_RTT_at: 30540.6 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.44846 target= -15.4649 rtt= 38.1206
+new_RTT_at: 30574.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.38985 target= -3.60079 rtt= 32.6511
+new_RTT_at: 30606 cur_dir= -5 prev_v= 1 cur_v= 1 window= 7.28024 target= 4.87721 rtt= 29.8754
+new_RTT_at: 30637.4 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.40389 target= 14.6004 rtt= 27.5225
+new_RTT_at: 30670.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 9.25794 target= -0.166535 rtt= 31.4316
+new_RTT_at: 30710.4 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.07957 target= -13.5441 rtt= 37.0821
+new_RTT_at: 30752.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.03083 target= -1.52487 rtt= 31.8973
+new_RTT_at: 30784.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.94519 target= 27.8493 rtt= 25.3281
+new_RTT_at: 30818.4 cur_dir= 8 prev_v= 1 cur_v= 1 window= 7.65896 target= 11.5383 rtt= 28.183
+new_RTT_at: 30858.9 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.55323 target= -8.58716 rtt= 34.69
+new_RTT_at: 30898.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.99689 target= -15.1203 rtt= 37.9293
+new_RTT_at: 30937.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.44505 target= -3.7368 rtt= 32.7024
+new_RTT_at: 30968.8 cur_dir= 2 prev_v= 1 cur_v= 1 window= 6.62448 target= 32.908 rtt= 24.7148
+new_RTT_at: 30999.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.23569 target= 24.8908 rtt= 25.7377
+
+debug1:sec: 31 throughput: 2.63161 RTT: 34.8055
+new_RTT_at: 31039.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.71517 target= -15.1081 rtt= 37.9226
+new_RTT_at: 31085.9 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.14535 target= -23.4442 rtt= 43.2228
+new_RTT_at: 31129.9 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.58127 target= -23.4431 rtt= 43.2219
+new_RTT_at: 31166.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.10701 target= -5.09905 rtt= 33.2286
+new_RTT_at: 31198.8 cur_dir= -3 prev_v= 1 cur_v= 1 window= 5.65084 target= 9.47906 rtt= 28.6667
+new_RTT_at: 31223.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 6.48355 target= 142.028 rtt= 21.4638
+new_RTT_at: 31256.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.39224 target= 12.2182 rtt= 28.0305
+new_RTT_at: 31296.6 cur_dir= -2 prev_v= 1 cur_v= 1 window= 7.96585 target= -8.86855 rtt= 34.8155
+new_RTT_at: 31336.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.24942 target= -15.3423 rtt= 38.0523
+new_RTT_at: 31373.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.39115 target= -8.93306 rtt= 34.8444
+new_RTT_at: 31404.9 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.59181 target= 2.74975 rtt= 30.5001
+new_RTT_at: 31432.7 cur_dir= 3 prev_v= 1 cur_v= 1 window= 6.22139 target= 25.7797 rtt= 25.6104
+new_RTT_at: 31465.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 7.09995 target= -1.64761 rtt= 31.9405
+new_RTT_at: 31509.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.21961 target= -12.2393 rtt= 36.4136
+new_RTT_at: 31550.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.42305 target= -15.1496 rtt= 37.9455
+new_RTT_at: 31585.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.66557 target= -0.0807921 rtt= 31.4029
+new_RTT_at: 31609 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.82935 target= 61.0242 rtt= 22.6838
+new_RTT_at: 31640 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.42184 target= 33.9598 rtt= 24.5998
+new_RTT_at: 31674.8 cur_dir= 6 prev_v= 2 cur_v= 4 window= 6.19028 target= 13.3951 rtt= 27.7745
+new_RTT_at: 31718.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 6.53709 target= -14.0743 rtt= 37.3621
+new_RTT_at: 31762.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.15646 target= -22.2965 rtt= 42.4906
+new_RTT_at: 31807.1 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.75113 target= -20.513 rtt= 41.277
+new_RTT_at: 31844.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.3976 target= -8.5181 rtt= 34.7473
+new_RTT_at: 31876.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.00718 target= 1.61165 rtt= 30.9407
+new_RTT_at: 31908.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.07863 target= 16.3904 rtt= 27.2544
+new_RTT_at: 31937.8 cur_dir= 6 prev_v= 1 cur_v= 2 window= 5.56518 target= 45.9193 rtt= 23.6277
+new_RTT_at: 31977.2 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.33141 target= -3.20355 rtt= 32.5907
+
+debug1:sec: 32 throughput: 2.09585 RTT: 34.1734
+new_RTT_at: 32018.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.92459 target= -15.4863 rtt= 38.2204
+new_RTT_at: 32055.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.31793 target= -7.92408 rtt= 34.4868
+new_RTT_at: 32091.1 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.4961 target= -6.3196 rtt= 33.8086
+new_RTT_at: 32123.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.64762 target= 11.0835 rtt= 28.3749
+new_RTT_at: 32150.4 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.45449 target= 46.4595 rtt= 23.5891
+new_RTT_at: 32183.2 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.3338 target= 8.40207 rtt= 29.0211
+new_RTT_at: 32227.2 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.71396 target= -17.1037 rtt= 39.1486
+new_RTT_at: 32266 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.99342 target= -10.1487 rtt= 35.4893
+new_RTT_at: 32302.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.2772 target= -8.25869 rtt= 34.6329
+new_RTT_at: 32336.4 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.53107 target= -0.513031 rtt= 31.6363
+new_RTT_at: 32361.8 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.03326 target= 89.3544 rtt= 21.9725
+new_RTT_at: 32388.4 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.67703 target= 20.8731 rtt= 26.4507
+new_RTT_at: 32421.6 cur_dir= 5 prev_v= 2 cur_v= 4 window= 6.41952 target= 4.04767 rtt= 30.2016
+new_RTT_at: 32463.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 6.57799 target= -11.3194 rtt= 36.0474
+new_RTT_at: 32502.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.85751 target= -9.37115 rtt= 35.1304
+new_RTT_at: 32536.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.14718 target= -1.97565 rtt= 32.1445
+new_RTT_at: 32574.3 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.62946 target= 9.6401 rtt= 28.7156
+new_RTT_at: 32621.8 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.46488 target= -24.4884 rtt= 44.0844
+new_RTT_at: 32652.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.68357 target= 16.2324 rtt= 27.285
+new_RTT_at: 32683.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.62331 target= 9.1813 rtt= 28.8273
+new_RTT_at: 32721.5 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.16885 target= -0.887262 rtt= 31.7639
+new_RTT_at: 32763.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.32501 target= -14.9471 rtt= 37.9219
+new_RTT_at: 32805.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.54282 target= -16.2374 rtt= 38.6452
+new_RTT_at: 32834.1 cur_dir= -2 prev_v= 1 cur_v= 1 window= 5.08721 target= 19.0481 rtt= 26.7635
+new_RTT_at: 32863.6 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.11801 target= 23.1737 rtt= 26.0825
+new_RTT_at: 32901.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 6.39095 target= -3.69031 rtt= 32.7727
+new_RTT_at: 32939.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.57098 target= -11.1479 rtt= 35.9642
+new_RTT_at: 32973.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.80236 target= -2.43826 rtt= 32.3105
+new_RTT_at: 33002.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 5.40473 target= 25.112 rtt= 25.7936
+
+debug1:sec: 33 throughput: 1.96484 RTT: 33.2321
+new_RTT_at: 33040.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.30488 target= 0.588949 rtt= 31.2694
+new_RTT_at: 33083.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.45959 target= -18.5685 rtt= 40.0336
+new_RTT_at: 33122.2 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.75325 target= -2.3449 rtt= 32.2768
+new_RTT_at: 33152.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.6809 target= 17.5407 rtt= 27.0366
+new_RTT_at: 33180.6 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.548 target= 21.9469 rtt= 26.2753
+new_RTT_at: 33214.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.39607 target= 7.28812 rtt= 29.307
+new_RTT_at: 33256.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.81418 target= -13.85 rtt= 37.331
+new_RTT_at: 33294.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.11779 target= -6.49416 rtt= 33.8807
+new_RTT_at: 33334.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.31568 target= -0.732158 rtt= 31.7108
+new_RTT_at: 33363.8 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.74583 target= 14.0366 rtt= 27.727
+new_RTT_at: 33392.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.57359 target= 13.5217 rtt= 27.8354
+new_RTT_at: 33423 cur_dir= 5 prev_v= 2 cur_v= 4 window= 6.99037 target= 4.16848 rtt= 30.1665
+new_RTT_at: 33459.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 7.09657 target= -3.64535 rtt= 32.7558
+new_RTT_at: 33497.8 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.41141 target= -13.2925 rtt= 37.0388
+new_RTT_at: 33537.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.63311 target= -7.77461 rtt= 34.4221
+new_RTT_at: 33569.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.87576 target= 3.72183 rtt= 30.297
+new_RTT_at: 33598.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.59896 target= 34.962 rtt= 24.5818
+new_RTT_at: 33631.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.43653 target= 8.46611 rtt= 29.005
+new_RTT_at: 33666.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 7.44371 target= -1.32811 rtt= 31.9164
+new_RTT_at: 33703.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.66584 target= -9.08134 rtt= 34.999
+new_RTT_at: 33738.1 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.88382 target= -3.14951 rtt= 32.5707
+new_RTT_at: 33767.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.90647 target= 17.2682 rtt= 27.0874
+new_RTT_at: 33800 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.90678 target= 3.48743 rtt= 30.3663
+new_RTT_at: 33833.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.12359 target= -2.57712 rtt= 32.3608
+new_RTT_at: 33874.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.30444 target= 1.39987 rtt= 31.0079
+new_RTT_at: 33914.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.92487 target= 14.9018 rtt= 27.549
+new_RTT_at: 33948.6 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.79652 target= 10.7106 rtt= 28.4614
+new_RTT_at: 33986.5 cur_dir= 2 prev_v= 1 cur_v= 2 window= 6.17645 target= -12.7996 rtt= 36.785
+
+debug1:sec: 34 throughput: 2.0322 RTT: 32.4439
+new_RTT_at: 34033.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.22913 target= -18.7078 rtt= 40.12
+new_RTT_at: 34073.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.44653 target= -10.6453 rtt= 35.7234
+new_RTT_at: 34109.1 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.61868 target= 3.3248 rtt= 30.4147
+new_RTT_at: 34137.6 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.39792 target= 36.4793 rtt= 24.428
+new_RTT_at: 34175.7 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.52359 target= 3.37935 rtt= 30.3985
+new_RTT_at: 34219.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.4908 target= -16.9259 rtt= 39.0441
+new_RTT_at: 34261.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.69445 target= -19.6853 rtt= 40.7379
+new_RTT_at: 34300.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.93001 target= -7.39693 rtt= 34.26
+new_RTT_at: 34329.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.49487 target= 14.2428 rtt= 27.6841
+new_RTT_at: 34358.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.56689 target= 19.0482 rtt= 26.7635
+new_RTT_at: 34392.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.51094 target= 2.53964 rtt= 30.6521
+new_RTT_at: 34435.9 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.6786 target= -14.6622 rtt= 37.7664
+new_RTT_at: 34473.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.89271 target= -6.50529 rtt= 33.8853
+new_RTT_at: 34510.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.22422 target= 1.68966 rtt= 30.9161
+new_RTT_at: 34546 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.21437 target= 12.6974 rtt= 28.0129
+new_RTT_at: 34583.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.35743 target= 1.27218 rtt= 31.0486
+new_RTT_at: 34628.9 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.36033 target= -22.0771 rtt= 42.3375
+new_RTT_at: 34669.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.61785 target= -7.68136 rtt= 34.3819
+new_RTT_at: 34697.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2.91125 target= 17.8225 rtt= 26.9845
+new_RTT_at: 34733.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.66115 target= 9.52898 rtt= 28.7425
+new_RTT_at: 34774.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.24626 target= -12.5147 rtt= 36.6402
+new_RTT_at: 34823.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.35867 target= -4.40243 rtt= 33.0444
+new_RTT_at: 34857 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.67268 target= 25.8951 rtt= 25.682
+new_RTT_at: 34894.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.03693 target= -0.97437 rtt= 31.7939
+new_RTT_at: 34937.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.15026 target= -12.0035 rtt= 36.3838
+new_RTT_at: 34983.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.56033 target= 2.34308 rtt= 30.7125
+new_RTT_at: 35014.1 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.49674 target= 6.34964 rtt= 29.5562
+
+debug1:sec: 35 throughput: 1.37852 RTT: 33.8879
+new_RTT_at: 35045.8 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.38255 target= 11.8863 rtt= 28.1924
+new_RTT_at: 35087.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 4.42187 target= -9.21462 rtt= 35.0593
+new_RTT_at: 35133.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.58142 target= -21.5821 rtt= 41.9958
+new_RTT_at: 35172.9 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.78413 target= -12.1902 rtt= 36.4769
+new_RTT_at: 35207 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 7.22784 rtt= 29.3228
+new_RTT_at: 35241.8 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.22009 target= 11.4405 rtt= 28.2932
+new_RTT_at: 35276.7 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.47656 target= 2.30689 rtt= 30.7236
+new_RTT_at: 35317.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.42357 target= -14.2158 rtt= 37.5256
+new_RTT_at: 35354.9 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.69027 target= -8.44956 rtt= 34.717
+new_RTT_at: 35390.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.62071 target= 8.13778 rtt= 29.088
+new_RTT_at: 35418.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.44767 target= 46.454 rtt= 23.5895
+new_RTT_at: 35449.3 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.59117 target= 8.10421 rtt= 29.0965
+new_RTT_at: 35490.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 4.25958 target= -10.5427 rtt= 35.6747
+new_RTT_at: 35550.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.29786 target= -18.9706 rtt= 40.2841
+new_RTT_at: 35599.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.48587 target= -6.61291 rtt= 33.9299
+new_RTT_at: 35642.9 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 2.80933 rtt= 30.5698
+new_RTT_at: 35674.3 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.44066 target= 43.4334 rtt= 23.8147
+new_RTT_at: 35706.5 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.77709 target= 10.3209 rtt= 28.5529
+new_RTT_at: 35750.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.59083 target= -13.883 rtt= 37.3484
+new_RTT_at: 35787.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.76369 target= -5.00728 rtt= 33.2802
+new_RTT_at: 35822.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.29667 target= 22.0878 rtt= 26.2528
+new_RTT_at: 35845.7 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.39472 target= 53.175 rtt= 23.1629
+new_RTT_at: 35900.1 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.40061 target= -32.8199 rtt= 51.3256
+new_RTT_at: 35945.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.59786 target= -24.3172 rtt= 43.9558
+new_RTT_at: 35981 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.914 target= -4.16539 rtt= 32.9532
+
+debug1:sec: 36 throughput: 1.09715 RTT: 33.9772
+new_RTT_at: 36016.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 3.03197 target= 12.894 rtt= 27.9702
+new_RTT_at: 36045.6 cur_dir= 4 prev_v= 1 cur_v= 1 window= 3.97887 target= 20.9176 rtt= 26.4433
+new_RTT_at: 36076.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.53051 target= 2.56764 rtt= 30.6435
+new_RTT_at: 36114.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 4.0554 target= -5.09158 rtt= 33.3135
+new_RTT_at: 36169.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.27762 target= -17.2294 rtt= 39.2229
+new_RTT_at: 36209.1 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.43844 target= -0.18567 rtt= 31.5259
+new_RTT_at: 36257.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -23.8236 rtt= 43.5887
+new_RTT_at: 36283.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 160.086 rtt= 21.5119
+new_RTT_at: 36314.7 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.71712 target= 54.6132 rtt= 23.0833
+new_RTT_at: 36342.9 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.70991 target= 21.938 rtt= 26.2768
+new_RTT_at: 36377.4 cur_dir= 4 prev_v= 2 cur_v= 4 window= 5.59335 target= 6.02703 rtt= 29.6437
+new_RTT_at: 36427.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 6.28365 target= -24.1225 rtt= 43.8102
+new_RTT_at: 36474.8 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.54024 target= -26.574 rtt= 45.713
+new_RTT_at: 36516.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.74587 target= -19.3757 rtt= 40.54
+new_RTT_at: 36553.3 cur_dir= -4 prev_v= 1 cur_v= 1 window= 4.50666 target= -11.6868 rtt= 36.2271
+new_RTT_at: 36596.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.50868 target= -3.37085 rtt= 32.653
+new_RTT_at: 36633.5 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.15731 target= -1.7733 rtt= 32.0727
+new_RTT_at: 36675.9 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.13449 target= -5.84401 rtt= 33.6145
+new_RTT_at: 36719.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.3194 target= 15.5108 rtt= 27.4267
+new_RTT_at: 36749.4 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.37652 target= 7.80077 rtt= 29.1741
+new_RTT_at: 36787.9 cur_dir= 0 prev_v= 1 cur_v= 1 window= 4.26066 target= -3.25592 rtt= 32.6102
+new_RTT_at: 36828.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.44009 target= -15.2618 rtt= 38.0955
+new_RTT_at: 36862.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.76797 target= -5.85568 rtt= 33.6192
+new_RTT_at: 36902.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -7.09988 rtt= 34.1339
+new_RTT_at: 36933.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 18.2034 rtt= 26.9148
+new_RTT_at: 36967.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.54204 target= 40.6417 rtt= 24.044
+new_RTT_at: 37000.8 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.82333 target= 9.50819 rtt= 28.7475
+
+debug1:sec: 37 throughput: 1.16929 RTT: 34.5129
+new_RTT_at: 37038.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.76776 target= -13.2069 rtt= 36.9944
+new_RTT_at: 37077.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.2026 target= -15.149 rtt= 38.0331
+new_RTT_at: 37118.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.42959 target= -3.75528 rtt= 32.7973
+new_RTT_at: 37156.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 25.8444 rtt= 25.6891
+new_RTT_at: 37192.7 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.30977 target= 20.804 rtt= 26.4622
+new_RTT_at: 37235.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.91255 target= -16.6694 rtt= 38.8944
+new_RTT_at: 37274.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.23457 target= -15.247 rtt= 38.0873
+new_RTT_at: 37310.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 3.64632 rtt= 30.3193
+new_RTT_at: 37342.6 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 7.30323 rtt= 29.303
+new_RTT_at: 37382.4 cur_dir= 2 prev_v= 1 cur_v= 2 window= 2.7852 target= -6.08451 rtt= 33.7123
+new_RTT_at: 37424.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -12.27 rtt= 36.5169
+new_RTT_at: 37470.3 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 10.6864 rtt= 28.467
+new_RTT_at: 37499 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.62227 target= 14.1252 rtt= 27.7085
+new_RTT_at: 37538.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.44058 target= -6.82237 rtt= 34.0172
+new_RTT_at: 37577.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.64229 target= -7.408 rtt= 34.2647
+new_RTT_at: 37610.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 4.839 rtt= 29.9741
+new_RTT_at: 37647.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.59092 target= 18.752 rtt= 26.816
+new_RTT_at: 37679.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.43735 target= 3.39405 rtt= 30.3941
+new_RTT_at: 37717.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 3.19348 target= -8.56391 rtt= 34.7676
+new_RTT_at: 37754.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.39231 target= -1.16924 rtt= 31.8612
+new_RTT_at: 37795.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 1.54478 rtt= 30.9619
+new_RTT_at: 37823 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2 target= 32.1328 rtt= 24.8901
+new_RTT_at: 37856.7 cur_dir= 2 prev_v= 1 cur_v= 2 window= 2.81675 target= 8.52898 rtt= 28.9892
+new_RTT_at: 37887.6 cur_dir= 3 prev_v= 2 cur_v= 4 window= 4.92033 target= 1.83045 rtt= 30.8719
+new_RTT_at: 37940.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.84646 target= -18.3716 rtt= 39.9121
+new_RTT_at: 37985 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.18162 target= -4.57013 rtt= 33.1093
+
+debug1:sec: 38 throughput: 0.958639 RTT: 33.5074
+new_RTT_at: 38022.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.23407 target= 7.87342 rtt= 29.1554
+new_RTT_at: 38052.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.18202 target= 52.3149 rtt= 23.2123
+new_RTT_at: 38082.5 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.3214 target= 38.9709 rtt= 24.1917
+new_RTT_at: 38129.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 3.90903 target= -12.1994 rtt= 36.4815
+new_RTT_at: 38178.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.17035 target= -26.6694 rtt= 45.7903
+new_RTT_at: 38229.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.47398 target= -11.833 rtt= 36.2992
+new_RTT_at: 38280.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 21.077 rtt= 26.4169
+new_RTT_at: 38316.3 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.7863 target= 2.53829 rtt= 30.6525
+new_RTT_at: 38355.3 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.63817 target= -14.3948 rtt= 37.6217
+new_RTT_at: 38393 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -6.09292 rtt= 33.7157
+new_RTT_at: 38424.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 12.78 rtt= 27.9949
+new_RTT_at: 38448.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.38403 target= 45.1186 rtt= 23.6863
+new_RTT_at: 38481.8 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.30223 target= 26.9707 rtt= 25.5334
+new_RTT_at: 38524.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.89826 target= -13.3971 rtt= 37.0932
+new_RTT_at: 38567.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.24108 target= -16.4246 rtt= 38.7528
+new_RTT_at: 38610.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.44009 target= -9.33769 rtt= 35.1152
+new_RTT_at: 38647.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 7.68266 rtt= 29.2045
+new_RTT_at: 38672.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.40757 target= 57.9362 rtt= 22.9135
+new_RTT_at: 38704.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.39833 target= 40.4381 rtt= 24.0615
+new_RTT_at: 38741.4 cur_dir= 1 prev_v= 1 cur_v= 2 window= 4.09579 target= -11.9831 rtt= 36.3736
+new_RTT_at: 38786.1 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.29835 target= -16.4641 rtt= 38.7756
+new_RTT_at: 38820.2 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.49876 target= -4.2532 rtt= 32.9869
+new_RTT_at: 38847.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.12268 target= 24.6431 rtt= 25.8618
+new_RTT_at: 38883.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.2519 target= 15.2809 rtt= 27.4726
+new_RTT_at: 38927.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.86301 target= -20.7407 rtt= 41.428
+new_RTT_at: 38961.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.66038 target= -4.31731 rtt= 33.0116
+new_RTT_at: 39009.3 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 13.3653 rtt= 27.8687
+
+debug1:sec: 39 throughput: 0.979136 RTT: 32.9785
+new_RTT_at: 39034.9 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.27595 target= 66.0035 rtt= 22.5717
+new_RTT_at: 39067.5 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.34316 target= 3.36271 rtt= 30.4034
+new_RTT_at: 39111.6 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.06341 target= -18.4177 rtt= 39.9404
+new_RTT_at: 39164 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.24864 target= 5.22011 rtt= 29.8667
+new_RTT_at: 39204.7 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.84523 target= -9.64649 rtt= 35.2564
+new_RTT_at: 39238.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.32399 target= -0.611662 rtt= 31.6698
+new_RTT_at: 39290.1 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.55378 target= 0.886859 rtt= 31.1725
+new_RTT_at: 39330.6 cur_dir= 1 prev_v= 1 cur_v= 2 window= 2.32506 target= 3.21073 rtt= 30.4488
+new_RTT_at: 39367.6 cur_dir= 3 prev_v= 2 cur_v= 4 window= 4.48234 target= -6.36276 rtt= 33.8264
+new_RTT_at: 39409.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.56325 target= -15.4305 rtt= 38.1893
+new_RTT_at: 39456.9 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.5423 target= -3.61623 rtt= 32.7448
+new_RTT_at: 39492.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.35931 target= 21.8032 rtt= 26.2984
+new_RTT_at: 39519.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.33424 target= 24.0653 rtt= 25.9473
+new_RTT_at: 39552.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.17952 target= 3.0975 rtt= 30.4828
+new_RTT_at: 39595.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 4.22864 target= -14.6975 rtt= 37.7856
+new_RTT_at: 39635.1 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.47359 target= -15.5453 rtt= 38.2534
+new_RTT_at: 39670.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.7471 target= -9.52015 rtt= 35.1984
+new_RTT_at: 39704.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.32866 target= -0.979507 rtt= 31.7957
+new_RTT_at: 39742.3 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.2144 target= 18.821 rtt= 26.8037
+new_RTT_at: 39773.7 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.44457 target= 6.51073 rtt= 29.5129
+new_RTT_at: 39816.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.16504 target= -14.1244 rtt= 37.4767
+new_RTT_at: 39872.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.38418 target= -19.8863 rtt= 40.8675
+new_RTT_at: 39940.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= -26.0096 rtt= 45.2611
+new_RTT_at: 39985.3 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 0.383039 rtt= 31.3369
+new_RTT_at: 40009.6 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 37.6806 rtt= 24.3116
+
+debug1:sec: 40 throughput: 0.964156 RTT: 33.2473
+new_RTT_at: 40036.7 cur_dir= 1 prev_v= 1 cur_v= 2 window= 2 target= 17.855 rtt= 26.9785
+new_RTT_at: 40068.5 cur_dir= 2 prev_v= 2 cur_v= 4 window= 3.07853 target= -0.951689 rtt= 31.7861
+new_RTT_at: 40113.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= -9.85576 rtt= 35.353
+new_RTT_at: 40158.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 7.39575 rtt= 29.2789
+new_RTT_at: 40186.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.54455 target= 18.5078 rtt= 26.8598
+new_RTT_at: 40227.4 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.41898 target= -9.00699 rtt= 34.9655
+new_RTT_at: 40270.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.43943 target= -10.9597 rtt= 35.8736
+new_RTT_at: 40310.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -1.51897 rtt= 31.9831
+new_RTT_at: 40342.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2 target= 18.8139 rtt= 26.805
+new_RTT_at: 40380.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.46953 target= 5.12133 rtt= 29.8944
+new_RTT_at: 40418.4 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.11655 target= -9.62561 rtt= 35.2468
+new_RTT_at: 40468.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.27856 target= -7.28856 rtt= 34.2139
+new_RTT_at: 40513.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 3.73718 rtt= 30.2925
+new_RTT_at: 40541.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.35401 target= 13.0116 rtt= 27.9447
+new_RTT_at: 40577.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2.13915 target= -6.5942 rtt= 33.9221
+new_RTT_at: 40621.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 0.482174 rtt= 31.3043
+new_RTT_at: 40668.5 cur_dir= 0 prev_v= 1 cur_v= 1 window= 2 target= 17.2746 rtt= 27.0862
+new_RTT_at: 40708.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.00269 target= 1.7341 rtt= 30.9021
+new_RTT_at: 40751.9 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.49101 target= -9.76163 rtt= 35.3094
+new_RTT_at: 40787.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -5.17692 rtt= 33.3473
+new_RTT_at: 40820.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 8.4517 rtt= 29.0086
+new_RTT_at: 40845.3 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.35953 target= 35.7848 rtt= 24.4974
+new_RTT_at: 40875.8 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.28284 target= 18.553 rtt= 26.8517
+new_RTT_at: 40910.3 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.78318 target= -7.94525 rtt= 34.496
+new_RTT_at: 40960.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.15574 target= -16.9531 rtt= 39.0601
+new_RTT_at: 41005.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.33577 target= -12.0966 rtt= 36.4301
+
+debug1:sec: 41 throughput: 0.841341 RTT: 32.1582
+new_RTT_at: 41054.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 17.6723 rtt= 27.0122
+new_RTT_at: 41086.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.36278 target= 24.1032 rtt= 25.9416
+new_RTT_at: 41128.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -7.64847 rtt= 34.3677
+new_RTT_at: 41163.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 1.84212 rtt= 30.8682
+new_RTT_at: 41202.8 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.22369 target= 10.1035 rtt= 28.6044
+new_RTT_at: 41233.4 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.12954 target= 14.6235 rtt= 27.6538
+new_RTT_at: 41269.2 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.82412 target= -3.81494 rtt= 32.868
+new_RTT_at: 41318.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.04066 target= -15.5733 rtt= 38.3172
+new_RTT_at: 41365.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.00873 target= -4.40401 rtt= 33.0931
+new_RTT_at: 41417.1 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 38.6162 rtt= 24.2723
+new_RTT_at: 41445.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.75982 target= 26.6378 rtt= 25.627
+new_RTT_at: 41482.7 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.60437 target= -4.27962 rtt= 33.0452
+new_RTT_at: 41523.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.77264 target= -16.2283 rtt= 38.6882
+new_RTT_at: 41564.1 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -6.19338 rtt= 33.8049
+new_RTT_at: 41601.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 22.0561 rtt= 26.306
+new_RTT_at: 41632.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.70681 target= 8.26588 rtt= 29.1036
+new_RTT_at: 41670.9 cur_dir= 1 prev_v= 1 cur_v= 2 window= 2.77722 target= -9.4919 rtt= 35.2337
+new_RTT_at: 41711.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.33199 target= -5.83673 rtt= 33.6596
+new_RTT_at: 41752.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 17.2263 rtt= 27.1434
+new_RTT_at: 41790.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.80911 target= -0.00787697 rtt= 31.5145
+new_RTT_at: 41835.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -13.8919 rtt= 37.4013
+new_RTT_at: 41885.6 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -4.52535 rtt= 33.1401
+new_RTT_at: 41982.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 11.6257 rtt= 28.2993
+new_RTT_at: 42015.4 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.29119 target= -3.13171 rtt= 32.6123
+
+debug1:sec: 42 throughput: 0.759232 RTT: 32.3415
+new_RTT_at: 42069.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -18.1888 rtt= 39.8481
+new_RTT_at: 42141.2 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -14.8383 rtt= 37.9105
+new_RTT_at: 42226.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= -2.42296 rtt= 32.3531
+new_RTT_at: 42331.4 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 6.06808 rtt= 29.6807
+new_RTT_at: 42367.6 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= -11.5658 rtt= 36.2158
+new_RTT_at: 42409.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= 2.92997 rtt= 30.5814
+new_RTT_at: 42437.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.66868 target= 13.3588 rtt= 27.9183
+new_RTT_at: 42473.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 3.67355 target= 3.83383 rtt= 30.3123
+new_RTT_at: 42514.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.56708 target= -18.424 rtt= 39.9924
+new_RTT_at: 42556.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.73983 target= -9.151 rtt= 35.0786
+new_RTT_at: 42589.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.85983 target= 10.3995 rtt= 28.5825
+new_RTT_at: 42621.9 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.78854 target= -1.04697 rtt= 31.8671
+new_RTT_at: 42664 cur_dir= 1 prev_v= 1 cur_v= 2 window= 2.90483 target= -7.94059 rtt= 34.5421
+new_RTT_at: 42697.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 6.62948 rtt= 29.5292
+new_RTT_at: 42731.4 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2.5453 target= -2.14062 rtt= 32.2515
+new_RTT_at: 42782 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= -10.6241 rtt= 35.7614
+new_RTT_at: 42823.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2 target= -9.37272 rtt= 35.1793
+new_RTT_at: 42877.2 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 14.1982 rtt= 27.7415
+new_RTT_at: 42907 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 5.64055 rtt= 29.7979
+new_RTT_at: 42943.8 cur_dir= 3 prev_v= 1 cur_v= 2 window= 2.99064 target= -11.7585 rtt= 36.3105
+new_RTT_at: 42978.4 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.14384 target= -4.1826 rtt= 33.008
+
+debug1:sec: 43 throughput: 0.64772 RTT: 33.2659
+new_RTT_at: 43033.1 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 12.0032 rtt= 28.2144
+new_RTT_at: 43069.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.90996 target= 5.21629 rtt= 29.9159
+new_RTT_at: 43125.3 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.63961 target= -32.096 rtt= 50.6618
+new_RTT_at: 43177.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.60794 target= -14.2316 rtt= 37.5822
+new_RTT_at: 43220.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 3.50695 rtt= 30.4087
+new_RTT_at: 43253.8 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.43593 target= 37.4439 rtt= 24.3823
+new_RTT_at: 43283.3 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.0621 target= 9.75615 rtt= 28.7357
+new_RTT_at: 43321.9 cur_dir= 1 prev_v= 1 cur_v= 2 window= 4.92483 target= -7.20059 rtt= 34.2247
+new_RTT_at: 43357.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.17216 target= -4.46684 rtt= 33.1174
+new_RTT_at: 43400.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.18782 target= -2.23744 rtt= 32.2862
+new_RTT_at: 43435.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.12387 target= 18.8004 rtt= 26.8555
+new_RTT_at: 43478.6 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.57295 target= -11.3122 rtt= 36.092
+new_RTT_at: 43543.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.73305 target= -17.0489 rtt= 39.1645
+new_RTT_at: 43576.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.85715 target= 17.7836 rtt= 27.0398
+new_RTT_at: 43608.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 4.77639 target= 13.8982 rtt= 27.8041
+new_RTT_at: 43645.2 cur_dir= -3 prev_v= 1 cur_v= 1 window= 4.92413 target= -10.4483 rtt= 35.6782
+new_RTT_at: 43682.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.28471 target= -7.06126 rtt= 34.1658
+new_RTT_at: 43722.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.2584 target= 7.43151 rtt= 29.3177
+new_RTT_at: 43752.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.09479 target= 13.5035 rtt= 27.8874
+new_RTT_at: 43789.8 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.06101 target= 0.092985 rtt= 31.481
+new_RTT_at: 43862.9 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.00126 target= -46.3936 rtt= 68.4599
+new_RTT_at: 43912.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.43942 target= -5.56198 rtt= 33.5489
+new_RTT_at: 43948.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.03098 target= 15.0474 rtt= 27.5677
+new_RTT_at: 43978.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.19253 target= 13.1522 rtt= 27.9625
+
+debug1:sec: 44 throughput: 1.17167 RTT: 35.3879
+new_RTT_at: 44019.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 3.916 target= -9.21334 rtt= 35.1068
+new_RTT_at: 44057.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.26188 target= -5.05801 rtt= 33.3484
+new_RTT_at: 44091.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.41142 target= 5.04542 rtt= 29.9639
+new_RTT_at: 44127.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.24153 target= 9.63706 rtt= 28.7644
+new_RTT_at: 44160.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.84346 target= 1.21128 rtt= 31.1162
+new_RTT_at: 44203.7 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.97201 target= -15.3255 rtt= 38.179
+new_RTT_at: 44237.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.41995 target= 6.30117 rtt= 29.6174
+new_RTT_at: 44270.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.25363 target= 29.3069 rtt= 25.2767
+new_RTT_at: 44321.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 5.12195 target= -15.5435 rtt= 38.3005
+new_RTT_at: 44370.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.40436 target= -18.7589 rtt= 40.1999
+new_RTT_at: 44405.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 3.96458 target= 6.46585 rtt= 29.5731
+new_RTT_at: 44433.5 cur_dir= 4 prev_v= 1 cur_v= 1 window= 5.15059 target= 22.7744 rtt= 26.1926
+new_RTT_at: 44466.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.33202 target= 14.5024 rtt= 27.6787
+new_RTT_at: 44504.4 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.90002 target= -6.65727 rtt= 33.9965
+new_RTT_at: 44550.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.94936 target= -13.1351 rtt= 37.0055
+new_RTT_at: 44584.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.13787 target= -3.38213 rtt= 32.7053
+new_RTT_at: 44629.9 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.24073 target= -12.5948 rtt= 36.7289
+new_RTT_at: 44683.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 2.94614 target= -14.6162 rtt= 37.7895
+new_RTT_at: 44742 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.01252 target= -32.2184 rtt= 50.781
+new_RTT_at: 44787 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 37.6529 rtt= 24.3624
+new_RTT_at: 44821.3 cur_dir= 2 prev_v= 1 cur_v= 1 window= 3.60316 target= 15.9865 rtt= 27.381
+new_RTT_at: 44860 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.52582 target= -4.27881 rtt= 33.0449
+new_RTT_at: 44902.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.30671 target= -17.4076 rtt= 39.3768
+new_RTT_at: 44940.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.25709 target= -5.54668 rtt= 33.5428
+new_RTT_at: 44978.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.60673 target= 12.2384 rtt= 28.1621
+
+debug1:sec: 45 throughput: 1.3681 RTT: 34.1302
+new_RTT_at: 45012.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.05065 target= 13.3595 rtt= 27.9181
+new_RTT_at: 45047.4 cur_dir= 2 prev_v= 1 cur_v= 2 window= 4.51847 target= -8.10116 rtt= 34.6121
+new_RTT_at: 45090.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.35924 target= -21.0533 rtt= 41.6852
+new_RTT_at: 45132.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.24843 target= -10.1957 rtt= 35.5594
+new_RTT_at: 45173.9 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 1.41385 rtt= 31.0516
+new_RTT_at: 45197.5 cur_dir= 1 prev_v= 1 cur_v= 1 window= 2 target= 46.7962 rtt= 23.6135
+new_RTT_at: 45228.4 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.03036 target= 2.23192 rtt= 30.7949
+new_RTT_at: 45265.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.63957 target= -6.48662 rtt= 33.9257
+new_RTT_at: 45302 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.83547 target= -9.18251 rtt= 35.0929
+new_RTT_at: 45339.1 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2.32468 target= -5.80972 rtt= 33.6487
+new_RTT_at: 45391.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2 target= 6.87219 rtt= 29.4646
+new_RTT_at: 45422.3 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.14274 target= 19.3205 rtt= 26.7637
+new_RTT_at: 45456.7 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.24843 target= -3.85798 rtt= 32.8843
+new_RTT_at: 45494.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.39303 target= -10.4156 rtt= 35.6627
+new_RTT_at: 45534.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 2.50479 target= 1.512 rtt= 31.0204
+new_RTT_at: 45563.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.38781 target= 49.4081 rtt= 23.4383
+new_RTT_at: 45594.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 4.30673 target= 19.1869 rtt= 26.7871
+new_RTT_at: 45644.8 cur_dir= 1 prev_v= 1 cur_v= 2 window= 4.97481 target= -23.5464 rtt= 43.4334
+new_RTT_at: 45693.9 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.30466 target= -27.8652 rtt= 46.8276
+new_RTT_at: 45733.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.53342 target= -15.3207 rtt= 38.1763
+new_RTT_at: 45768.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.74207 target= -4.52772 rtt= 33.141
+new_RTT_at: 45800.1 cur_dir= -2 prev_v= 1 cur_v= 1 window= 2.22054 target= 5.40216 rtt= 29.864
+new_RTT_at: 45834.6 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.2203 target= 7.73687 rtt= 29.2387
+new_RTT_at: 45874.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 3.7914 target= 0.579029 rtt= 31.3208
+new_RTT_at: 45918.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.06463 target= -15.6079 rtt= 38.3366
+new_RTT_at: 45962.4 cur_dir= -5 prev_v= 1 cur_v= 1 window= 2.10127 target= 6.49661 rtt= 29.5648
+new_RTT_at: 45999.4 cur_dir= 3 prev_v= 1 cur_v= 1 window= 3.00435 target= 12.0255 rtt= 28.2094
+
+debug1:sec: 46 throughput: 1.08273 RTT: 34.3896
+new_RTT_at: 46037.8 cur_dir= 1 prev_v= 1 cur_v= 2 window= 3.085 target= -8.04368 rtt= 34.587
+new_RTT_at: 46085.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.28822 target= -2.97572 rtt= 32.5547
+new_RTT_at: 46125.7 cur_dir= -3 prev_v= 1 cur_v= 1 window= 2 target= 17.9948 rtt= 27.001
+new_RTT_at: 46154.4 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.52396 target= 14.1433 rtt= 27.7529
+new_RTT_at: 46188.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.32557 target= 1.36177 rtt= 31.0681
+new_RTT_at: 46239.6 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.23028 target= -24.3059 rtt= 43.9954
+new_RTT_at: 46291.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2.37489 target= -10.2236 rtt= 36.6322
+new_RTT_at: 46342.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 2 target= 6.50844 rtt= 30.6214
+new_RTT_at: 46371 cur_dir= 2 prev_v= 1 cur_v= 1 window= 2.43449 target= 16.4723 rtt= 28.3465
+new_RTT_at: 46405.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 3.2746 target= 17.6301 rtt= 28.1279
+new_RTT_at: 46446.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 5.00715 target= -5.62196 rtt= 34.6328
+new_RTT_at: 46493.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.15289 target= -13.1514 rtt= 38.0736
+new_RTT_at: 46531.3 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.37399 target= 4.27547 rtt= 31.2434
+new_RTT_at: 46559.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.32265 target= 19.243 rtt= 27.837
+new_RTT_at: 46600.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 5.44569 target= 5.13546 rtt= 30.9984
+new_RTT_at: 46639.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.32129 target= -7.28684 rtt= 35.321
+new_RTT_at: 46673.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.51394 target= -2.61744 rtt= 33.4833
+new_RTT_at: 46702.8 cur_dir= 3 prev_v= 1 cur_v= 1 window= 4.98258 target= 27.9917 rtt= 26.5052
+new_RTT_at: 46736.4 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.9859 target= 21.41 rtt= 27.4701
+new_RTT_at: 46778.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 6.28432 target= -7.8338 rtt= 35.5556
+new_RTT_at: 46820.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.49911 target= -13.5674 rtt= 38.2901
+new_RTT_at: 46850.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.04594 target= 13.396 rtt= 28.9701
+new_RTT_at: 46878.8 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.91367 target= 34.1392 rtt= 25.7764
+new_RTT_at: 46923.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.48019 target= -7.26482 rtt= 35.3117
+new_RTT_at: 46965.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.64532 target= -16.1739 rtt= 39.7168
+new_RTT_at: 47000.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.86828 target= 0.512734 rtt= 32.4022
+
+debug1:sec: 47 throughput: 1.40606 RTT: 33.5618
+new_RTT_at: 47027.7 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.92202 target= 29.1462 rtt= 26.3567
+new_RTT_at: 47056.4 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.77564 target= 45.1735 rtt= 24.7901
+new_RTT_at: 47097 cur_dir= 6 prev_v= 2 cur_v= 4 window= 7.75264 target= -2.13691 rtt= 33.31
+new_RTT_at: 47148.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.78621 target= -28.7183 rtt= 48.6176
+new_RTT_at: 47184.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.07788 target= -5.99023 rtt= 34.7817
+new_RTT_at: 47229.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.23719 target= -10.9438 rtt= 36.9739
+new_RTT_at: 47265.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.47794 target= 24.7143 rtt= 26.9592
+new_RTT_at: 47294.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 5.72379 target= 99 rtt= 22.9405
+new_RTT_at: 47325.6 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.68906 target= 36.4896 rtt= 25.5349
+new_RTT_at: 47370.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.56127 target= -14.1074 rtt= 38.5756
+new_RTT_at: 47413.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.74722 target= -19.7224 rtt= 41.8696
+new_RTT_at: 47451.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.9502 target= -7.4555 rtt= 35.3929
+new_RTT_at: 47483.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.39455 target= 9.85343 rtt= 29.7721
+new_RTT_at: 47522.7 cur_dir= 7 prev_v= 1 cur_v= 1 window= 6.45206 target= 10.361 rtt= 29.6513
+new_RTT_at: 47563 cur_dir= -3 prev_v= 1 cur_v= 1 window= 6.28942 target= -11.8196 rtt= 37.4005
+new_RTT_at: 47595.4 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.14407 target= 8.91689 rtt= 30.0004
+new_RTT_at: 47626.8 cur_dir= 7 prev_v= 1 cur_v= 1 window= 7.06929 target= 17.2008 rtt= 28.208
+new_RTT_at: 47659.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.92734 target= 7.27855 rtt= 30.4174
+new_RTT_at: 47706.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 7.15126 target= -22.1129 rtt= 43.4703
+new_RTT_at: 47739.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.44173 target= 4.83872 rtt= 31.0821
+new_RTT_at: 47771.4 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.2148 target= 18.4726 rtt= 27.974
+new_RTT_at: 47811.5 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.29387 target= -12.8898 rtt= 37.939
+new_RTT_at: 47847.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.50192 target= -4.6202 rtt= 34.2367
+new_RTT_at: 47877.6 cur_dir= -2 prev_v= 1 cur_v= 1 window= 6.7085 target= 28.0076 rtt= 26.5031
+new_RTT_at: 47904.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 7.37648 target= 54.9131 rtt= 24.1751
+new_RTT_at: 47940.6 cur_dir= 9 prev_v= 1 cur_v= 2 window= 8.34472 target= 29.7281 rtt= 26.284
+new_RTT_at: 47977.5 cur_dir= 9 prev_v= 2 cur_v= 4 window= 10.236 target= 3.05806 rtt= 31.6026
+
+debug1:sec: 48 throughput: 2.23887 RTT: 33.8993
+new_RTT_at: 48026.7 cur_dir= -12 prev_v= 1 cur_v= 1 window= 9.27774 target= -17.768 rtt= 40.6525
+new_RTT_at: 48066.9 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.50049 target= -12.872 rtt= 37.9299
+new_RTT_at: 48100.3 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.66378 target= 1.95466 rtt= 31.9409
+new_RTT_at: 48133.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 7.85167 target= 8.84791 rtt= 30.0175
+new_RTT_at: 48164.4 cur_dir= 8 prev_v= 1 cur_v= 2 window= 8.655 target= 14.4038 rtt= 28.7587
+new_RTT_at: 48197.5 cur_dir= 9 prev_v= 2 cur_v= 4 window= 10.3928 target= 11.2553 rtt= 29.4433
+new_RTT_at: 48233.8 cur_dir= -7 prev_v= 1 cur_v= 1 window= 11.0983 target= -4.66914 rtt= 34.2557
+new_RTT_at: 48277.5 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.2407 target= -10.3111 rtt= 36.6733
+new_RTT_at: 48310 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.41576 target= 0.727994 rtt= 32.3319
+new_RTT_at: 48350.7 cur_dir= -2 prev_v= 1 cur_v= 1 window= 9.32805 target= -7.507 rtt= 35.4149
+new_RTT_at: 48384.7 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.59173 target= -3.3258 rtt= 33.7441
+new_RTT_at: 48413.5 cur_dir= 5 prev_v= 1 cur_v= 1 window= 9.20528 target= 50.6359 rtt= 24.4208
+new_RTT_at: 48443.6 cur_dir= 9 prev_v= 1 cur_v= 2 window= 10.1036 target= 40.507 rtt= 25.1635
+new_RTT_at: 48481.1 cur_dir= 3 prev_v= 1 cur_v= 2 window= 10.8355 target= 5.51495 rtt= 30.8924
+new_RTT_at: 48523.6 cur_dir= -12 prev_v= 1 cur_v= 1 window= 9.97709 target= -15.4776 rtt= 39.3235
+new_RTT_at: 48554.6 cur_dir= -10 prev_v= 1 cur_v= 1 window= 9.27339 target= 10.8265 rtt= 29.5423
+new_RTT_at: 48583.5 cur_dir= 10 prev_v= 1 cur_v= 1 window= 10.0551 target= 23.0994 rtt= 27.2019
+new_RTT_at: 48620.5 cur_dir= 10 prev_v= 1 cur_v= 2 window= 10.9987 target= 2.7953 rtt= 31.682
+new_RTT_at: 48669.7 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.0552 target= -23.837 rtt= 44.7065
+new_RTT_at: 48703.5 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.43849 target= -0.583715 rtt= 32.7682
+new_RTT_at: 48737.4 cur_dir= 7 prev_v= 1 cur_v= 1 window= 9.98341 target= 8.5745 rtt= 30.0857
+new_RTT_at: 48773 cur_dir= -1 prev_v= 1 cur_v= 1 window= 10.0832 target= 1.1145 rtt= 32.207
+new_RTT_at: 48814.9 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.17179 target= -7.63429 rtt= 35.4695
+new_RTT_at: 48845.9 cur_dir= 0 prev_v= 1 cur_v= 1 window= 9.22611 target= 13.2414 rtt= 29.0032
+new_RTT_at: 48875.6 cur_dir= 10 prev_v= 1 cur_v= 1 window= 10.1763 target= 38.436 rtt= 25.3487
+new_RTT_at: 48911.6 cur_dir= 10 prev_v= 1 cur_v= 2 window= 11.0526 target= 2.86365 rtt= 31.6613
+new_RTT_at: 48954.7 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.1704 target= -12.3772 rtt= 37.6787
+new_RTT_at: 48987.6 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.40855 target= 3.66183 rtt= 31.4226
+
+debug1:sec: 49 throughput: 3.31296 RTT: 33.9088
+new_RTT_at: 49024.8 cur_dir= 3 prev_v= 1 cur_v= 1 window= 9.43526 target= 21.2288 rtt= 27.8686
+new_RTT_at: 49051.6 cur_dir= 10 prev_v= 1 cur_v= 2 window= 10.4401 target= 32.2305 rtt= 26.3557
+new_RTT_at: 49087.6 cur_dir= 9 prev_v= 1 cur_v= 2 window= 12.1324 target= 3.52535 rtt= 31.8318
+new_RTT_at: 49127.6 cur_dir= -13 prev_v= 1 cur_v= 1 window= 11.2179 target= -4.81545 rtt= 34.6817
+new_RTT_at: 49162.6 cur_dir= -13 prev_v= 1 cur_v= 1 window= 10.3843 target= 0.145905 rtt= 32.892
+new_RTT_at: 49191.4 cur_dir= 6 prev_v= 1 cur_v= 1 window= 10.9887 target= 16.7804 rtt= 28.6563
+new_RTT_at: 49222.6 cur_dir= 10 prev_v= 1 cur_v= 2 window= 11.7472 target= 30.0132 rtt= 26.6177
+new_RTT_at: 49258.2 cur_dir= 0 prev_v= 1 cur_v= 1 window= 12.3186 target= 4.88897 rtt= 31.4367
+new_RTT_at: 49293.7 cur_dir= -13 prev_v= 1 cur_v= 1 window= 11.4372 target= 2.69123 rtt= 32.0825
+new_RTT_at: 49330.9 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.6074 target= -1.70669 rtt= 33.5259
+new_RTT_at: 49357.5 cur_dir= -1 prev_v= 1 cur_v= 1 window= 10.824 target= 39.1369 rtt= 25.6534
+new_RTT_at: 49385.4 cur_dir= 11 prev_v= 1 cur_v= 1 window= 11.1935 target= 54.5275 rtt= 23.4224
+new_RTT_at: 49421.6 cur_dir= 4 prev_v= 1 cur_v= 2 window= 11.5387 target= -1.99647 rtt= 32.4864
+new_RTT_at: 49459.6 cur_dir= -12 prev_v= 1 cur_v= 1 window= 10.6674 target= -6.83251 rtt= 34.3559
+new_RTT_at: 49496.6 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.91322 target= -11.4495 rtt= 36.4452
+new_RTT_at: 49525.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 9.40426 target= 14.8481 rtt= 27.8943
+new_RTT_at: 49552.7 cur_dir= 10 prev_v= 1 cur_v= 1 window= 10.2301 target= 31.6717 rtt= 25.2776
+new_RTT_at: 49586.3 cur_dir= 11 prev_v= 1 cur_v= 2 window= 11.093 target= 8.86942 rtt= 29.2387
+new_RTT_at: 49621.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 10.5376 target= -8.47497 rtt= 35.0626
+new_RTT_at: 49655.5 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.88126 target= 0.718267 rtt= 31.5616
+new_RTT_at: 49690.2 cur_dir= -10 prev_v= 1 cur_v= 1 window= 9.09656 target= -5.74336 rtt= 33.9082
+new_RTT_at: 49721.1 cur_dir= 0 prev_v= 1 cur_v= 1 window= 9.16252 target= 23.8029 rtt= 26.3211
+new_RTT_at: 49749.4 cur_dir= 10 prev_v= 1 cur_v= 1 window= 9.61409 target= 16.1931 rtt= 27.6271
+new_RTT_at: 49784.2 cur_dir= 10 prev_v= 1 cur_v= 2 window= 10.0457 target= 8.7525 rtt= 29.2678
+new_RTT_at: 49824 cur_dir= -8 prev_v= 1 cur_v= 1 window= 9.74377 target= -13.9164 rtt= 37.7006
+new_RTT_at: 49857.3 cur_dir= -10 prev_v= 1 cur_v= 1 window= 9.38019 target= 4.78946 rtt= 30.3227
+new_RTT_at: 49890.8 cur_dir= -9 prev_v= 1 cur_v= 1 window= 9.01243 target= -1.20553 rtt= 32.2083
+new_RTT_at: 49930.3 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.62475 target= -6.26599 rtt= 34.121
+new_RTT_at: 49959.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 8.4639 target= 20.8986 rtt= 26.7809
+new_RTT_at: 49991.1 cur_dir= 9 prev_v= 1 cur_v= 1 window= 8.8915 target= 17.2004 rtt= 27.4346
+
+debug1:sec: 50 throughput: 3.69746 RTT: 31.9786
+new_RTT_at: 50024.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 9.2022 target= 3.01878 rtt= 30.8409
+new_RTT_at: 50063.4 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.78548 target= -11.7479 rtt= 36.5917
+new_RTT_at: 50098.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.44106 target= -2.19621 rtt= 32.5578
+new_RTT_at: 50128.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.04665 target= 8.11526 rtt= 29.4281
+new_RTT_at: 50156.5 cur_dir= 9 prev_v= 1 cur_v= 1 window= 8.47686 target= 18.7496 rtt= 27.1509
+new_RTT_at: 50188.8 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.04013 target= 13.2957 rtt= 28.2181
+new_RTT_at: 50232.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 8.89153 target= -12.2697 rtt= 36.8512
+new_RTT_at: 50267.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.42352 target= -7.2868 rtt= 34.5476
+new_RTT_at: 50301.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.97845 target= -3.73609 rtt= 33.1245
+new_RTT_at: 50334.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.48928 target= 4.5613 rtt= 30.3877
+new_RTT_at: 50365.5 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.03462 target= 13.0847 rtt= 28.2634
+new_RTT_at: 50399.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 8.54479 target= 3.57631 rtt= 30.6744
+new_RTT_at: 50440.2 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.96449 target= -13.4006 rtt= 37.4295
+new_RTT_at: 50475.9 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.52398 target= -4.67918 rtt= 33.4862
+new_RTT_at: 50507.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.96641 target= 8.97806 rtt= 29.2118
+new_RTT_at: 50541 cur_dir= 7 prev_v= 1 cur_v= 1 window= 7.48554 target= 5.97234 rtt= 29.9931
+new_RTT_at: 50574.7 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.83156 target= -1.98781 rtt= 32.4833
+new_RTT_at: 50617.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.14929 target= -15.8724 rtt= 38.7719
+new_RTT_at: 50660.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.39583 target= -6.63465 rtt= 34.2734
+new_RTT_at: 50701.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.59444 target= -15.4706 rtt= 38.5461
+new_RTT_at: 50732.1 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.52664 target= 33.9848 rtt= 25.0194
+new_RTT_at: 50756 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.20768 target= 68.7624 rtt= 22.8088
+new_RTT_at: 50786.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.19292 target= 21.1162 rtt= 26.7449
+new_RTT_at: 50830.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.82637 target= -16.5094 rtt= 39.1362
+new_RTT_at: 50872.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.16562 target= -17.0102 rtt= 39.428
+new_RTT_at: 50905.8 cur_dir= -4 prev_v= 1 cur_v= 1 window= 6.95415 target= 4.41254 rtt= 30.4304
+new_RTT_at: 50946.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.57672 target= -13.1289 rtt= 37.2885
+new_RTT_at: 51000.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.80763 target= -28.6968 rtt= 47.8255
+
+debug1:sec: 51 throughput: 2.5791 RTT: 33.6461
+new_RTT_at: 51037.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.24593 target= -10.3309 rtt= 35.9091
+new_RTT_at: 51063.7 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.57455 target= 27.1939 rtt= 25.8377
+new_RTT_at: 51094.3 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.47282 target= 26.9827 rtt= 25.8663
+new_RTT_at: 51129.4 cur_dir= 7 prev_v= 2 cur_v= 4 window= 8.22509 target= 9.75513 rtt= 29.0223
+new_RTT_at: 51169.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 7.92496 target= -11.5733 rtt= 36.5058
+new_RTT_at: 51209.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.31729 target= -16.1512 rtt= 38.9304
+new_RTT_at: 51247.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.565 target= -4.87252 rtt= 33.5617
+new_RTT_at: 51282.9 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.80108 target= -2.61714 rtt= 32.7098
+new_RTT_at: 51334.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.88023 target= -31.3184 rtt= 50.2023
+new_RTT_at: 51367.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.27745 target= 9.04261 rtt= 29.1959
+new_RTT_at: 51395.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 5.29194 target= 67.9891 rtt= 22.8352
+new_RTT_at: 51423.5 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.32898 target= 44.0926 rtt= 24.098
+new_RTT_at: 51460.6 cur_dir= 3 prev_v= 1 cur_v= 2 window= 7.58719 target= -0.401562 rtt= 31.933
+new_RTT_at: 51496.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.83081 target= -5.29153 rtt= 33.7272
+new_RTT_at: 51535.9 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.08784 target= -0.583374 rtt= 31.9946
+new_RTT_at: 51572.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.29621 target= 22.46 rtt= 26.5282
+new_RTT_at: 51596.4 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.04879 target= 80.7657 rtt= 22.4755
+new_RTT_at: 51625.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.09866 target= 63.6886 rtt= 22.995
+new_RTT_at: 51656.8 cur_dir= 8 prev_v= 2 cur_v= 4 window= 9.00805 target= 15.9362 rtt= 27.6772
+new_RTT_at: 51693.8 cur_dir= 1 prev_v= 1 cur_v= 2 window= 10.5099 target= -7.38883 rtt= 34.591
+new_RTT_at: 51732.4 cur_dir= -11 prev_v= 1 cur_v= 1 window= 9.71742 target= -13.8739 rtt= 37.678
+new_RTT_at: 51768.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 9.10789 target= -10.2397 rtt= 35.8663
+new_RTT_at: 51806.8 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.34818 target= -2.39158 rtt= 32.6281
+new_RTT_at: 51839.3 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.54946 target= 5.40785 rtt= 30.1487
+new_RTT_at: 51869.7 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.36315 target= 7.99375 rtt= 29.4591
+new_RTT_at: 51903.7 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.27267 target= 6.90014 rtt= 29.7435
+new_RTT_at: 51943.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 8.7684 target= -9.73077 rtt= 35.6297
+new_RTT_at: 51977.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.01007 target= -4.39548 rtt= 33.3762
+
+debug1:sec: 52 throughput: 2.51526 RTT: 33.2854
+new_RTT_at: 52014 cur_dir= -7 prev_v= 1 cur_v= 1 window= 7.30074 target= 10.0247 rtt= 28.9576
+new_RTT_at: 52042.5 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.15932 target= 23.2268 rtt= 26.4088
+new_RTT_at: 52076.4 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.09801 target= 12.8257 rtt= 28.3194
+new_RTT_at: 52110.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 8.5342 target= -3.45312 rtt= 33.0181
+new_RTT_at: 52147.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.73691 target= -7.68712 rtt= 34.7188
+new_RTT_at: 52180.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 7.0871 target= 4.21256 rtt= 30.4882
+new_RTT_at: 52212.5 cur_dir= 8 prev_v= 1 cur_v= 1 window= 7.92711 target= 12.1772 rtt= 28.4619
+new_RTT_at: 52246.1 cur_dir= 8 prev_v= 1 cur_v= 2 window= 8.73615 target= 3.80112 rtt= 30.6082
+new_RTT_at: 52279.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.94109 target= -0.168814 rtt= 31.8547
+new_RTT_at: 52311.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 7.81738 target= 7.26293 rtt= 29.648
+new_RTT_at: 52340.7 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.57983 target= 21.7506 rtt= 26.6414
+new_RTT_at: 52372.5 cur_dir= 9 prev_v= 1 cur_v= 2 window= 9.4363 target= 6.52485 rtt= 29.8435
+new_RTT_at: 52411.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 8.81776 target= -6.39102 rtt= 34.1725
+new_RTT_at: 52449.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.06735 target= -13.3036 rtt= 37.379
+new_RTT_at: 52492.7 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.25875 target= -10.2365 rtt= 35.8648
+new_RTT_at: 52542.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.33271 target= -12.2514 rtt= 36.842
+new_RTT_at: 52573.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.66288 target= 7.9622 rtt= 29.4672
+new_RTT_at: 52597.2 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.4733 target= 54.3917 rtt= 23.4298
+new_RTT_at: 52626.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.4521 target= 36.5293 rtt= 24.7575
+new_RTT_at: 52663.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 8.94044 target= -6.67085 rtt= 34.2885
+new_RTT_at: 52702.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.18528 target= -10.3315 rtt= 35.9094
+new_RTT_at: 52741.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.36761 target= -12.1887 rtt= 36.8106
+new_RTT_at: 52775.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.63768 target= 1.87124 rtt= 31.1935
+new_RTT_at: 52803.9 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.05814 target= 39.5477 rtt= 24.4742
+new_RTT_at: 52839.2 cur_dir= 8 prev_v= 1 cur_v= 2 window= 8.08366 target= 2.03313 rtt= 31.143
+new_RTT_at: 52872.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.27752 target= 0.194839 rtt= 31.7335
+new_RTT_at: 52907.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 7.30546 target= 1.43341 rtt= 31.3317
+new_RTT_at: 52942.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.54647 target= 1.43545 rtt= 31.331
+new_RTT_at: 52979.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.78737 target= 1.89241 rtt= 31.1869
+new_RTT_at: 53007.6 cur_dir= 4 prev_v= 1 cur_v= 1 window= 6.13944 target= 29.7602 rtt= 25.5065
+
+debug1:sec: 53 throughput: 2.71889 RTT: 32.257
+new_RTT_at: 53036.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.06703 target= 16.6894 rtt= 27.5314
+new_RTT_at: 53078.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 7.43187 target= -11.4411 rtt= 36.4411
+new_RTT_at: 53116.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.67707 target= -9.6476 rtt= 35.5914
+new_RTT_at: 53154.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.85988 target= -10.7341 rtt= 36.1001
+new_RTT_at: 53185.7 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.49626 target= 4.14469 rtt= 30.5078
+new_RTT_at: 53215.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.3946 target= 14.3282 rtt= 28.0009
+new_RTT_at: 53246.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.48994 target= 25.3256 rtt= 26.0973
+new_RTT_at: 53283.1 cur_dir= -2 prev_v= 1 cur_v= 1 window= 8.30825 target= -6.36225 rtt= 34.1606
+new_RTT_at: 53319.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.34062 target= -6.39009 rtt= 34.1721
+new_RTT_at: 53353.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.35651 target= 0.920476 rtt= 31.4961
+new_RTT_at: 53383.5 cur_dir= 3 prev_v= 1 cur_v= 1 window= 6.82612 target= 19.1209 rtt= 27.0851
+new_RTT_at: 53418.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.83293 target= 6.5011 rtt= 29.8499
+new_RTT_at: 53456.6 cur_dir= -4 prev_v= 1 cur_v= 1 window= 7.38928 target= -6.55408 rtt= 34.2399
+new_RTT_at: 53493.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.47261 target= -2.8099 rtt= 32.7801
+new_RTT_at: 53530.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.46991 target= 3.91511 rtt= 30.5748
+new_RTT_at: 53560.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.4121 target= 37.5172 rtt= 24.6616
+new_RTT_at: 53596.9 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.65461 target= 0.0772624 rtt= 31.7725
+new_RTT_at: 53638.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.66095 target= -16.9607 rtt= 39.399
+new_RTT_at: 53677.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.81227 target= -9.69123 rtt= 35.6114
+new_RTT_at: 53710.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.23054 target= 3.06692 rtt= 30.8264
+new_RTT_at: 53738.7 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.12488 target= 17.0987 rtt= 27.4537
+new_RTT_at: 53770.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.98685 target= 21.2471 rtt= 26.7233
+new_RTT_at: 53813.5 cur_dir= -3 prev_v= 1 cur_v= 1 window= 6.85056 target= -11.4525 rtt= 36.4467
+new_RTT_at: 53847.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.14132 target= -3.73983 rtt= 33.1259
+new_RTT_at: 53882.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.72313 target= 3.10438 rtt= 30.8152
+new_RTT_at: 53918.7 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.04761 target= -3.1581 rtt= 32.9083
+new_RTT_at: 53951.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 4.75033 target= 45.1604 rtt= 24.0176
+new_RTT_at: 53978.4 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.68546 target= 78.0965 rtt= 22.5386
+
+debug1:sec: 54 throughput: 2.28822 RTT: 32.5053
+new_RTT_at: 54012.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.687 target= 4.09603 rtt= 30.522
+new_RTT_at: 54050.7 cur_dir= -5 prev_v= 1 cur_v= 1 window= 6.41221 target= -6.21017 rtt= 34.0981
+new_RTT_at: 54087.8 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.59412 target= -9.43412 rtt= 35.4936
+new_RTT_at: 54123.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.81109 target= -2.60256 rtt= 32.7045
+new_RTT_at: 54153.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 5.0432 target= 24.076 rtt= 26.2801
+new_RTT_at: 54186.6 cur_dir= 6 prev_v= 1 cur_v= 1 window= 5.97579 target= 7.91141 rtt= 29.4802
+new_RTT_at: 54218.6 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.80165 target= 8.43953 rtt= 29.3461
+new_RTT_at: 54261.8 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.78634 target= -16.1095 rtt= 38.9066
+new_RTT_at: 54302.9 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.20049 target= -7.60694 rtt= 34.6843
+new_RTT_at: 54339.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 5.4732 target= 6.09225 rtt= 29.9604
+new_RTT_at: 54373.3 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.38775 target= 13.6841 rtt= 28.1355
+new_RTT_at: 54419.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.39967 target= -22.8219 rtt= 43.1966
+new_RTT_at: 54459.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.5671 target= -15.9824 rtt= 38.8343
+new_RTT_at: 54496.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.80643 target= -5.92214 rtt= 33.9806
+new_RTT_at: 54530.9 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.84345 target= 2.53055 rtt= 30.9893
+new_RTT_at: 54558.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.74706 target= 42.282 rtt= 24.2411
+new_RTT_at: 54595.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.75301 target= 2.04865 rtt= 31.1381
+new_RTT_at: 54630.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.98809 target= -5.2012 rtt= 33.6913
+new_RTT_at: 54666.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.20976 target= -8.08384 rtt= 34.8908
+new_RTT_at: 54701.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.42683 target= 3.23568 rtt= 30.7758
+new_RTT_at: 54731.1 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.21024 target= 22.7227 rtt= 26.4869
+new_RTT_at: 54760.7 cur_dir= 6 prev_v= 1 cur_v= 2 window= 6.1162 target= 35.4387 rtt= 24.867
+new_RTT_at: 54794.7 cur_dir= 7 prev_v= 2 cur_v= 4 window= 8.20735 target= 2.05109 rtt= 31.1374
+new_RTT_at: 54837.9 cur_dir= -7 prev_v= 1 cur_v= 1 window= 7.45911 target= -16.5266 rtt= 39.1461
+new_RTT_at: 54887.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.62425 target= -28.3028 rtt= 47.4859
+new_RTT_at: 54933.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 5.7816 target= -21.9024 rtt= 42.5507
+new_RTT_at: 54975 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.01448 target= -12.5786 rtt= 37.007
+
+debug1:sec: 55 throughput: 2.04346 RTT: 34.3465
+new_RTT_at: 55020.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.32203 target= -7.60874 rtt= 34.6851
+new_RTT_at: 55075.5 cur_dir= -6 prev_v= 1 cur_v= 1 window= 3.42082 target= 6.80938 rtt= 29.7676
+new_RTT_at: 55102.8 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.43478 target= 22.4846 rtt= 26.5243
+new_RTT_at: 55131.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.42182 target= 45.3133 rtt= 24.0063
+new_RTT_at: 55164.5 cur_dir= 6 prev_v= 2 cur_v= 4 window= 7.25188 target= 13.9618 rtt= 28.0771
+new_RTT_at: 55209.8 cur_dir= -2 prev_v= 1 cur_v= 1 window= 8.21915 target= -17.3293 rtt= 39.6166
+new_RTT_at: 55258.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.44686 target= -27.4436 rtt= 46.7607
+new_RTT_at: 55302.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.69166 target= -17.4415 rtt= 39.6833
+new_RTT_at: 55337.7 cur_dir= -6 prev_v= 1 cur_v= 1 window= 6.04975 target= -9.10144 rtt= 35.3425
+new_RTT_at: 55403.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.0154 target= -36.5798 rtt= 55.6473
+new_RTT_at: 55432.8 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.44062 target= 37.7088 rtt= 24.6434
+new_RTT_at: 55459.6 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.30108 target= 60.0051 rtt= 23.1513
+new_RTT_at: 55490.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.16278 target= 25.6617 rtt= 26.0494
+new_RTT_at: 55526.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 7.78732 target= 1.77819 rtt= 31.2227
+new_RTT_at: 55586.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.80321 target= -36.5125 rtt= 55.5715
+new_RTT_at: 55627.3 cur_dir= -7 prev_v= 1 cur_v= 1 window= 6.45142 target= -15.1602 rtt= 38.3737
+new_RTT_at: 55665 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.66115 target= -7.46957 rtt= 34.6255
+new_RTT_at: 55709.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.77984 target= -22.9827 rtt= 43.3116
+new_RTT_at: 55760.4 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.8423 target= -29.9864 rtt= 48.9687
+new_RTT_at: 55785.5 cur_dir= -2 prev_v= 1 cur_v= 1 window= 3.88773 target= 69.047 rtt= 22.7992
+new_RTT_at: 55816.7 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.88766 target= 34.0709 rtt= 25.0102
+new_RTT_at: 55844.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.77189 target= 28.0293 rtt= 25.7268
+new_RTT_at: 55878.7 cur_dir= 6 prev_v= 2 cur_v= 4 window= 7.49009 target= 9.53131 rtt= 29.0764
+new_RTT_at: 55930.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 7.86522 target= -27.3498 rtt= 46.6828
+new_RTT_at: 55973.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.12345 target= -21.4036 rtt= 42.2085
+
+debug1:sec: 56 throughput: 1.80726 RTT: 38.2951
+new_RTT_at: 56026.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.24146 target= -21.9812 rtt= 42.6052
+new_RTT_at: 56095 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.2356 target= -40.8474 rtt= 60.8218
+new_RTT_at: 56127.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.66279 target= -1.57203 rtt= 32.3362
+new_RTT_at: 56155.6 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.79706 target= 37.0909 rtt= 24.7026
+new_RTT_at: 56185.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.6373 target= 29.3134 rtt= 25.5622
+new_RTT_at: 56218.5 cur_dir= 6 prev_v= 2 cur_v= 4 window= 7.39714 target= 12.5081 rtt= 28.3888
+new_RTT_at: 56253.6 cur_dir= 2 prev_v= 1 cur_v= 2 window= 9.73512 target= -2.97803 rtt= 32.8418
+new_RTT_at: 56292.7 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.89825 target= -13.86 rtt= 37.6707
+new_RTT_at: 56327.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 8.09447 target= -4.05878 rtt= 33.2469
+new_RTT_at: 56367.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.15385 target= -1.6886 rtt= 32.3772
+new_RTT_at: 56404.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.11665 target= 1.0917 rtt= 31.4409
+new_RTT_at: 56436.3 cur_dir= 5 prev_v= 1 cur_v= 1 window= 6.38814 target= 34.3784 rtt= 24.9774
+new_RTT_at: 56467.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.52694 target= 20.4573 rtt= 26.8547
+new_RTT_at: 56504.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 8.52902 target= -1.97225 rtt= 32.4777
+new_RTT_at: 56544.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.51651 target= -13.1808 rtt= 37.3154
+new_RTT_at: 56582.8 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.57009 target= -8.68431 rtt= 35.1555
+new_RTT_at: 56616.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.64968 target= 3.46359 rtt= 30.7078
+new_RTT_at: 56649.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.62837 target= 2.96007 rtt= 30.8586
+new_RTT_at: 56685 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.19682 target= 0.374064 rtt= 31.6743
+new_RTT_at: 56718.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.2682 target= 7.21943 rtt= 29.6594
+new_RTT_at: 56747.6 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.20962 target= 14.4399 rtt= 27.9778
+new_RTT_at: 56779.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.11283 target= 3.76054 rtt= 30.6201
+new_RTT_at: 56821 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.18361 target= -8.06954 rtt= 34.8846
+new_RTT_at: 56862.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.38794 target= -18.2401 rtt= 40.1658
+new_RTT_at: 56896.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.65801 target= -3.60624 rtt= 33.0755
+new_RTT_at: 56931.5 cur_dir= -4 prev_v= 1 cur_v= 1 window= 3.97586 target= -6.85732 rtt= 34.3663
+new_RTT_at: 56965.3 cur_dir= 1 prev_v= 1 cur_v= 1 window= 4.17478 target= 14.0366 rtt= 28.0615
+new_RTT_at: 56999.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.18291 target= 14.5187 rtt= 27.9616
+
+debug1:sec: 57 throughput: 2.19445 RTT: 33.8418
+new_RTT_at: 57031.4 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.13263 target= 9.85386 rtt= 28.9985
+new_RTT_at: 57067.8 cur_dir= 3 prev_v= 1 cur_v= 2 window= 7.17777 target= -3.23362 rtt= 32.9363
+new_RTT_at: 57119.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.26248 target= -13.5622 rtt= 37.5139
+new_RTT_at: 57155.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.51217 target= -0.729976 rtt= 32.0445
+new_RTT_at: 57187.8 cur_dir= 0 prev_v= 1 cur_v= 1 window= 5.21176 target= 10.632 rtt= 28.8142
+new_RTT_at: 57218.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.16386 target= 14.3122 rtt= 28.0042
+new_RTT_at: 57255.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.04933 target= -3.41957 rtt= 33.0056
+new_RTT_at: 57302.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.1186 target= -6.22258 rtt= 34.1032
+new_RTT_at: 57338.6 cur_dir= -3 prev_v= 1 cur_v= 1 window= 5.64773 target= 10.8589 rtt= 28.7613
+new_RTT_at: 57365.4 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.47086 target= 24.1791 rtt= 26.2648
+new_RTT_at: 57399.4 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.46048 target= 7.91793 rtt= 29.4785
+new_RTT_at: 57435.4 cur_dir= -4 prev_v= 1 cur_v= 1 window= 7.47645 target= -7.53423 rtt= 34.6531
+new_RTT_at: 57473.3 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.67074 target= -9.92882 rtt= 35.7213
+new_RTT_at: 57507.7 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.88244 target= -1.91837 rtt= 32.4586
+new_RTT_at: 57537.3 cur_dir= -4 prev_v= 1 cur_v= 1 window= 5.42291 target= 13.8945 rtt= 28.0912
+new_RTT_at: 57566.5 cur_dir= 6 prev_v= 1 cur_v= 1 window= 6.18013 target= 23.5619 rtt= 26.3576
+new_RTT_at: 57598.4 cur_dir= 6 prev_v= 1 cur_v= 2 window= 7.0469 target= 12.089 rtt= 28.4816
+new_RTT_at: 57637.6 cur_dir= -1 prev_v= 1 cur_v= 1 window= 6.95724 target= -6.33784 rtt= 34.1506
+new_RTT_at: 57679.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.13855 target= -15.3046 rtt= 38.4537
+new_RTT_at: 57718.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.17463 target= -1.03094 rtt= 32.1478
+new_RTT_at: 57753.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.40145 target= 24.0366 rtt= 26.286
+new_RTT_at: 57790.6 cur_dir= 7 prev_v= 1 cur_v= 2 window= 6.66038 target= 11.8954 rtt= 28.5248
+new_RTT_at: 57829.5 cur_dir= 1 prev_v= 1 cur_v= 2 window= 7.76004 target= -7.38282 rtt= 34.5884
+new_RTT_at: 57866.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.79774 target= -6.88827 rtt= 34.3793
+new_RTT_at: 57897.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 6.18662 target= 4.26112 rtt= 30.4741
+new_RTT_at: 57927.4 cur_dir= 7 prev_v= 1 cur_v= 1 window= 7.18618 target= 8.62679 rtt= 29.2991
+new_RTT_at: 57959.6 cur_dir= 8 prev_v= 1 cur_v= 2 window= 8.25521 target= 10.9443 rtt= 28.7415
+new_RTT_at: 57997.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 8.23995 target= -3.79941 rtt= 33.1484
+
+debug1:sec: 58 throughput: 2.28404 RTT: 32.4649
+new_RTT_at: 58036.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.27071 target= -11.101 rtt= 36.276
+new_RTT_at: 58070.4 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.35819 target= -1.06099 rtt= 32.1582
+new_RTT_at: 58102.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 6.108 target= 9.53417 rtt= 29.0757
+new_RTT_at: 58130.4 cur_dir= 5 prev_v= 1 cur_v= 1 window= 7.20034 target= 31.7559 rtt= 25.2679
+new_RTT_at: 58162.5 cur_dir= 8 prev_v= 1 cur_v= 2 window= 8.42347 target= 17.6803 rtt= 27.3451
+new_RTT_at: 58199.7 cur_dir= -1 prev_v= 1 cur_v= 1 window= 8.9093 target= -3.73018 rtt= 33.1222
+new_RTT_at: 58238.4 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.89743 target= -14.6187 rtt= 38.0772
+new_RTT_at: 58281.7 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.76229 target= -20.2871 rtt= 41.4628
+new_RTT_at: 58322.6 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.92575 target= -18.7139 rtt= 40.4582
+new_RTT_at: 58360.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 5.01399 target= -10.3255 rtt= 35.9066
+new_RTT_at: 58415.2 cur_dir= -7 prev_v= 1 cur_v= 1 window= 3.53009 target= -12.6887 rtt= 37.0629
+new_RTT_at: 58449.4 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.31001 target= 22.6225 rtt= 26.5026
+new_RTT_at: 58481.4 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.88316 target= 66.5556 rtt= 22.8859
+new_RTT_at: 58515.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 6.20666 target= 10.6691 rtt= 28.8055
+new_RTT_at: 58557.5 cur_dir= -5 prev_v= 1 cur_v= 1 window= 6.30368 target= -12.3644 rtt= 36.8988
+new_RTT_at: 58602.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.49812 target= -20.2357 rtt= 41.4292
+new_RTT_at: 58640.3 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.65538 target= -6.61399 rtt= 34.2648
+new_RTT_at: 58673.8 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.79777 target= 0.832589 rtt= 31.5245
+new_RTT_at: 58703.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 4.38103 target= 23.542 rtt= 26.3606
+new_RTT_at: 58739.6 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.26885 target= 8.3222 rtt= 29.3757
+new_RTT_at: 58775.4 cur_dir= -2 prev_v= 1 cur_v= 1 window= 5.50489 target= 0.0737315 rtt= 31.7737
+new_RTT_at: 58814.6 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.68796 target= -9.79188 rtt= 35.6579
+new_RTT_at: 58850.6 cur_dir= -5 prev_v= 1 cur_v= 1 window= 3.87234 target= -1.17528 rtt= 32.1978
+new_RTT_at: 58879.7 cur_dir= 0 prev_v= 1 cur_v= 1 window= 3.94628 target= 18.1015 rtt= 27.2678
+new_RTT_at: 58908.8 cur_dir= 4 prev_v= 1 cur_v= 1 window= 4.76644 target= 26.7023 rtt= 25.9045
+new_RTT_at: 58945.5 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.66932 target= -2.19555 rtt= 32.5575
+new_RTT_at: 58983.4 cur_dir= -6 prev_v= 1 cur_v= 1 window= 4.80658 target= -9.49626 rtt= 35.522
+
+debug1:sec: 59 throughput: 1.93452 RTT: 33.6225
+new_RTT_at: 59016.7 cur_dir= -5 prev_v= 1 cur_v= 1 window= 4.03252 target= 4.43741 rtt= 30.4233
+new_RTT_at: 59042.3 cur_dir= 5 prev_v= 1 cur_v= 1 window= 4.77618 target= 30.3257 rtt= 25.4373
+new_RTT_at: 59073.4 cur_dir= 5 prev_v= 1 cur_v= 2 window= 5.59819 target= 21.2462 rtt= 26.7235
+new_RTT_at: 59109.5 cur_dir= 4 prev_v= 1 cur_v= 2 window= 7.04205 target= 1.70678 rtt= 31.2452
+new_RTT_at: 59158.9 cur_dir= -9 prev_v= 1 cur_v= 1 window= 6.06744 target= -14.4923 rtt= 38.0088
+new_RTT_at: 59195.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.23222 target= -2.957 rtt= 32.8341
+new_RTT_at: 59232.9 cur_dir= -4 prev_v= 1 cur_v= 1 window= 4.61696 target= 11.1244 rtt= 28.7
+new_RTT_at: 59266.6 cur_dir= 5 prev_v= 1 cur_v= 1 window= 5.52491 target= 16.5895 rtt= 27.5505
+new_RTT_at: 59301.9 cur_dir= 4 prev_v= 1 cur_v= 2 window= 6.32119 target= -1.06679 rtt= 32.1602
+new_RTT_at: 59337.5 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.48388 target= -3.79843 rtt= 33.148
+new_RTT_at: 59368.5 cur_dir= 2 prev_v= 1 cur_v= 1 window= 5.41025 target= 10.9413 rtt= 28.781
+new_RTT_at: 59401.7 cur_dir= 7 prev_v= 1 cur_v= 2 window= 6.33438 target= 13.8191 rtt= 28.1458
+new_RTT_at: 59439.4 cur_dir= 3 prev_v= 1 cur_v= 2 window= 7.56143 target= -1.74744 rtt= 32.4368
+new_RTT_at: 59476.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.74703 target= -6.80602 rtt= 34.3836
+new_RTT_at: 59510.4 cur_dir= -7 prev_v= 1 cur_v= 1 window= 5.94565 target= 1.30985 rtt= 31.4098
+new_RTT_at: 59540.6 cur_dir= 2 prev_v= 1 cur_v= 1 window= 6.04669 target= 18.2352 rtt= 27.2823
+new_RTT_at: 59572.5 cur_dir= 7 prev_v= 1 cur_v= 2 window= 7.07315 target= 19.0433 rtt= 27.1375
+new_RTT_at: 59605.5 cur_dir= 8 prev_v= 2 cur_v= 4 window= 8.86819 target= 9.56394 rtt= 29.1072
+new_RTT_at: 59646.9 cur_dir= -7 prev_v= 1 cur_v= 1 window= 8.73038 target= -13.2188 rtt= 37.3738
+new_RTT_at: 59684.6 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.97375 target= -9.8826 rtt= 35.7386
+new_RTT_at: 59720.6 cur_dir= -8 prev_v= 1 cur_v= 1 window= 7.2866 target= -4.12305 rtt= 33.3103
+new_RTT_at: 59752.5 cur_dir= -8 prev_v= 1 cur_v= 1 window= 6.47502 target= 3.45025 rtt= 30.7506
+new_RTT_at: 59780.8 cur_dir= 5 prev_v= 1 cur_v= 1 window= 6.77415 target= 22.9412 rtt= 26.4917
+new_RTT_at: 59811.4 cur_dir= 8 prev_v= 1 cur_v= 2 window= 7.742 target= 20.3044 rtt= 26.9193
+new_RTT_at: 59847.6 cur_dir= 4 prev_v= 1 cur_v= 2 window= 9.00539 target= -0.181105 rtt= 31.8976
+new_RTT_at: 59886.5 cur_dir= -10 prev_v= 1 cur_v= 1 window= 8.17578 target= -6.66905 rtt= 34.3265
+new_RTT_at: 59924.5 cur_dir= -9 prev_v= 1 cur_v= 1 window= 7.32375 target= -3.71104 rtt= 33.1538
+new_RTT_at: 59955.5 cur_dir= 0 prev_v= 1 cur_v= 1 window= 7.27224 target= 12.5154 rtt= 28.426
+new_RTT_at: 59985.6 cur_dir= 8 prev_v= 1 cur_v= 1 window= 8.17097 target= 27.2753 rtt= 25.8656
+
+
+Data Successfully Transmitted
+	Throughput: 191480 bytes/sec
+	Average Delay: 0.0379676 sec/packet
+	Completion time: 60.0008sec
+
+	Avg. Throughput: 191480 bytes/sec
+	Average Delay: 0.0379676 sec/packet
+Sender: 64879873, Flow: 1. Transmitted for 60000 ms.

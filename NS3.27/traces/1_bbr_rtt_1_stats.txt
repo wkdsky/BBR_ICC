@@ -1,0 +1,4 @@
+0.164853  //loss_rate
+1223   //avg_kbps
+131.795  //avg_owd
+3052317  //recv_bytes
