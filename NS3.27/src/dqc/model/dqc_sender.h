@@ -50,6 +50,10 @@ public:
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
     typedef Callback<void,uint32_t,uint32_t> TraceRtt;
     void SetRttTraceFuc(TraceRtt cb);
+    typedef Callback<void,int32_t> TraceSendRate;
+    void SetSendRateTraceFuc(TraceSendRate cb);
+    typedef Callback<void,int32_t> TraceRecvRate;
+    void SetRecvRateTraceFuc(TraceRecvRate cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -64,6 +68,8 @@ public:
     void RegisterOnewayDelaySink(OneWayDelaySink *sink);
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
+    // FreqCC configuration methods
+    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain");
 private:
 	void DataGenerator(int times);
 	virtual void StartApplication() override;
@@ -105,5 +111,7 @@ private:
     TraceLossPacketDelay m_traceLossDelay;
     TraceOwdAtSender m_traceOwd;
     TraceRtt m_traceRttCb;
-};   
+    TraceSendRate m_traceSendRateCb;
+    TraceRecvRate m_traceRecvRateCb;
+};
 }

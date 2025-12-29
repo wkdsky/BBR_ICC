@@ -24,7 +24,7 @@
 #include "quic_logging.h"
 namespace dqc {
 
-class QUIC_EXPORT_PRIVATE Bbr2Sender final : public SendAlgorithmInterface {
+class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
  public:
   Bbr2Sender(QuicTime now,
              const RttStats* rtt_stats,
@@ -141,6 +141,11 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender final : public SendAlgorithmInterface {
 
   DebugState ExportDebugState() const;
 
+ protected:
+  // Protected members for subclasses like FreqccSender
+  const RttStats* const rtt_stats_;
+  Bbr2Mode mode_;
+
  private:
   void UpdatePacingRate(QuicByteCount bytes_acked);
   void UpdateCongestionWindow(QuicByteCount bytes_acked);
@@ -175,9 +180,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender final : public SendAlgorithmInterface {
 
   const Bbr2Params& params() const { return params_; }
   void UpdateRoundTripAlpha();
-  Bbr2Mode mode_;
 
-  const RttStats* const rtt_stats_;
   const QuicUnackedPacketMap* const unacked_packets_;
   Random* random_;
   QuicConnectionStats* connection_stats_;

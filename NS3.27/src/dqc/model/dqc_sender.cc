@@ -5,6 +5,8 @@
 #include "ns3/time_tag.h"
 #include "byte_codec.h"
 #include "proto_utils.h"
+#include "freqcc_sender.h"
+#include "proto_send_algorithm_interface.h"
 using namespace dqc;
 namespace ns3{
 NS_LOG_COMPONENT_DEFINE("dqcsender");
@@ -60,6 +62,12 @@ void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 }
 void DqcSender::SetRttTraceFuc(TraceRtt cb){
     m_traceRttCb=cb;
+}
+void DqcSender::SetSendRateTraceFuc(TraceSendRate cb){
+    m_traceSendRateCb=cb;
+}
+void DqcSender::SetRecvRateTraceFuc(TraceRecvRate cb){
+    m_traceRecvRateCb=cb;
 }
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
     if(!m_traceLossDelay.IsNull()){
@@ -168,6 +176,18 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 		m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());
 		//NS_LOG_INFO("bw "<<std::to_string((int32_t)send_bw.ToKBitsPerSecond()));
 	}
+    // Trace send rate (pacing rate)
+    if(!m_traceSendRateCb.IsNull()){
+        SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+        SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+        if(algo){
+            ByteCount in_flight = 0;
+            ByteCount cwnd = 0;
+            sent_manager->InFlight(&in_flight, &cwnd);
+            QuicBandwidth pacing_rate = algo->PacingRate(in_flight);
+            m_traceSendRateCb((int32_t)pacing_rate.ToKBitsPerSecond());
+        }
+    }
     m_socket->SendTo(p,0,InetSocketAddress{m_peerIp,m_peerPort});
 }
 void DqcSender::OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) {
@@ -277,6 +297,66 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
             RttStats* rtt_stats=sent_manager->GetRttStats();
             uint32_t rtt=(uint32_t)rtt_stats->latest_rtt().ToMilliseconds();
             m_traceRttCb(seq,rtt);
+        }
+        // Trace recv rate (delivery rate / bandwidth estimate from ACK) if callback is set
+        // This is the ack_rate calculated as in BBR: bytes_acked / time_between_acks
+        if(!m_traceRecvRateCb.IsNull()){
+            SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+            SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+            if(algo){
+                // BandwidthEstimate returns the delivery rate (min of send_rate, ack_rate)
+                QuicBandwidth recv_rate = algo->BandwidthEstimate();
+                m_traceRecvRateCb((int32_t)recv_rate.ToKBitsPerSecond());
+            }
+        }
+    }
+}
+void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps, const std::string& osc_mode){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCC){
+        FreqccSender* freqcc = static_cast<FreqccSender*>(algo);
+
+        // Set frequency
+        freqcc->SetOscillationFrequency(freq_hz);
+
+        // Set amplitude mode
+        FreqAmplitudeMode amp_mode = FreqAmplitudeMode::kFixed;
+        uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
+
+        if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
+            amp_mode = FreqAmplitudeMode::kMiu2;
+        } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
+            amp_mode = FreqAmplitudeMode::kMiu3;
+        } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
+            amp_mode = FreqAmplitudeMode::kMiu4;
+        } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
+            amp_mode = FreqAmplitudeMode::kMiu8;
+        } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
+            amp_mode = FreqAmplitudeMode::kSR2;
+        } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
+            amp_mode = FreqAmplitudeMode::kSR3;
+        } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
+            amp_mode = FreqAmplitudeMode::kSR4;
+        } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
+            amp_mode = FreqAmplitudeMode::kSR8;
+        } else {
+            // Default to fixed mode, try to parse as number
+            amp_mode = FreqAmplitudeMode::kFixed;
+            try {
+                double val = std::stod(amplitude_mode);
+                fixed_bps = static_cast<uint64_t>(val * 1000000);
+            } catch(...) {
+                // Keep fixed_bps from parameter
+            }
+        }
+        freqcc->SetOscillationAmplitude(amp_mode, fixed_bps);
+
+        // Set oscillation mode
+        if(osc_mode == "only_probeBW" || osc_mode == "only_probebw"){
+            freqcc->SetOscillationMode(FreqOscillationMode::kOnlyProbeBW);
+        } else {
+            freqcc->SetOscillationMode(FreqOscillationMode::kAfterDrain);
         }
     }
 }

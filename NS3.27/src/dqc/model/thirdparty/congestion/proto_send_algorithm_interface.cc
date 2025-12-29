@@ -2,6 +2,7 @@
 
 #include "balia_sender_bytes.h"
 //#include "proto_bbr2_sender.h"
+#include "freqcc_sender.h"
 #include "quic_bbr2_sender.h"
 #include "quic_bbr_sender.h"
 #include "couple_bbr_sender.h"
@@ -299,6 +300,15 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                max_congestion_window,
                                random,
 				stats,true);
+        }
+        case kFreqCC:{
+            return new FreqccSender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+                               stats);
         }
         case kCopa:{
             return new CopaSender(clock->Now(),

@@ -11,6 +11,8 @@ enum DqcTraceEnable:uint8_t{
     E_DQC_BW=0x04,
     E_DQC_GOODPUT=0x08,
     E_DQC_STAT=0x10,
+    E_DQC_SEND_RATE=0x20,
+    E_DQC_RECV_RATE=0x40,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -27,6 +29,8 @@ public:
     void OnRtt(uint32_t seq,uint32_t rtt);
     void OnBw(int32_t kbps);
     void OnGoodput(uint32_t kbps);
+    void OnSendRate(int32_t kbps);
+    void OnRecvRate(int32_t kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -36,11 +40,15 @@ private:
     void OpenRttFile(std::string name);
     void OpenBandwidthFile(std::string name);
     void OpenGoodputFile(std::string name);
+    void OpenSendRateFile(std::string name);
+    void OpenRecvRateFile(std::string name);
     void OpenStatsFile(std::string name);
     void CloseOwdFile();
     void CloseRttFile();
     void CloseBandwidthFile();
     void CloseGoodputFile();
+    void CloseSendRateFile();
+    void CloseRecvRateFile();
     void CloseStatsFile();
     int m_id=0;
     TraceStats m_traceStatsCb;
@@ -48,6 +56,8 @@ private:
     std::fstream m_rtt;
     std::fstream m_bw;
     std::fstream m_googput;
+    std::fstream m_sendRate;
+    std::fstream m_recvRate;
     std::fstream m_stats;
 };
 class DqcTraceState{

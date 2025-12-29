@@ -27,6 +27,12 @@ void DqcTrace::Log(std::string name,uint8_t enable){
     if(enable&E_DQC_GOODPUT){
         OpenGoodputFile(name);
     }
+    if(enable&E_DQC_SEND_RATE){
+        OpenSendRateFile(name);
+    }
+    if(enable&E_DQC_RECV_RATE){
+        OpenRecvRateFile(name);
+    }
     if(enable&E_DQC_STAT){
         OpenStatsFile(name);
     }
@@ -78,7 +84,31 @@ void DqcTrace::OpenGoodputFile(std::string name){
     }else{
         path=std::string(kDqcTracePath)+name+"_good.txt";
     }
-    m_googput.open(path.c_str(), std::fstream::out);  	
+    m_googput.open(path.c_str(), std::fstream::out);
+}
+void DqcTrace::OpenSendRateFile(std::string name){
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +name+"_sendrate.txt";
+    }else{
+        path=std::string(kDqcTracePath)+name+"_sendrate.txt";
+    }
+    m_sendRate.open(path.c_str(), std::fstream::out);
+}
+void DqcTrace::OpenRecvRateFile(std::string name){
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +name+"_recvrate.txt";
+    }else{
+        path=std::string(kDqcTracePath)+name+"_recvrate.txt";
+    }
+    m_recvRate.open(path.c_str(), std::fstream::out);
 }
 void DqcTrace::OpenStatsFile(std::string name){
     char buf[FILENAME_MAX];
@@ -116,7 +146,19 @@ void DqcTrace::OnGoodput(uint32_t kbps){
 	if(m_googput.is_open()){
 		float now=Simulator::Now().GetSeconds();
         m_googput<<now<<"\t"<<kbps<<std::endl;
-	}     	
+	}
+}
+void DqcTrace::OnSendRate(int32_t kbps){
+    if(m_sendRate.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_sendRate<<now<<"\t"<<kbps<<std::endl;
+    }
+}
+void DqcTrace::OnRecvRate(int32_t kbps){
+    if(m_recvRate.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_recvRate<<now<<"\t"<<kbps<<std::endl;
+    }
 }
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
                         uint64_t recv_bytes,uint64_t duration,
@@ -139,6 +181,8 @@ void DqcTrace::Close(){
     CloseRttFile();
     CloseBandwidthFile();
 	CloseGoodputFile();
+    CloseSendRateFile();
+    CloseRecvRateFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -160,7 +204,19 @@ void DqcTrace::CloseGoodputFile(){
     if(m_googput.is_open()){
         m_googput.flush();
         m_googput.close();
-    }	
+    }
+}
+void DqcTrace::CloseSendRateFile(){
+    if(m_sendRate.is_open()){
+        m_sendRate.flush();
+        m_sendRate.close();
+    }
+}
+void DqcTrace::CloseRecvRateFile(){
+    if(m_recvRate.is_open()){
+        m_recvRate.flush();
+        m_recvRate.close();
+    }
 }
 void DqcTrace::CloseStatsFile(){
     if(m_stats.is_open()){
