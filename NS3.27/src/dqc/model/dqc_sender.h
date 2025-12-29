@@ -48,6 +48,8 @@ public:
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb);
     typedef Callback<void,uint32_t,uint32_t> TraceOwdAtSender;
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
+    typedef Callback<void,uint32_t,uint32_t> TraceRtt;
+    void SetRttTraceFuc(TraceRtt cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -102,5 +104,6 @@ private:
 	TraceSentSeq m_traceSentSeqCb;
     TraceLossPacketDelay m_traceLossDelay;
     TraceOwdAtSender m_traceOwd;
+    TraceRtt m_traceRttCb;
 };   
 }

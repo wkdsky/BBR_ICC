@@ -1,52 +1,60 @@
-# Introspective Congestion Control for Consistent High Performance
-Code of ICC for Eurosys'25: NS3+User-space
+ICC（Inter-flow Congestion Control）的发送速率波动与频域检测相关算法主要位于以下位置：
 
-### Environment
+  核心文件位置
 
-Dell 5810| Intel(R) Xeon(R) W-2133 CPU @ 3.60GHz|16G
+  | 实现版本    | 文件路径
+                              |
+  |---------|-------------------------------------------
+  --------------------|
+  | 用户空间实现  | /home/wkd/BBR_ICC/GenericCC/ICC.cc
+                            |
+  | NS3仿真实现 | /home/wkd/BBR_ICC/NS3.27/src/internet/
+  model/tcp-periodicDC.cc |
 
-OS: Ubuntu 18.04.6 LTS 
+  ---
+  频域检测算法 (find_fm 函数)
 
-### Dependencies
+  用户空间版本
 
-Automatically install dependencies via
+  - 文件: GenericCC/ICC.cc
+  - 行号: 120-185
 
-`sudo bash install_deps.sh`
+  NS3仿真版本
 
-Or manually install dependencies according to the corressponding README
+  - 文件: NS3.27/src/internet/model/tcp-periodicDC.cc
+  - 行号: 965-1052
 
-### Description of directory and source codes
+  算法核心步骤：
 
-`NS3/`: Simulation platform of ICC based on NS3.27
+  1. 使用 FFTW3
+  库对拥塞窗口(CWND)和排队延迟(Qd)序列做FFT变换
+  2. 提取主导频率 fm
+  3. 计算CWND和RTT频谱的相似度 (similarity)
+  4. 根据相似度阈值判断周期性状态
 
-`NS3/scratch/periodcCCEvaDumbbell.cc`: An simple evaluation on dumbbell topology
+  ---
+  发送速率波动检测
 
-`NS3/src/internet/model/tcp-periodicDC.cc/h`: The core logic of ICC
+  数据采集 (时域)
 
-`User-space/`: User-space implementation of ICC based on [GenericCC](https://github.com/venkatarun95/genericCC)
+  - 用户空间 (ICC.cc:312-318):
+  P_cwnd.push_back(_the_window);   // 拥塞窗口样本
+  P_qd.push_back(rtt_measured);    // 排队延迟样本
+  - NS3 (tcp-periodicDC.cc:391-392):
+  QdArray.push_back(Qd);
+  CwndArray.push_back(tcb->m_cWnd);
 
-`User-space/ICC.cc/hh`: The core logic of ICC
+  周期性检测逻辑 (tcp-periodicDC.cc:435-439)
 
-### Quick Build
+  if(fm>0 && oldFm-std::min(5*fmth,2.0)<=fm &&
+     fm<=oldFm+std::min(5*fmth,2.0) &&
+     curAm0>=0.9*preAm0 && curAm0<=1.1*preAm0)
+    // 检测到周期性状态
 
-#### Update submodules
+  ---
+  关键参数
 
-`git submodule update --init --recursive --remote`
-
-#### NS3
-
-`cd NS3/`
-
-`CC='gcc-5' CXX='g++-5' ./waf configure`
-
-`./waf`
-
-#### User-space
-
-`cd User-space/`
-
-`makepp`
-
-### Acknowledgement
-
-Thanks a lot for all fixes and suggestions from Reviews of AES of EuroSys'25!
+  - fm: 主导频率 (Hz)
+  - fs: 采样频率 = n/cycle
+  - similarity: FFT频谱归一化差异
+  - simiD: 时域指标，判断Qd和CWND变化的相关性

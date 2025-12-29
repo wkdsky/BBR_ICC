@@ -58,6 +58,9 @@ void DqcSender::SetTraceLossPacketDelay(TraceLossPacketDelay cb){
 void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 	 m_traceOwd=cb;
 }
+void DqcSender::SetRttTraceFuc(TraceRtt cb){
+    m_traceRttCb=cb;
+}
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
     if(!m_traceLossDelay.IsNull()){
         int32_t num=(int32_t)seq.ToUint64();
@@ -267,6 +270,13 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
         }
         for(auto it=m_sinks.begin();it!=m_sinks.end();it++){
             (*it)->OnOneWayDelaySample(m_id,seq,owd);
+        }
+        // Trace RTT if callback is set
+        if(!m_traceRttCb.IsNull()){
+            SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+            RttStats* rtt_stats=sent_manager->GetRttStats();
+            uint32_t rtt=(uint32_t)rtt_stats->latest_rtt().ToMilliseconds();
+            m_traceRttCb(seq,rtt);
         }
     }
 }

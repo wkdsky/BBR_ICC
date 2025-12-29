@@ -1,14 +1,13 @@
 /** Network topology
  *
- *    100Mb/s, 1ms                            100Mb/s, 1ms
+ *    100Mb/s, 2ms                            100Mb/s, 2ms
  * n0--------------|                    |---------------n4
- *                 |   50Mbps/s, 18ms   |
+ *                 |   10Mbps/s, 21ms   |
  *                 n2------------------n3
- *    100Mb/s, 1ms |                    |    100Mb/s, 1ms
+ *    100Mb/s, 2ms |                    |    100Mb/s, 2ms
  * n1--------------|                    |---------------n5
  *
  *
- *  1 Reno, 1 BBR, 50M, 40ms, buffer = 1xBDP
  */
 
 #include "ns3/core-module.h"
@@ -57,6 +56,7 @@ Ipv4InterfaceContainer i2i3;
 Ipv4InterfaceContainer i3i4;
 Ipv4InterfaceContainer i3i5;
 
+bool m_state = false;
 typedef struct
 {
 uint64_t bps;
@@ -71,15 +71,31 @@ n0--L0--n2--L1--n3--L2--n4
 n1--L3--n2--L1--n3--L4--n5
 */
 link_config_t p4p[]={
-[0]={100*1000000,1,20},
-[1]={50*1000000,18,20},
-[2]={100*1000000,1,20},
-[3]={100*1000000,1,20},
-[4]={100*1000000,1,20},
+[0]={40*1000000,2,150},
+[1]={10*1000000,18,150},
+[2]={40*1000000,2,150},
+[3]={40*1000000,2,150},
+[4]={40*1000000,2,150},
 };
-const uint32_t TOPO_DEFAULT_BW     = 50 * 1000 * 1000;    // in bps: 10Mbps
-const uint32_t TOPO_DEFAULT_PDELAY =      18;    // in ms:   18ms
-const uint32_t TOPO_DEFAULT_QDELAY =     20;    // in ms:  20ms
+const uint32_t TOPO_DEFAULT_BW     = 10 * 1000 * 1000;    // in bps: 10Mbps
+const uint32_t TOPO_DEFAULT_PDELAY =      18;    // in ms:   100ms
+const uint32_t TOPO_DEFAULT_QDELAY =     150;    // in ms:  300ms
+
+static void ChangeDataRate ()
+{
+    std::cout << "ChangeDataRate " << m_state << std::endl;
+    if (!m_state){
+        m_state = true;
+    }
+    else{
+        Config::Set ("/NodeList/2/DeviceList/3/DataRate", StringValue ("20Mbps"));
+        //Config::Set ("/NodeList/3/DeviceList/4/DataRate", StringValue ("20Mbps"));
+        //Config::Set ("/NodeList/0/DeviceList/4/DataRate", StringValue ("20Mbps"));
+        m_state = false;
+    }
+      Simulator::Schedule (Seconds (20), ChangeDataRate);
+}
+
 static void InstallDqc( dqc::CongestionControlType cc_type,
                         Ptr<Node> sender,Ptr<Node> receiver,
                         uint16_t send_port,uint16_t recv_port,
@@ -110,8 +126,6 @@ static void InstallDqc( dqc::CongestionControlType cc_type,
     }
     if(trace){
         sendApp->SetBwTraceFuc(MakeCallback(&DqcTrace::OnBw,trace));
-	sendApp->SetTraceOwdAtSender(MakeCallback(&DqcTrace::OnRtt,trace));
-
         recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
         recvApp->SetStatsTraceFuc(MakeCallback(&DqcTrace::OnStats,trace));
@@ -120,8 +134,7 @@ static void InstallDqc( dqc::CongestionControlType cc_type,
 }
 void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int loss_integer=0){
     std::string instance=std::to_string(ins);
-    uint64_t linkBw   = TOPO_DEFAULT_BW;
-    uint32_t msDelay  = TOPO_DEFAULT_PDELAY;
+    uint64_t linkBw   = p4p[1].bps;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
 
@@ -130,12 +143,10 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     int end_time=sim_time;
     float appStart=start_time;
     float appStop=end_time;
-    p4p[1].bps=linkBw;
-    p4p[1].msDelay=msDelay;
     uint32_t owd1=p4p[0].msDelay+p4p[1].msDelay+p4p[2].msDelay;
     uint32_t owd2=p4p[3].msDelay+p4p[1].msDelay+p4p[4].msDelay;
     uint32_t owd=std::max(owd1,owd2);
-    uint32_t msQdelay=owd*2;
+    uint32_t msQdelay=owd*10;
     for(size_t i=0;i<sizeof(p4p)/sizeof(p4p[0]);i++){
         p4p[i].msQdelay=msQdelay;
     }
@@ -146,7 +157,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     n2n3 = NodeContainer (c.Get (2), c.Get (3));
     n3n4 = NodeContainer (c.Get (3), c.Get (4));
     n3n5 = NodeContainer (c.Get (3), c.Get (5));
-    uint32_t meanPktSize = 1500;
+
     link_config_t *config=p4p;
     uint32_t bufSize=0;	
     
@@ -157,7 +168,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     PointToPointHelper p2p;
     TrafficControlHelper tch;
     //L0
-    bufSize =config[0].bps * config[0].msQdelay / 8000;
+    bufSize =config[0].bps * config[0].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -165,7 +176,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (config[0].msDelay)));
     NetDeviceContainer devn0n2 = p2p.Install (n0n2);
     //L3
-    bufSize =config[3].bps * config[3].msQdelay / 8000;
+    bufSize =config[3].bps * config[3].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -173,7 +184,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (config[3].msDelay)));
     NetDeviceContainer devn1n2 = p2p.Install (n1n2);
     //L1
-    bufSize =config[1].bps * config[1].msQdelay / 8000;
+    bufSize =config[1].bps * config[1].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize)); 
@@ -181,7 +192,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (config[1].msDelay)));
     NetDeviceContainer devn2n3 = p2p.Install (n2n3);
     //L2
-    bufSize =config[2].bps * config[2].msQdelay / 8000;
+    bufSize =config[2].bps * config[2].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -189,7 +200,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (config[2].msDelay)));
     NetDeviceContainer devn3n4 = p2p.Install (n3n4);
     //L4
-    bufSize =config[4].bps * config[4].msQdelay / 8000;
+    bufSize =config[4].bps * config[4].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -222,11 +233,8 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     // Set up the routing
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
     dqc::CongestionControlType cc=kBBRv2;
-    dqc::CongestionControlType cc2=kRenoBytes;
 
-    //no use
-    CongestionControlManager cong_ops_manager;
-    RegisterCCManager(&cong_ops_manager);
+
     
     uint32_t max_bps=0;
     int test_pair=1;
@@ -235,7 +243,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     std::vector<std::unique_ptr<DqcTrace>> traces;
     std::string log;
     std::string delimiter="_";
-    std::string prefix=instance+delimiter+algo+delimiter;
+    std::string prefix=instance+delimiter+algo+delimiter+"rtt"+delimiter;
     log=prefix+std::to_string(test_pair);
     std::unique_ptr<DqcTrace> trace;
 
@@ -243,22 +251,10 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
-    trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
+    trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT);  
 
-    InstallDqc(cc2,c.Get(0),c.Get(4),sendPort,recvPort,appStart,appStop+0.01,trace.get(),stat,max_bps,sender_id);
-    sender_id++;
-    test_pair++;
-    sendPort++;
-    recvPort++;
-    traces.push_back(std::move(trace));
-
-    trace.reset(new DqcTrace(test_pair));
-    stat->ReisterAvgDelayId(test_pair);
-    log=prefix+std::to_string(test_pair);
-    trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);
-	InstallDqc(cc,c.Get(1),c.Get(5),sendPort,recvPort,appStart+0.01,appStop,trace.get(),stat,max_bps,sender_id);
+    InstallDqc(cc,c.Get(0),c.Get(4),sendPort,recvPort,appStart+0.01,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;
     test_pair++;
     sendPort++;
@@ -266,21 +262,23 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     traces.push_back(std::move(trace));
 
     Simulator::Stop (Seconds(sim_dur));
+    Simulator::Schedule (Seconds (20), &ChangeDataRate);
+
     Simulator::Run ();
     Simulator::Destroy();  
     stat->Flush(linkBw,sim_dur);    
 }
 int main (int argc, char *argv[]){
-    int sim_time=120;
+    int sim_time=60;
     int ins[]={1};
-    char *algos[]={"reno"};
-    for(int c=0;c<(int)sizeof(algos)/sizeof(algos[0]);c++){
+    const char *algos[]={"bbrv2"};
+    for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
         std::string cong=std::string(algos[c]);
         std::string name=cong;
         std::unique_ptr<DqcTraceState> stat;
         stat.reset(new DqcTraceState(name));
         auto inner_start = std::chrono::high_resolution_clock::now();
-        for(int i=0;i<sizeof(ins)/sizeof(ins[0]);i++){
+        for (size_t i = 0; i < sizeof(ins) / sizeof(ins[0]); ++i){
             ns3_rtt(ins[i],cong,stat.get(),sim_time);
         }
         auto inner_end = std::chrono::high_resolution_clock::now();
