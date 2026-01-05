@@ -5,7 +5,7 @@
 #include <set>
 #include "ns3/callback.h"
 namespace ns3{
-enum DqcTraceEnable:uint8_t{
+enum DqcTraceEnable:uint16_t{
     E_DQC_OWD=0x01,
     E_DQC_RTT=0x02,
     E_DQC_BW=0x04,
@@ -13,6 +13,7 @@ enum DqcTraceEnable:uint8_t{
     E_DQC_STAT=0x10,
     E_DQC_SEND_RATE=0x20,
     E_DQC_RECV_RATE=0x40,
+    E_DQC_BBR_MODE=0x80,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -24,13 +25,14 @@ public:
     void SetStatsTraceFuc(TraceStats cb){
         m_traceStatsCb=cb;
     }
-    void Log(std::string name,uint8_t enable);
+    void Log(std::string name,uint16_t enable);
     void OnOwd(uint32_t seq,uint32_t owd,uint32_t size);
     void OnRtt(uint32_t seq,uint32_t rtt);
     void OnBw(int32_t kbps);
     void OnGoodput(uint32_t kbps);
     void OnSendRate(int32_t kbps);
     void OnRecvRate(int32_t kbps);
+    void OnBbrMode(int32_t mode);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -42,6 +44,7 @@ private:
     void OpenGoodputFile(std::string name);
     void OpenSendRateFile(std::string name);
     void OpenRecvRateFile(std::string name);
+    void OpenBbrModeFile(std::string name);
     void OpenStatsFile(std::string name);
     void CloseOwdFile();
     void CloseRttFile();
@@ -49,6 +52,7 @@ private:
     void CloseGoodputFile();
     void CloseSendRateFile();
     void CloseRecvRateFile();
+    void CloseBbrModeFile();
     void CloseStatsFile();
     int m_id=0;
     TraceStats m_traceStatsCb;
@@ -58,6 +62,7 @@ private:
     std::fstream m_googput;
     std::fstream m_sendRate;
     std::fstream m_recvRate;
+    std::fstream m_bbrMode;
     std::fstream m_stats;
 };
 class DqcTraceState{

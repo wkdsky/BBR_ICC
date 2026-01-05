@@ -109,7 +109,7 @@ QuicLimits<QuicByteCount> Bbr2Sender::GetCwndLimitsByMode() const {
 }
 
 const QuicLimits<QuicByteCount>& Bbr2Sender::cwnd_limits() const {
-  return params().cwnd_limits;
+  return Params().cwnd_limits;
 }
 
 void Bbr2Sender::AdjustNetworkParameters(QuicBandwidth bandwidth,
@@ -181,7 +181,7 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
   }
   last_sample_is_app_limited_ = congestion_event.last_sample_is_app_limited;
   if (congestion_event.bytes_in_flight == 0 &&
-      params().avoid_unnecessary_probe_rtt) {
+      Params().avoid_unnecessary_probe_rtt) {
     OnEnterQuiescence(event_time);
   }
 
@@ -275,7 +275,7 @@ void Bbr2Sender::OnPacketSent(QuicTime sent_time,
                 << ", total_acked:" << model_.total_bytes_acked()
                 << ", total_lost:" << model_.total_bytes_lost() << "  @ "
                 << sent_time;
-  if (bytes_in_flight == 0 && params().avoid_unnecessary_probe_rtt) {
+  if (bytes_in_flight == 0 && Params().avoid_unnecessary_probe_rtt) {
     OnExitQuiescence(sent_time);
   }
   model_.OnPacketSent(sent_time, bytes_in_flight, packet_number, bytes,
@@ -304,7 +304,7 @@ void Bbr2Sender::OnApplicationLimited(QuicByteCount bytes_in_flight) {
   if (bytes_in_flight >= GetCongestionWindow()) {
     return;
   }
-  if (params().flexible_app_limited && IsPipeSufficientlyFull()) {
+  if (Params().flexible_app_limited && IsPipeSufficientlyFull()) {
     return;
   }
 
@@ -356,7 +356,7 @@ bool Bbr2Sender::ShouldSendProbingPacket() const {
   // TODO(b/77975811): If the pipe is highly under-utilized, consider not
   // sending a probing transmission, because the extra bandwidth is not needed.
   // If flexible_app_limited is enabled, check if the pipe is sufficiently full.
-  if (params().flexible_app_limited) {
+  if (Params().flexible_app_limited) {
     const bool is_pipe_sufficiently_full = IsPipeSufficientlyFull();
     QUIC_DVLOG(3) << this << " CWND: " << GetCongestionWindow()
                   << ", inflight: " << unacked_packets_->bytes_in_flight()

@@ -6,6 +6,7 @@
 #include "byte_codec.h"
 #include "proto_utils.h"
 #include "freqcc_sender.h"
+#include "freqccv2_sender.h"
 #include "proto_send_algorithm_interface.h"
 using namespace dqc;
 namespace ns3{
@@ -68,6 +69,9 @@ void DqcSender::SetSendRateTraceFuc(TraceSendRate cb){
 }
 void DqcSender::SetRecvRateTraceFuc(TraceRecvRate cb){
     m_traceRecvRateCb=cb;
+}
+void DqcSender::SetBbrModeTraceFuc(TraceBbrMode cb){
+    m_traceBbrModeCb=cb;
 }
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
     if(!m_traceLossDelay.IsNull()){
@@ -186,6 +190,20 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
             sent_manager->InFlight(&in_flight, &cwnd);
             QuicBandwidth pacing_rate = algo->PacingRate(in_flight);
             m_traceSendRateCb((int32_t)pacing_rate.ToKBitsPerSecond());
+        }
+    }
+    // Trace BBR mode
+    if(!m_traceBbrModeCb.IsNull()){
+        SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+        SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+        if(algo && algo->GetCongestionControlType() == kFreqCC){
+            FreqccSender* freqcc = static_cast<FreqccSender*>(algo);
+            int32_t mode_index = freqcc->GetCurrentBbrModeIndex();
+            m_traceBbrModeCb(mode_index);
+        } else if(algo && algo->GetCongestionControlType() == kFreqCCv2){
+            FreqCCv2Sender* freqccv2 = static_cast<FreqCCv2Sender*>(algo);
+            int32_t mode_index = freqccv2->GetCurrentBbrModeIndex();
+            m_traceBbrModeCb(mode_index);
         }
     }
     m_socket->SendTo(p,0,InetSocketAddress{m_peerIp,m_peerPort});
@@ -341,14 +359,22 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
         } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
             amp_mode = FreqAmplitudeMode::kSR8;
         } else {
-            // Default to fixed mode, try to parse as number
+            // Default to fixed mode
+            // If amplitude_mode is "0" or empty, use fixed_mbps parameter
+            // Otherwise try to parse amplitude_mode as a number (Mbps)
             amp_mode = FreqAmplitudeMode::kFixed;
-            try {
-                double val = std::stod(amplitude_mode);
-                fixed_bps = static_cast<uint64_t>(val * 1000000);
-            } catch(...) {
-                // Keep fixed_bps from parameter
+            if(amplitude_mode != "0" && !amplitude_mode.empty()) {
+                try {
+                    double val = std::stod(amplitude_mode);
+                    if(val > 0) {
+                        fixed_bps = static_cast<uint64_t>(val * 1000000);
+                    }
+                    // If val == 0, keep fixed_bps from fixed_mbps parameter
+                } catch(...) {
+                    // Keep fixed_bps from parameter
+                }
             }
+            // Otherwise use fixed_bps which was already set from fixed_mbps
         }
         freqcc->SetOscillationAmplitude(amp_mode, fixed_bps);
 
@@ -357,6 +383,56 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
             freqcc->SetOscillationMode(FreqOscillationMode::kOnlyProbeBW);
         } else {
             freqcc->SetOscillationMode(FreqOscillationMode::kAfterDrain);
+        }
+    } else if(algo && algo->GetCongestionControlType() == kFreqCCv2){
+        FreqCCv2Sender* freqccv2 = static_cast<FreqCCv2Sender*>(algo);
+
+        // Set frequency
+        freqccv2->SetOscillationFrequency(freq_hz);
+
+        // Set amplitude mode
+        FreqCCv2AmplitudeMode amp_mode = FreqCCv2AmplitudeMode::kFixed;
+        uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
+
+        if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
+            amp_mode = FreqCCv2AmplitudeMode::kMiu2;
+        } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
+            amp_mode = FreqCCv2AmplitudeMode::kMiu3;
+        } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
+            amp_mode = FreqCCv2AmplitudeMode::kMiu4;
+        } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
+            amp_mode = FreqCCv2AmplitudeMode::kMiu8;
+        } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
+            amp_mode = FreqCCv2AmplitudeMode::kSR2;
+        } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
+            amp_mode = FreqCCv2AmplitudeMode::kSR3;
+        } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
+            amp_mode = FreqCCv2AmplitudeMode::kSR4;
+        } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
+            amp_mode = FreqCCv2AmplitudeMode::kSR8;
+        } else {
+            // Default to fixed mode
+            amp_mode = FreqCCv2AmplitudeMode::kFixed;
+            if(amplitude_mode != "0" && !amplitude_mode.empty()) {
+                try {
+                    double val = std::stod(amplitude_mode);
+                    if(val > 0) {
+                        fixed_bps = static_cast<uint64_t>(val * 1000000);
+                    }
+                } catch(...) {
+                    // Keep fixed_bps from parameter
+                }
+            }
+        }
+        freqccv2->SetOscillationAmplitude(amp_mode, fixed_bps);
+
+        // Set oscillation mode (FreqCCv2 supports additional refill_up mode)
+        if(osc_mode == "only_probeBW" || osc_mode == "only_probebw"){
+            freqccv2->SetOscillationMode(FreqCCv2OscillationMode::kOnlyProbeBW);
+        } else if(osc_mode == "refill_up" || osc_mode == "refillup"){
+            freqccv2->SetOscillationMode(FreqCCv2OscillationMode::kRefillUp);
+        } else {
+            freqccv2->SetOscillationMode(FreqCCv2OscillationMode::kAfterDrain);
         }
     }
 }

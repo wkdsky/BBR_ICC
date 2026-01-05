@@ -14,7 +14,7 @@ DqcTrace::DqcTrace(int id):m_id(id){}
 DqcTrace::~DqcTrace(){
     Close();
 }
-void DqcTrace::Log(std::string name,uint8_t enable){
+void DqcTrace::Log(std::string name,uint16_t enable){
     if(enable&E_DQC_OWD){
         OpenOwdFile(name);
     }
@@ -32,6 +32,9 @@ void DqcTrace::Log(std::string name,uint8_t enable){
     }
     if(enable&E_DQC_RECV_RATE){
         OpenRecvRateFile(name);
+    }
+    if(enable&E_DQC_BBR_MODE){
+        OpenBbrModeFile(name);
     }
     if(enable&E_DQC_STAT){
         OpenStatsFile(name);
@@ -110,6 +113,18 @@ void DqcTrace::OpenRecvRateFile(std::string name){
     }
     m_recvRate.open(path.c_str(), std::fstream::out);
 }
+void DqcTrace::OpenBbrModeFile(std::string name){
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +name+"_bbrmode.txt";
+    }else{
+        path=std::string(kDqcTracePath)+name+"_bbrmode.txt";
+    }
+    m_bbrMode.open(path.c_str(), std::fstream::out);
+}
 void DqcTrace::OpenStatsFile(std::string name){
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
@@ -160,6 +175,30 @@ void DqcTrace::OnRecvRate(int32_t kbps){
         m_recvRate<<now<<"\t"<<kbps<<std::endl;
     }
 }
+void DqcTrace::OnBbrMode(int32_t mode){
+    if(m_bbrMode.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        // mode encoding:
+        // 0: STARTUP
+        // 1: DRAIN
+        // 2: PROBE_BW_DOWN
+        // 3: PROBE_BW_CRUISE
+        // 4: PROBE_BW_REFILL
+        // 5: PROBE_BW_UP
+        // 6: PROBE_RTT
+        const char* mode_names[] = {
+            "start",
+            "drain",
+            "probeBW_down",
+            "probeBW_cruise",
+            "probeBW_refill",
+            "probeBW_up",
+            "probeRTT"
+        };
+        const char* mode_name = (mode >= 0 && mode <= 6) ? mode_names[mode] : "unknown";
+        m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
+    }
+}
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
                         uint64_t recv_bytes,uint64_t duration,
                        float avg_owd){
@@ -183,6 +222,7 @@ void DqcTrace::Close(){
 	CloseGoodputFile();
     CloseSendRateFile();
     CloseRecvRateFile();
+    CloseBbrModeFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -216,6 +256,12 @@ void DqcTrace::CloseRecvRateFile(){
     if(m_recvRate.is_open()){
         m_recvRate.flush();
         m_recvRate.close();
+    }
+}
+void DqcTrace::CloseBbrModeFile(){
+    if(m_bbrMode.is_open()){
+        m_bbrMode.flush();
+        m_bbrMode.close();
     }
 }
 void DqcTrace::CloseStatsFile(){

@@ -54,6 +54,13 @@ class QUIC_EXPORT_PRIVATE FreqccSender final : public Bbr2Sender {
     return kFreqCC;
   }
 
+  // Override OnPacketSent to track current time
+  void OnPacketSent(QuicTime sent_time,
+                    QuicByteCount bytes_in_flight,
+                    QuicPacketNumber packet_number,
+                    QuicByteCount bytes,
+                    HasRetransmittableData is_retransmittable) override;
+
   // Override PacingRate to apply oscillation
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
 
@@ -63,6 +70,11 @@ class QUIC_EXPORT_PRIVATE FreqccSender final : public Bbr2Sender {
                          QuicTime event_time,
                          const AckedPacketVector& acked_packets,
                          const LostPacketVector& lost_packets) override;
+
+  // Get current BBR mode as an index for tracing
+  // Returns: 0=STARTUP, 1=DRAIN, 2=PROBE_BW_DOWN, 3=PROBE_BW_CRUISE,
+  //          4=PROBE_BW_REFILL, 5=PROBE_BW_UP, 6=PROBE_RTT
+  int32_t GetCurrentBbrModeIndex() const;
 
  private:
   // Calculate oscillation offset based on current time and parameters
@@ -84,6 +96,7 @@ class QUIC_EXPORT_PRIVATE FreqccSender final : public Bbr2Sender {
   bool drain_completed_;                 // True after first Drain phase completes
   QuicTime oscillation_start_time_;      // Time when oscillation started
   mutable Bbr2Mode last_mode_;           // Track mode for detecting transitions
+  mutable QuicTime current_time_;        // Current time, updated on each packet sent
 };
 
 }  // namespace dqc

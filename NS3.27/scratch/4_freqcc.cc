@@ -13,7 +13,7 @@
  *                 |		        	|
  * n3----L3--------|			        |------L8--------n9
  *
- * 4 FreqCC flows, 50M, 40ms RTT, buffer = 1xBDP
+ * 4 FreqCC flows, 50M, 40ms RTT, buffer = 2xBDP
  */
 
 #include "ns3/core-module.h"
@@ -96,9 +96,11 @@ const uint32_t TOPO_DEFAULT_QDELAY =     20;    // in ms:  20ms
 
 // FreqCC configuration parameters for each flow (indexed 0-3)
 // Default values - can be overridden via command line
-double g_freqcc_freq[NUM_FLOWS] = {5.0, 7.0, 3.0, 10.0};                      // Oscillation frequency in Hz
+double g_freqcc_freq[NUM_FLOWS] = {3.0, 7.0, 11.0, 15.0};       // 发送速率波动频率，单位Hz
 std::string g_freqcc_amplitude[NUM_FLOWS] = {"0", "0", "0", "0"};    // Amplitude mode  2 3 4 8sr miu
-double g_freqcc_fixed_amplitude[NUM_FLOWS] = {6.0, 6.0, 6.0, 6.0};           // Fixed amplitude in Mbps
+//以固定速率值为波动幅度，即发送速率在 ± g_freqcc_fixed_amplitude 波动，单位Mbps
+double g_freqcc_fixed_amplitude[NUM_FLOWS] = {50/NUM_FLOWS*0.05, 50/NUM_FLOWS*0.05, 50/NUM_FLOWS*0.05, 50/NUM_FLOWS*0.05}; // Fixed amplitude in 
+//波动模式，这里统一设置各流在BBRv2结束drain排空后就开始波动
 std::string g_freqcc_osc_mode[NUM_FLOWS] = {"after_drain", "after_drain", "after_drain", "after_drain"};
 
 static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
@@ -134,6 +136,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetRttTraceFuc(MakeCallback(&DqcTrace::OnRtt,trace));
         sendApp->SetSendRateTraceFuc(MakeCallback(&DqcTrace::OnSendRate,trace));
         sendApp->SetRecvRateTraceFuc(MakeCallback(&DqcTrace::OnRecvRate,trace));
+        sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
         recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
         recvApp->SetStatsTraceFuc(MakeCallback(&DqcTrace::OnStats,trace));
@@ -156,8 +159,8 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     p4p[4].msDelay=msDelay;
     uint32_t owd1=p4p[0].msDelay+p4p[4].msDelay+p4p[5].msDelay;
     uint32_t owd2=p4p[3].msDelay+p4p[4].msDelay+p4p[8].msDelay;
-    uint32_t owd=std::max(owd1,owd2);
-    uint32_t msQdelay=owd*2;
+    uint32_t owd=std::max(owd1,owd2);//owd为单向传播时延
+    uint32_t msQdelay=owd*4; //队列最大排队延迟  原来是×2 即最大排队延迟是一个RTT
     for(size_t i=0;i<sizeof(p4p)/sizeof(p4p[0]);i++){
         p4p[i].msQdelay=msQdelay;
     }
@@ -201,7 +204,7 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     NetDeviceContainer devn5n9 = p2p.Install (n5n9);
 
     //L4: Bottleneck link (50Mbps)
-    bufSize =config[4].bps * config[4].msQdelay / 8000;
+    bufSize =config[4].bps * config[4].msQdelay / 8000;//与msQdelay相关，这里代表2个BDP
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -259,13 +262,14 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     log=prefix+std::to_string(test_pair);
     std::unique_ptr<DqcTrace> trace;
 
+    float flow_start_times[NUM_FLOWS] = {0.0, 0.0, 0.0, 0.0};
     // Flow 1: n0 -> n6
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE);
-    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,0.01,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_BBR_MODE);
+    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,flow_start_times[0]+0.001,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender1);
     sender_id++;
     test_pair++;
@@ -278,8 +282,8 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE);
-    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,2,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_BBR_MODE);
+    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,flow_start_times[1]+0.002,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender2);
     sender_id++;
     test_pair++;
@@ -292,8 +296,8 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE);
-    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,4,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_BBR_MODE);
+    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,flow_start_times[2]+0.003,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender3);
     sender_id++;
     test_pair++;
@@ -306,8 +310,8 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE);
-    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,6,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_BBR_MODE);
+    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,flow_start_times[3]+0.004,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender4);
     sender_id++;
     test_pair++;
@@ -317,7 +321,7 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
 
     // Configure FreqCC parameters for each sender with its own parameters
     // Schedule configuration shortly after each flow starts
-    float flow_start_times[NUM_FLOWS] = {0.01, 2.0, 4.0, 6.0};
+    
     for(int i = 0; i < NUM_FLOWS; i++){
         Simulator::Schedule(Seconds(flow_start_times[i] + 0.001), &DqcSender::ConfigureFreqCC, senders[i],
             g_freqcc_freq[i], g_freqcc_amplitude[i], g_freqcc_fixed_amplitude[i], g_freqcc_osc_mode[i]);
@@ -330,7 +334,7 @@ void ns3_freqcc(int ins, std::string algo, DqcTraceState *stat, int sim_time=60,
 }
 
 int main (int argc, char *argv[]){
-    int sim_time=120;
+    int sim_time=50;
     int ins[]={1};
 
     // Command line arguments for each flow

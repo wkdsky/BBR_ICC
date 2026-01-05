@@ -142,14 +142,28 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   DebugState ExportDebugState() const;
 
  protected:
-  // Protected members for subclasses like FreqccSender
-  const RttStats* const rtt_stats_;
+  // Protected members for subclasses like FreqccSender and FreqCCv2Sender
+  // Note: Declaration order matters for initialization
   Bbr2Mode mode_;
+  const RttStats* const rtt_stats_;
+  const QuicUnackedPacketMap* const unacked_packets_;
+  Random* random_;
+  QuicConnectionStats* connection_stats_;
+  Bbr2Params params_;
+  // model_ depends on params_
+  Bbr2NetworkModel model_;
+  // initial_cwnd_ uses cwnd_limits() which uses params_
+  const QuicByteCount initial_cwnd_;
+  // cwnd_ is initialized from initial_cwnd_
+  QuicByteCount cwnd_;
+
+  // Helper functions for subclasses
+  QuicByteCount GetTargetCongestionWindow(float gain) const;
+  const QuicLimits<QuicByteCount>& cwnd_limits() const;
 
  private:
   void UpdatePacingRate(QuicByteCount bytes_acked);
   void UpdateCongestionWindow(QuicByteCount bytes_acked);
-  QuicByteCount GetTargetCongestionWindow(float gain) const;
   void OnEnterQuiescence(QuicTime now);
   void OnExitQuiescence(QuicTime now);
 
@@ -175,26 +189,9 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // Cwnd limits imposed by the current Bbr2 mode.
   QuicLimits<QuicByteCount> GetCwndLimitsByMode() const;
 
-  // Cwnd limits imposed by caller.
-  const QuicLimits<QuicByteCount>& cwnd_limits() const;
-
-  const Bbr2Params& params() const { return params_; }
   void UpdateRoundTripAlpha();
 
-  const QuicUnackedPacketMap* const unacked_packets_;
-  Random* random_;
-  QuicConnectionStats* connection_stats_;
-
-  // Don't use it directly outside of SetFromConfig and ApplyConnectionOptions.
-  // Instead, use params() to get read-only access.
-  Bbr2Params params_;
-
-  Bbr2NetworkModel model_;
-
-  const QuicByteCount initial_cwnd_;
-
-  // Current cwnd and pacing rate.
-  QuicByteCount cwnd_;
+  // Current pacing rate.
   QuicBandwidth pacing_rate_;
 
   QuicTime last_quiescence_start_ = QuicTime::Zero();

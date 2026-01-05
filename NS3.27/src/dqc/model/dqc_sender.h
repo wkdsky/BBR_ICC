@@ -54,6 +54,8 @@ public:
     void SetSendRateTraceFuc(TraceSendRate cb);
     typedef Callback<void,int32_t> TraceRecvRate;
     void SetRecvRateTraceFuc(TraceRecvRate cb);
+    typedef Callback<void,int32_t> TraceBbrMode;
+    void SetBbrModeTraceFuc(TraceBbrMode cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -113,5 +115,6 @@ private:
     TraceRtt m_traceRttCb;
     TraceSendRate m_traceSendRateCb;
     TraceRecvRate m_traceRecvRateCb;
+    TraceBbrMode m_traceBbrModeCb;
 };
 }
