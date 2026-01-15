@@ -141,6 +141,11 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
 
   DebugState ExportDebugState() const;
 
+  // Get current BBR mode as an index for tracing
+  // 0: STARTUP, 1: DRAIN, 2: PROBE_BW_DOWN, 3: PROBE_BW_CRUISE,
+  // 4: PROBE_BW_REFILL, 5: PROBE_BW_UP, 6: PROBE_RTT
+  int32_t GetCurrentBbrModeIndex() const;
+
  protected:
   // Protected members for subclasses like FreqccSender and FreqCCv2Sender
   // Note: Declaration order matters for initialization

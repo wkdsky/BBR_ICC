@@ -436,6 +436,45 @@ Bbr2Sender::DebugState Bbr2Sender::ExportDebugState() const {
   return s;
 }
 
+int32_t Bbr2Sender::GetCurrentBbrModeIndex() const {
+  // Get debug state
+  DebugState state = ExportDebugState();
+
+  // Convert mode and probe_bw phase to single index
+  // 0: STARTUP
+  // 1: DRAIN
+  // 2: PROBE_BW_DOWN
+  // 3: PROBE_BW_CRUISE
+  // 4: PROBE_BW_REFILL
+  // 5: PROBE_BW_UP
+  // 6: PROBE_RTT
+  switch (state.mode) {
+    case Bbr2Mode::STARTUP:
+      return 0;
+    case Bbr2Mode::DRAIN:
+      return 1;
+    case Bbr2Mode::PROBE_BW:
+      // Map probe_bw phase to index
+      switch (state.probe_bw.phase) {
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN:
+          return 2;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE:
+          return 3;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL:
+          return 4;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_UP:
+          return 5;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED:
+        default:
+          return 2;  // Default to PROBE_DOWN
+      }
+    case Bbr2Mode::PROBE_RTT:
+      return 6;
+    default:
+      return 0;
+  }
+}
+
 std::ostream& operator<<(std::ostream& os, const Bbr2Sender::DebugState& s) {
   os << "mode: " << s.mode << "\n";
   os << "round_trip_count: " << s.round_trip_count << "\n";
