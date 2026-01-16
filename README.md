@@ -189,4 +189,46 @@ freqccv3：Cruise阶段结束时，用new_refill替换原来的refill阶段，�
 - 若以上两个条件都不满足，更新参数后直接退出；
 - 更新参数按原refill规则更新。
 
+  与原版 BBRv2 REFILL 的区别
+
+  | 特性              | 原版 BBRv2 REFILL | FreqCCv3 NEW_REFILL
+  |
+  |-----------------|-----------------|---------------------|
+  | pacing_gain     | 固定 1.0          | 动态 (0.75 或 1.0)
+   |
+  | 持续时间            | 固定 1 RTT        | 根据 inflight
+  动态调整    |
+  | 进入时 inflight 过高 | 继续以 1.0 发送      | 先用 0.75 排空
+            |
+  | 进入时 inflight 过低 | 继续以 1.0 发送      | 用 1.0 填充
+           |
+  | 进入时 inflight 合适 | 等待 1 RTT        | 立即退出
+         |
+
+  设计目的
+
+  1. 避免 PROBE_UP 时 inflight 过高：如果从 CRUISE 出来时
+  inflight 已经偏高，先用 pacing_gain=0.75 排空，避免进入
+  PROBE_UP 后立即触发拥塞
+  2. 加速 PROBE_UP 的到来：如果 inflight
+  已经在合适范围（0.70~0.75 BDP），不需要等待完整的 1
+  RTT，可以立即进入 PROBE_UP
+  3. 确保 PROBE_UP 起点一致：无论从什么状态进入，都尽量让
+  inflight 稳定在 ~0.75*BDP 附近再开始探测
+  
 new_refill退出后进入up阶段，在up阶段按freqccv2 的波动方式进行周期性波动（只在up阶段波动，其余阶段不波动，即没有波动模式这个参数，但有其他参数，包括频率和幅度），Up阶段的退出条件与原方案保持一致
+
+  # 使用默认参数（所有流相同）
+  ./waf --run "8_freqccv3"
+
+  # 为不同流设置不同频率
+  ./waf --run "8_freqccv3 --freq1=1.0 --freq2=2.0 --freq3=1.5 
+  --freq4=0.5"
+
+  # 为不同流设置不同振幅模式
+  ./waf --run "8_freqccv3 --amp1=miu2 --amp2=miu4 --amp3=sr2 
+  --amp4=miu8"
+
+  # 混合配置
+  ./waf --run "8_freqccv3 --freq1=1.0 --amp1=miu2 --freq2=2.0 
+  --amp2=miu4 --sim_time=100"

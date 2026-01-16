@@ -120,6 +120,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // Oscillation parameters (only used during PROBE_UP)
   double oscillation_freq_hz_;              // Frequency in Hz
+  double initial_freq_hz_;                  // Initial frequency (for first UP phase)
   FreqCCv3AmplitudeMode amplitude_mode_;    // How to calculate amplitude
   uint64_t fixed_amplitude_bps_;            // Fixed amplitude if mode is kFixed
 
@@ -133,6 +134,26 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // NEW_REFILL state
   NewRefillState new_refill_state_;         // Current state within NEW_REFILL
   bool in_new_refill_;                      // True when in NEW_REFILL phase
+
+  // Adaptive frequency state
+  int up_phase_count_;                      // Count of UP phases completed
+  QuicTime up_phase_start_time_;            // Start time of current UP phase
+  double last_up_duration_sec_;             // Duration of last UP phase in seconds
+  static constexpr int kTargetCyclesPerUp = 3;    // Target number of cycles per UP phase (reduced from 15)
+  static constexpr int kMinCyclesPerUp = 2;       // Minimum cycles threshold (reduced from 10)
+  static constexpr int kMaxCyclesPerUp = 5;       // Maximum cycles threshold (reduced from 20)
+  static constexpr double kMinFreqHz = 1.0;       // Minimum frequency limit (1 Hz)
+  static constexpr double kMaxFreqHz = 100.0;     // Maximum frequency limit (reduced from 500 Hz)
+
+  // Adaptive pacing gain for PROBE_UP phase
+  float up_pacing_gain_;                          // Current pacing gain for UP phase [1.05, 1.25]
+  static constexpr float kMinUpPacingGain = 1.05f;    // Minimum pacing gain for UP
+  static constexpr float kMaxUpPacingGain = 1.25f;    // Maximum pacing gain for UP
+  static constexpr float kDefaultUpPacingGain = 1.25f; // Default (same as BBRv2)
+  static constexpr double kTargetUpDurationSec = 0.5;  // Target UP phase duration in seconds
+  static constexpr double kMinUpDurationSec = 0.3;     // Below this, reduce pacing gain
+  static constexpr double kMaxUpDurationSec = 0.8;     // Above this, increase pacing gain
+  static constexpr float kPacingGainAdjustStep = 0.02f; // Step size for pacing gain adjustment
 };
 
 }  // namespace dqc

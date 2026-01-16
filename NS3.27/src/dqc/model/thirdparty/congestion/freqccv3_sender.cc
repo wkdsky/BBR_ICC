@@ -28,6 +28,7 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
                  max_cwnd_in_packets, random, stats, enable_ecn),
       // Initialize oscillation parameters
       oscillation_freq_hz_(kDefaultOscillationFreqHz),
+      initial_freq_hz_(kDefaultOscillationFreqHz),
       amplitude_mode_(FreqCCv3AmplitudeMode::kFixed),
       fixed_amplitude_bps_(0),  // No oscillation by default
       drain_completed_(false),
@@ -36,12 +37,19 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       last_probe_bw_phase_(Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED),
       current_time_(now),
       new_refill_state_(NewRefillState::kNotInNewRefill),
-      in_new_refill_(false) {
+      in_new_refill_(false),
+      // Initialize adaptive frequency state
+      up_phase_count_(0),
+      up_phase_start_time_(QuicTime::Zero()),
+      last_up_duration_sec_(0.0),
+      // Initialize adaptive pacing gain
+      up_pacing_gain_(kDefaultUpPacingGain) {
   QUIC_DVLOG(2) << this << " Initializing FreqCCv3Sender @ " << now;
 }
 
 void FreqCCv3Sender::SetOscillationFrequency(double freq_hz) {
   oscillation_freq_hz_ = freq_hz;
+  initial_freq_hz_ = freq_hz;  // Store initial frequency for first UP phase
 }
 
 void FreqCCv3Sender::SetOscillationAmplitude(FreqCCv3AmplitudeMode mode, uint64_t fixed_bps) {
@@ -188,7 +196,6 @@ bool FreqCCv3Sender::ShouldExitNewRefill(QuicByteCount bytes_in_flight) const {
   }
 
   QuicByteCount high_threshold = CalculateInflightThreshold(kNewRefillHighThreshold);
-  QuicByteCount low_threshold = CalculateInflightThreshold(kNewRefillLowThreshold);
 
   switch (new_refill_state_) {
     case NewRefillState::kDraining:
@@ -231,7 +238,6 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
 
   // Get phase before parent update
   Bbr2ProbeBwMode::CyclePhase phase_before = GetCurrentProbeBwPhase();
-  Bbr2Mode mode_before = mode_;
 
   // Call parent implementation
   Bbr2Sender::OnCongestionEvent(rtt_updated, prior_in_flight, event_time,
@@ -267,7 +273,6 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     // If in NEW_REFILL, check if we should continue or exit
     if (in_new_refill_ && current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL) {
       // Get current bytes in flight after processing
-      DebugState state = ExportDebugState();
       QuicByteCount current_inflight = prior_in_flight;  // Use prior as approximation
 
       // Check exit conditions based on current state
@@ -288,11 +293,25 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     }
 
     // Detect entering PROBE_UP phase
-    if (current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP &&
-        phase_before != Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
+    // We need to reset oscillation_start_time_ whenever we transition INTO PROBE_UP
+    bool in_probe_up = (current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP);
+    bool was_in_probe_up_before = (last_probe_bw_phase_ == Bbr2ProbeBwMode::CyclePhase::PROBE_UP);
+
+    // We're entering PROBE_UP if we're in it now but weren't in the last event
+    bool entering_probe_up = in_probe_up && !was_in_probe_up_before;
+
+    if (entering_probe_up) {
       // Reset oscillation start time when entering PROBE_UP
       oscillation_start_time_ = event_time;
-      QUIC_DVLOG(2) << "FreqCCv3: Entering PROBE_UP, starting oscillation @ " << event_time;
+      up_phase_start_time_ = event_time;  // Record UP phase start time for adaptive frequency
+
+      QUIC_DVLOG(2) << "FreqCCv3: Entering PROBE_UP, starting oscillation @ " << event_time
+                    << ", freq=" << oscillation_freq_hz_ << "Hz, up_phase_count=" << up_phase_count_
+                    << ", up_pacing_gain=" << up_pacing_gain_
+                    << ", amplitude_bps=" << GetCurrentAmplitudeBps();
+
+      // Apply adaptive pacing gain for PROBE_UP
+      model_.set_pacing_gain(up_pacing_gain_);
 
       // Ensure NEW_REFILL state is reset
       in_new_refill_ = false;
@@ -300,8 +319,78 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     }
 
     // Detect leaving PROBE_UP phase
-    if (current_phase != Bbr2ProbeBwMode::CyclePhase::PROBE_UP &&
-        phase_before == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
+    // We leave PROBE_UP when we were in it last event but not now
+    // Also reset if we're not in PROBE_UP and oscillation_start_time_ is set (cleanup)
+    bool leaving_probe_up = !in_probe_up && was_in_probe_up_before;
+    bool need_cleanup = !in_probe_up && (oscillation_start_time_ != QuicTime::Zero());
+
+    if (leaving_probe_up || need_cleanup) {
+      // Calculate UP phase duration and adapt frequency for next UP phase
+      if (up_phase_start_time_ != QuicTime::Zero()) {
+        TimeDelta up_duration = event_time - up_phase_start_time_;
+        last_up_duration_sec_ = static_cast<double>(up_duration.ToMicroseconds()) / 1000000.0;
+
+        // Calculate how many cycles occurred in this UP phase
+        double cycles_in_up = last_up_duration_sec_ * oscillation_freq_hz_;
+
+        QUIC_DVLOG(2) << "FreqCCv3: Leaving PROBE_UP, duration=" << last_up_duration_sec_
+                      << "s, cycles=" << cycles_in_up << ", freq=" << oscillation_freq_hz_ << "Hz"
+                      << ", current_up_pacing_gain=" << up_pacing_gain_;
+
+        // Adapt frequency if cycles are outside [kMinCyclesPerUp, kMaxCyclesPerUp]
+        if (last_up_duration_sec_ > 0.001) {  // Avoid division by zero, minimum 1ms
+          if (cycles_in_up < kMinCyclesPerUp || cycles_in_up > kMaxCyclesPerUp) {
+            // Recalculate frequency to achieve kTargetCyclesPerUp cycles in the recorded duration
+            double new_freq = static_cast<double>(kTargetCyclesPerUp) / last_up_duration_sec_;
+
+            // Clamp frequency to [kMinFreqHz, kMaxFreqHz]
+            if (new_freq < kMinFreqHz) {
+              new_freq = kMinFreqHz;
+            } else if (new_freq > kMaxFreqHz) {
+              new_freq = kMaxFreqHz;
+            }
+
+            QUIC_DVLOG(2) << "FreqCCv3: Adapting frequency from " << oscillation_freq_hz_
+                          << "Hz to " << new_freq << "Hz (target " << kTargetCyclesPerUp
+                          << " cycles in " << last_up_duration_sec_ << "s)";
+            oscillation_freq_hz_ = new_freq;
+          }
+
+          // Adapt pacing gain based on UP phase duration
+          // If UP phase was too short (< kMinUpDurationSec), reduce pacing gain
+          // If UP phase was too long (> kMaxUpDurationSec), increase pacing gain
+          float new_pacing_gain = up_pacing_gain_;
+          if (last_up_duration_sec_ < kMinUpDurationSec) {
+            // UP phase too short, reduce pacing gain to slow down growth
+            new_pacing_gain -= kPacingGainAdjustStep;
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase too short (" << last_up_duration_sec_
+                          << "s < " << kMinUpDurationSec << "s), reducing pacing gain";
+          } else if (last_up_duration_sec_ > kMaxUpDurationSec) {
+            // UP phase too long, increase pacing gain to speed up growth
+            new_pacing_gain += kPacingGainAdjustStep;
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase too long (" << last_up_duration_sec_
+                          << "s > " << kMaxUpDurationSec << "s), increasing pacing gain";
+          }
+
+          // Clamp pacing gain to [kMinUpPacingGain, kMaxUpPacingGain]
+          if (new_pacing_gain < kMinUpPacingGain) {
+            new_pacing_gain = kMinUpPacingGain;
+          } else if (new_pacing_gain > kMaxUpPacingGain) {
+            new_pacing_gain = kMaxUpPacingGain;
+          }
+
+          if (new_pacing_gain != up_pacing_gain_) {
+            QUIC_DVLOG(2) << "FreqCCv3: Adapting UP pacing gain from " << up_pacing_gain_
+                          << " to " << new_pacing_gain;
+            up_pacing_gain_ = new_pacing_gain;
+          }
+        }
+
+        up_phase_count_++;
+      }
+      // Reset oscillation state so next UP phase will be detected as new
+      oscillation_start_time_ = QuicTime::Zero();
+      up_phase_start_time_ = QuicTime::Zero();
       QUIC_DVLOG(2) << "FreqCCv3: Leaving PROBE_UP, stopping oscillation";
     }
   }
@@ -324,13 +413,24 @@ QuicBandwidth FreqCCv3Sender::PacingRate(QuicByteCount bytes_in_flight) const {
     }
   }
 
+  // Check if we should oscillate
+  bool should_osc = ShouldOscillate();
+
   // If not oscillating (not in PROBE_UP), return base rate
-  if (!ShouldOscillate()) {
+  if (!should_osc) {
+    return base_rate;
+  }
+
+  // Check oscillation_start_time_
+  if (oscillation_start_time_ == QuicTime::Zero()) {
+    // oscillation_start_time_ should have been set in OnCongestionEvent
+    // If it's still Zero, we can't oscillate properly
     return base_rate;
   }
 
   // Use current_time_ which is updated on each packet sent and ACK received
   if (current_time_ == QuicTime::Zero()) {
+    QUIC_DVLOG(2) << "FreqCCv3: PacingRate - current_time_ is Zero, returning base_rate";
     return base_rate;
   }
 
