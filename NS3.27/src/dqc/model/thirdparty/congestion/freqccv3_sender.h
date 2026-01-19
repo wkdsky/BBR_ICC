@@ -87,8 +87,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   //          4=PROBE_BW_REFILL (NEW_REFILL), 5=PROBE_BW_UP, 6=PROBE_RTT
   int32_t GetCurrentBbrModeIndex() const;
 
-  // Callback for tracing UP phase info
-  typedef std::function<void(double start_time, double duration_ms, double freq_hz, int cycles, int32_t bw_kbps)> UpPhaseTraceCallback;
+  // Callback for tracing UP phase info (added pacing_gain parameter)
+  typedef std::function<void(double start_time, double duration_ms, double freq_hz, int cycles, float pacing_gain, int32_t bw_kbps)> UpPhaseTraceCallback;
   void SetUpPhaseTraceCallback(UpPhaseTraceCallback cb) { up_phase_trace_cb_ = cb; }
 
   // FreqCCv3-specific parameters for NEW_REFILL
@@ -125,6 +125,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // Oscillation parameters (only used during PROBE_UP)
   double oscillation_freq_hz_;              // Frequency in Hz
+  double current_oscillation_freq_hz_;      // Frequency used in the current/last UP phase (for tracing)
   double initial_freq_hz_;                  // Initial frequency (for first UP phase)
   FreqCCv3AmplitudeMode amplitude_mode_;    // How to calculate amplitude
   uint64_t fixed_amplitude_bps_;            // Fixed amplitude if mode is kFixed
@@ -150,15 +151,20 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   static constexpr double kMinFreqHz = 1.0;       // Minimum frequency limit (1 Hz)
   static constexpr double kMaxFreqHz = 100.0;     // Maximum frequency limit (reduced from 500 Hz)
 
-  // Adaptive pacing gain for PROBE_UP phase
-  float up_pacing_gain_;                          // Current pacing gain for UP phase [1.05, 1.25]
-  static constexpr float kMinUpPacingGain = 1.05f;    // Minimum pacing gain for UP
+  // Adaptive pacing gain for PROBE_UP phase (based on RTT multiples)
+  float up_pacing_gain_;                          // Current pacing gain for UP phase [1.00, 1.25]
+  float current_up_pacing_gain_;                  // Pacing gain used in the current/last UP phase (for tracing)
+  static constexpr float kMinUpPacingGain = 1.00f;    // Minimum pacing gain for UP
   static constexpr float kMaxUpPacingGain = 1.25f;    // Maximum pacing gain for UP
   static constexpr float kDefaultUpPacingGain = 1.25f; // Default (same as BBRv2)
-  static constexpr double kTargetUpDurationSec = 0.5;  // Target UP phase duration in seconds
-  static constexpr double kMinUpDurationSec = 0.3;     // Below this, reduce pacing gain
-  static constexpr double kMaxUpDurationSec = 0.8;     // Above this, increase pacing gain
-  static constexpr float kPacingGainAdjustStep = 0.02f; // Step size for pacing gain adjustment
+
+  // UP phase duration thresholds in RTT multiples
+  static constexpr double kUpDurationVeryLongRttMultiple = 2.5;   // > 2.5 RTT: too long
+  static constexpr double kUpDurationLongRttMultiple = 2.0;       // 2.0-2.5 RTT: slightly long
+  static constexpr double kUpDurationShortRttMultiple = 1.5;      // 1.5-2.0 RTT: slightly short
+  // < 1.5 RTT: too short
+
+  static constexpr float kPacingGainAdjustStep = 0.01f; // Step size for pacing gain adjustment
 
   // UP phase trace callback
   UpPhaseTraceCallback up_phase_trace_cb_;

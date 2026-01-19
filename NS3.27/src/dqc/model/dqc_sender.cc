@@ -109,9 +109,9 @@ void DqcSender::Bind(uint16_t port){
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
     if(algo && algo->GetCongestionControlType() == kFreqCCv3){
         FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
-        freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, int cycles, int32_t bw_kbps){
+        freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, int cycles, float pacing_gain, int32_t bw_kbps){
             if(!m_traceUpPhaseCb.IsNull()){
-                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, cycles, bw_kbps);
+                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, cycles, pacing_gain, bw_kbps);
             }
         });
     }

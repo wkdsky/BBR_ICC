@@ -118,7 +118,7 @@ uint32_t msQdelay;
 const uint64_t TOPO_SENDER_BW       =   10 * 1000000;    // in bps
 const uint64_t TOPO_SENDER_PDELAY   =   1;    // in ms
 const uint64_t TOPO_BOTTLE_BW       =   16 * 1000000;    // in bps
-const uint64_t TOPO_BOTTLE_PDELAY   =   18;    // in ms
+const uint64_t TOPO_BOTTLE_PDELAY   =   28;    // in ms
 const uint64_t TOPO_DEFAULT_QDELAY  =   (TOPO_SENDER_PDELAY*2+TOPO_BOTTLE_PDELAY)*2;    // in ms
 
 link_config_t p4p[]={
@@ -267,7 +267,7 @@ void ns3_freqccv3(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     NetDeviceContainer devn9n17 = p2p.Install (n9n17);
 
     //L8: Bottleneck link (50Mbps)
-    bufSize =config[8].bps * config[8].msQdelay / 8000;//与msQdelay相关，这里代表1个BDP
+    bufSize = TOPO_BOTTLE_BW * TOPO_DEFAULT_QDELAY / 8000;//与msQdelay相关，这里代表1个BDP
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));

@@ -16,6 +16,15 @@ namespace {
 const double kDefaultOscillationFreqHz = 1.0;  // 1 Hz default
 }  // namespace
 
+// Define static constexpr members for linking
+constexpr float FreqCCv3Sender::kMinUpPacingGain;
+constexpr float FreqCCv3Sender::kMaxUpPacingGain;
+constexpr float FreqCCv3Sender::kDefaultUpPacingGain;
+constexpr double FreqCCv3Sender::kUpDurationVeryLongRttMultiple;
+constexpr double FreqCCv3Sender::kUpDurationLongRttMultiple;
+constexpr double FreqCCv3Sender::kUpDurationShortRttMultiple;
+constexpr float FreqCCv3Sender::kPacingGainAdjustStep;
+
 FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
                                const RttStats* rtt_stats,
                                const QuicUnackedPacketMap* unacked_packets,
@@ -28,6 +37,7 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
                  max_cwnd_in_packets, random, stats, enable_ecn),
       // Initialize oscillation parameters
       oscillation_freq_hz_(kDefaultOscillationFreqHz),
+      current_oscillation_freq_hz_(kDefaultOscillationFreqHz),
       initial_freq_hz_(kDefaultOscillationFreqHz),
       amplitude_mode_(FreqCCv3AmplitudeMode::kFixed),
       fixed_amplitude_bps_(0),  // No oscillation by default
@@ -43,7 +53,8 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       up_phase_start_time_(QuicTime::Zero()),
       last_up_duration_sec_(0.0),
       // Initialize adaptive pacing gain
-      up_pacing_gain_(kDefaultUpPacingGain) {
+      up_pacing_gain_(kDefaultUpPacingGain),
+      current_up_pacing_gain_(kDefaultUpPacingGain) {
   QUIC_DVLOG(2) << this << " Initializing FreqCCv3Sender @ " << now;
 }
 
@@ -310,6 +321,10 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
                     << ", up_pacing_gain=" << up_pacing_gain_
                     << ", amplitude_bps=" << GetCurrentAmplitudeBps();
 
+      // Save the frequency and pacing gain that will be used in this UP phase (for tracing later)
+      current_oscillation_freq_hz_ = oscillation_freq_hz_;
+      current_up_pacing_gain_ = up_pacing_gain_;
+
       // Apply adaptive pacing gain for PROBE_UP
       model_.set_pacing_gain(up_pacing_gain_);
 
@@ -331,57 +346,105 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
         last_up_duration_sec_ = static_cast<double>(up_duration.ToMicroseconds()) / 1000000.0;
 
         // Calculate how many cycles occurred in this UP phase
-        double cycles_in_up = last_up_duration_sec_ * oscillation_freq_hz_;
+        double cycles_in_up = last_up_duration_sec_ * current_oscillation_freq_hz_;  // Use the frequency that WAS used in this UP phase
 
         QUIC_DVLOG(2) << "FreqCCv3: Leaving PROBE_UP, duration=" << last_up_duration_sec_
-                      << "s, cycles=" << cycles_in_up << ", freq=" << oscillation_freq_hz_ << "Hz"
-                      << ", current_up_pacing_gain=" << up_pacing_gain_;
+                      << "s, cycles=" << cycles_in_up << ", freq=" << current_oscillation_freq_hz_ << "Hz"
+                      << ", current_up_pacing_gain=" << current_up_pacing_gain_;
 
         // Adapt frequency if cycles are outside [kMinCyclesPerUp, kMaxCyclesPerUp]
         if (last_up_duration_sec_ > 0.001) {  // Avoid division by zero, minimum 1ms
+          // Get min_rtt in seconds for calculating dynamic frequency limits
+          double min_rtt_sec = static_cast<double>(model_.MinRtt().ToMicroseconds()) / 1000000.0;
+
+          // Calculate dynamic minimum frequency: 2 cycles in 0.5*RTT_min
+          // min_freq = 2 / (0.5 * RTT_min) = 4 / RTT_min
+          double dynamic_min_freq_hz = kMinFreqHz;  // Default to static minimum
+          if (min_rtt_sec > 0.0) {
+            dynamic_min_freq_hz = 4.0 / min_rtt_sec;  // 2 cycles in 0.5*RTT_min
+            // Ensure it's at least the static minimum
+            if (dynamic_min_freq_hz < kMinFreqHz) {
+              dynamic_min_freq_hz = kMinFreqHz;
+            }
+          }
+
           if (cycles_in_up < kMinCyclesPerUp || cycles_in_up > kMaxCyclesPerUp) {
             // Recalculate frequency to achieve kTargetCyclesPerUp cycles in the recorded duration
             double new_freq = static_cast<double>(kTargetCyclesPerUp) / last_up_duration_sec_;
 
-            // Clamp frequency to [kMinFreqHz, kMaxFreqHz]
-            if (new_freq < kMinFreqHz) {
-              new_freq = kMinFreqHz;
+            // Clamp frequency to [dynamic_min_freq_hz, kMaxFreqHz]
+            if (new_freq < dynamic_min_freq_hz) {
+              new_freq = dynamic_min_freq_hz;
             } else if (new_freq > kMaxFreqHz) {
               new_freq = kMaxFreqHz;
             }
 
             QUIC_DVLOG(2) << "FreqCCv3: Adapting frequency from " << oscillation_freq_hz_
                           << "Hz to " << new_freq << "Hz (target " << kTargetCyclesPerUp
-                          << " cycles in " << last_up_duration_sec_ << "s)";
+                          << " cycles in " << last_up_duration_sec_ << "s, min_freq="
+                          << dynamic_min_freq_hz << "Hz based on RTT=" << min_rtt_sec << "s)";
             oscillation_freq_hz_ = new_freq;
           }
 
-          // Adapt pacing gain based on UP phase duration
-          // If UP phase was too short (< kMinUpDurationSec), reduce pacing gain
-          // If UP phase was too long (> kMaxUpDurationSec), increase pacing gain
-          float new_pacing_gain = up_pacing_gain_;
-          if (last_up_duration_sec_ < kMinUpDurationSec) {
-            // UP phase too short, reduce pacing gain to slow down growth
-            new_pacing_gain -= kPacingGainAdjustStep;
-            QUIC_DVLOG(2) << "FreqCCv3: UP phase too short (" << last_up_duration_sec_
-                          << "s < " << kMinUpDurationSec << "s), reducing pacing gain";
-          } else if (last_up_duration_sec_ > kMaxUpDurationSec) {
-            // UP phase too long, increase pacing gain to speed up growth
-            new_pacing_gain += kPacingGainAdjustStep;
-            QUIC_DVLOG(2) << "FreqCCv3: UP phase too long (" << last_up_duration_sec_
-                          << "s > " << kMaxUpDurationSec << "s), increasing pacing gain";
+          // Adapt pacing gain based on UP phase duration in RTT multiples
+          // Calculate UP phase duration in RTT multiples
+          double up_duration_rtt_multiple = 0.0;
+          if (min_rtt_sec > 0.0) {
+            up_duration_rtt_multiple = last_up_duration_sec_ / min_rtt_sec;
           }
 
-          // Clamp pacing gain to [kMinUpPacingGain, kMaxUpPacingGain]
-          if (new_pacing_gain < kMinUpPacingGain) {
-            new_pacing_gain = kMinUpPacingGain;
-          } else if (new_pacing_gain > kMaxUpPacingGain) {
+          float new_pacing_gain = up_pacing_gain_;
+
+          // Apply the new pacing gain adjustment logic based on RTT multiples
+          if (up_duration_rtt_multiple > kUpDurationVeryLongRttMultiple) {
+            // Case 1: Up_time > 2.5*RTT_min, pacing gain = 1.25
             new_pacing_gain = kMaxUpPacingGain;
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase very long (" << up_duration_rtt_multiple
+                          << " RTTs > " << kUpDurationVeryLongRttMultiple
+                          << " RTTs), setting pacing gain to " << new_pacing_gain;
           }
+          else if (up_duration_rtt_multiple >= kUpDurationLongRttMultiple &&
+                   up_duration_rtt_multiple <= kUpDurationVeryLongRttMultiple) {
+            // Case 2: 2.0*RTT_min <= Up_time <= 2.5*RTT_min
+            // pacing gain = min(1.25, max(current_pacing_gain + 0.01, Up_time * 1.25 / 2.5))
+            float calculated_gain = static_cast<float>(up_duration_rtt_multiple * kMaxUpPacingGain / kUpDurationVeryLongRttMultiple);
+            float incremented_gain = up_pacing_gain_ + kPacingGainAdjustStep;
+            new_pacing_gain = std::min(kMaxUpPacingGain, std::max(incremented_gain, calculated_gain));
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase slightly long (" << up_duration_rtt_multiple
+                          << " RTTs in [" << kUpDurationLongRttMultiple << ", "
+                          << kUpDurationVeryLongRttMultiple << "]), adjusting pacing gain from "
+                          << up_pacing_gain_ << " to " << new_pacing_gain
+                          << " (calculated=" << calculated_gain << ", incremented=" << incremented_gain << ")";
+          }
+          else if (up_duration_rtt_multiple > kUpDurationShortRttMultiple &&
+                   up_duration_rtt_multiple < kUpDurationLongRttMultiple) {
+            // Case 3: 1.5*RTT_min < Up_time < 2.0*RTT_min
+            // pacing gain = max(1.00, min(current_pacing_gain - 0.01, Up_time * 1.00 / 1.5))
+            float calculated_gain = static_cast<float>(up_duration_rtt_multiple * kMinUpPacingGain / kUpDurationShortRttMultiple);
+            float decremented_gain = up_pacing_gain_ - kPacingGainAdjustStep;
+            new_pacing_gain = std::max(kMinUpPacingGain, std::min(decremented_gain, calculated_gain));
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase slightly short (" << up_duration_rtt_multiple
+                          << " RTTs in (" << kUpDurationShortRttMultiple << ", "
+                          << kUpDurationLongRttMultiple << ")), adjusting pacing gain from "
+                          << up_pacing_gain_ << " to " << new_pacing_gain
+                          << " (calculated=" << calculated_gain << ", decremented=" << decremented_gain << ")";
+          }
+          else {
+            // Case 4: Up_time <= 1.5*RTT_min, pacing gain = 1.00
+            new_pacing_gain = kMinUpPacingGain;
+            QUIC_DVLOG(2) << "FreqCCv3: UP phase too short (" << up_duration_rtt_multiple
+                          << " RTTs <= " << kUpDurationShortRttMultiple
+                          << " RTTs), setting pacing gain to " << new_pacing_gain;
+          }
+
+          // Final clamp to ensure bounds (should already be satisfied by logic above)
+          new_pacing_gain = std::max(kMinUpPacingGain, std::min(kMaxUpPacingGain, new_pacing_gain));
 
           if (new_pacing_gain != up_pacing_gain_) {
-            QUIC_DVLOG(2) << "FreqCCv3: Adapting UP pacing gain from " << up_pacing_gain_
-                          << " to " << new_pacing_gain;
+            QUIC_DVLOG(2) << "FreqCCv3: Final pacing gain adjustment: " << up_pacing_gain_
+                          << " -> " << new_pacing_gain
+                          << " (UP duration: " << last_up_duration_sec_ << "s = "
+                          << up_duration_rtt_multiple << " RTTs, min_rtt=" << min_rtt_sec << "s)";
             up_pacing_gain_ = new_pacing_gain;
           }
 
@@ -390,8 +453,10 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
             double start_time_sec = static_cast<double>(up_phase_start_time_.ToDebuggingValue()) / 1000000.0;
             double duration_ms = last_up_duration_sec_ * 1000.0;
             int actual_cycles = static_cast<int>(cycles_in_up + 0.5);  // Round to nearest integer
+            float freq_hz_used = static_cast<float>(current_oscillation_freq_hz_);  // The frequency that WAS used in this UP phase
+            float pacing_gain_used = current_up_pacing_gain_;  // The pacing gain that WAS used in this UP phase
             int32_t bw_estimate_kbps = static_cast<int32_t>(model_.MaxBandwidth().ToKBitsPerSecond());
-            up_phase_trace_cb_(start_time_sec, duration_ms, oscillation_freq_hz_, actual_cycles, bw_estimate_kbps);
+            up_phase_trace_cb_(start_time_sec, duration_ms, freq_hz_used, actual_cycles, pacing_gain_used, bw_estimate_kbps);
           }
         }
 

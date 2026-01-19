@@ -34,7 +34,7 @@ public:
     void OnSendRate(int32_t kbps);
     void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
     void OnBbrMode(int32_t mode);
-    void OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,int32_t bw_estimate_kbps);
+    void OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);

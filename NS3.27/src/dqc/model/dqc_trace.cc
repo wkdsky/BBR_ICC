@@ -144,7 +144,7 @@ void DqcTrace::OpenUpPhaseFile(){
     }
     m_upPhase.open(path.c_str(), std::fstream::out);
     if(m_upPhase.is_open()){
-        m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\tcycles\tbw_estimate(kbps)"<<std::endl;
+        m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\tcycles\tpacing_gain\tbw_estimate(kbps)"<<std::endl;
     }
 }
 void DqcTrace::OpenStatsFile(){
@@ -231,10 +231,10 @@ void DqcTrace::OnBbrMode(int32_t mode){
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
     }
 }
-void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,int32_t bw_estimate_kbps){
+void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
     OpenUpPhaseFile();  // Lazy open
     if(m_upPhase.is_open()){
-        m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<cycles<<"\t"<<bw_estimate_kbps<<std::endl;
+        m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<cycles<<"\t"<<pacing_gain<<"\t"<<bw_estimate_kbps<<std::endl;
     }
 }
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,

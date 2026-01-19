@@ -56,7 +56,7 @@ public:
     void SetRecvRateTraceFuc(TraceRecvRate cb);
     typedef Callback<void,int32_t> TraceBbrMode;
     void SetBbrModeTraceFuc(TraceBbrMode cb);
-    typedef Callback<void,double,double,double,int,int32_t> TraceUpPhase;
+    typedef Callback<void,double,double,double,int,float,int32_t> TraceUpPhase;
     void SetUpPhaseTraceFuc(TraceUpPhase cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
