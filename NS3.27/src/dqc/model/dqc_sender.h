@@ -48,14 +48,16 @@ public:
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb);
     typedef Callback<void,uint32_t,uint32_t> TraceOwdAtSender;
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
-    typedef Callback<void,uint32_t,uint32_t> TraceRtt;
+    typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceRtt;
     void SetRttTraceFuc(TraceRtt cb);
     typedef Callback<void,int32_t> TraceSendRate;
     void SetSendRateTraceFuc(TraceSendRate cb);
-    typedef Callback<void,int32_t> TraceRecvRate;
+    typedef Callback<void,int32_t,int32_t> TraceRecvRate;
     void SetRecvRateTraceFuc(TraceRecvRate cb);
     typedef Callback<void,int32_t> TraceBbrMode;
     void SetBbrModeTraceFuc(TraceBbrMode cb);
+    typedef Callback<void,double,double,double,int,int32_t> TraceUpPhase;
+    void SetUpPhaseTraceFuc(TraceUpPhase cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -116,5 +118,6 @@ private:
     TraceSendRate m_traceSendRateCb;
     TraceRecvRate m_traceRecvRateCb;
     TraceBbrMode m_traceBbrModeCb;
+    TraceUpPhase m_traceUpPhaseCb;
 };
 }

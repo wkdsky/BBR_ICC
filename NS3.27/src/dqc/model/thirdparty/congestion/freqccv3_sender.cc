@@ -384,6 +384,15 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
                           << " to " << new_pacing_gain;
             up_pacing_gain_ = new_pacing_gain;
           }
+
+          // Call UP phase trace callback if set
+          if (up_phase_trace_cb_) {
+            double start_time_sec = static_cast<double>(up_phase_start_time_.ToDebuggingValue()) / 1000000.0;
+            double duration_ms = last_up_duration_sec_ * 1000.0;
+            int actual_cycles = static_cast<int>(cycles_in_up + 0.5);  // Round to nearest integer
+            int32_t bw_estimate_kbps = static_cast<int32_t>(model_.MaxBandwidth().ToKBitsPerSecond());
+            up_phase_trace_cb_(start_time_sec, duration_ms, oscillation_freq_hz_, actual_cycles, bw_estimate_kbps);
+          }
         }
 
         up_phase_count_++;

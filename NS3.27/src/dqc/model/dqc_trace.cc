@@ -15,167 +15,199 @@ DqcTrace::~DqcTrace(){
     Close();
 }
 void DqcTrace::Log(std::string name,uint16_t enable){
-    if(enable&E_DQC_OWD){
-        OpenOwdFile(name);
-    }
-    if(enable&E_DQC_RTT){
-        OpenRttFile(name);
-    }
-    if(enable&E_DQC_BW){
-        OpenBandwidthFile(name);
-    }
-    if(enable&E_DQC_GOODPUT){
-        OpenGoodputFile(name);
-    }
-    if(enable&E_DQC_SEND_RATE){
-        OpenSendRateFile(name);
-    }
-    if(enable&E_DQC_RECV_RATE){
-        OpenRecvRateFile(name);
-    }
-    if(enable&E_DQC_BBR_MODE){
-        OpenBbrModeFile(name);
-    }
-    if(enable&E_DQC_STAT){
-        OpenStatsFile(name);
-    }
+    // Just store the name and enable flags, files will be opened lazily on first write
+    m_name = name;
+    m_enable = enable;
 }
-void DqcTrace::OpenOwdFile(std::string name){
+void DqcTrace::OpenOwdFile(){
+    if(!(m_enable & E_DQC_OWD) || m_owd.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path= std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_owd.txt";
+            +m_name+"_owd.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_owd.txt";
+        path=std::string(kDqcTracePath)+m_name+"_owd.txt";
     }
-    m_owd.open(path.c_str(), std::fstream::out);    
+    m_owd.open(path.c_str(), std::fstream::out);
+    if(m_owd.is_open()){
+        m_owd<<"#time(s)\tseq\towd(ms)\tsize(bytes)"<<std::endl;
+    }
 }
-void DqcTrace::OpenRttFile(std::string name){
+void DqcTrace::OpenRttFile(){
+    if(!(m_enable & E_DQC_RTT) || m_rtt.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path= std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_rtt.txt";
+            +m_name+"_rtt.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_rtt.txt";
+        path=std::string(kDqcTracePath)+m_name+"_rtt.txt";
     }
-
-    m_rtt.open(path.c_str(), std::fstream::out);    
+    m_rtt.open(path.c_str(), std::fstream::out);
+    if(m_rtt.is_open()){
+        m_rtt<<"#time(s)\tseq\trtt(ms)\tsmoothed_rtt(ms)"<<std::endl;
+    }
 }
-void DqcTrace::OpenBandwidthFile(std::string name){
+void DqcTrace::OpenBandwidthFile(){
+    if(!(m_enable & E_DQC_BW) || m_bw.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path = std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-                +name+"_bw.txt";
+                +m_name+"_bw.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_bw.txt";
+        path=std::string(kDqcTracePath)+m_name+"_bw.txt";
     }
-    m_bw.open(path.c_str(), std::fstream::out);     
+    m_bw.open(path.c_str(), std::fstream::out);
+    if(m_bw.is_open()){
+        m_bw<<"#time(s)\tbandwidth(kbps)"<<std::endl;
+    }
 }
-void DqcTrace::OpenGoodputFile(std::string name){
+void DqcTrace::OpenGoodputFile(){
+    if(!(m_enable & E_DQC_GOODPUT) || m_googput.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_good.txt";
+            +m_name+"_good.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_good.txt";
+        path=std::string(kDqcTracePath)+m_name+"_good.txt";
     }
     m_googput.open(path.c_str(), std::fstream::out);
+    if(m_googput.is_open()){
+        m_googput<<"#time(s)\tgoodput(kbps)"<<std::endl;
+    }
 }
-void DqcTrace::OpenSendRateFile(std::string name){
+void DqcTrace::OpenSendRateFile(){
+    if(!(m_enable & E_DQC_SEND_RATE) || m_sendRate.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_sendrate.txt";
+            +m_name+"_sendrate.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_sendrate.txt";
+        path=std::string(kDqcTracePath)+m_name+"_sendrate.txt";
     }
     m_sendRate.open(path.c_str(), std::fstream::out);
+    if(m_sendRate.is_open()){
+        m_sendRate<<"#time(s)\tpacing_rate(kbps)"<<std::endl;
+    }
 }
-void DqcTrace::OpenRecvRateFile(std::string name){
+void DqcTrace::OpenRecvRateFile(){
+    if(!(m_enable & E_DQC_RECV_RATE) || m_recvRate.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_recvrate.txt";
+            +m_name+"_recvrate.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_recvrate.txt";
+        path=std::string(kDqcTracePath)+m_name+"_recvrate.txt";
     }
     m_recvRate.open(path.c_str(), std::fstream::out);
+    if(m_recvRate.is_open()){
+        m_recvRate<<"#time(s)\tinstant_recv_rate(kbps)\tbw_estimate(kbps)"<<std::endl;
+    }
 }
-void DqcTrace::OpenBbrModeFile(std::string name){
+void DqcTrace::OpenBbrModeFile(){
+    if(!(m_enable & E_DQC_BBR_MODE) || m_bbrMode.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_bbrmode.txt";
+            +m_name+"_bbrmode.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_bbrmode.txt";
+        path=std::string(kDqcTracePath)+m_name+"_bbrmode.txt";
     }
     m_bbrMode.open(path.c_str(), std::fstream::out);
+    if(m_bbrMode.is_open()){
+        m_bbrMode<<"#time(s)\tmode"<<std::endl;
+    }
 }
-void DqcTrace::OpenStatsFile(std::string name){
+void DqcTrace::OpenUpPhaseFile(){
+    if(!(m_enable & E_DQC_UP_PHASE) || m_upPhase.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_upphase.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_upphase.txt";
+    }
+    m_upPhase.open(path.c_str(), std::fstream::out);
+    if(m_upPhase.is_open()){
+        m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\tcycles\tbw_estimate(kbps)"<<std::endl;
+    }
+}
+void DqcTrace::OpenStatsFile(){
+    if(!(m_enable & E_DQC_STAT) || m_stats.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path = std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
-            +name+"_stats.txt";
+            +m_name+"_stats.txt";
     }else{
-        path=std::string(kDqcTracePath)+name+"_stats.txt";
+        path=std::string(kDqcTracePath)+m_name+"_stats.txt";
     }
-
-    m_stats.open(path.c_str(), std::fstream::out);    
+    m_stats.open(path.c_str(), std::fstream::out);
+    if(m_stats.is_open()){
+        m_stats<<"#loss_rate(%)\tavg_throughput(kbps)\tavg_owd(ms)\ttotal_recv_bytes"<<std::endl;
+    }
 }
 void DqcTrace::OnOwd(uint32_t seq,uint32_t owd,uint32_t size){
+    OpenOwdFile();  // Lazy open
     if(m_owd.is_open()){
         float now=Simulator::Now().GetSeconds();
         m_owd<<now<<"\t"<<seq<<"\t"<<owd<<"\t"<<size<<std::endl;
     }    
 }
-void DqcTrace::OnRtt(uint32_t seq,uint32_t rtt){
+void DqcTrace::OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt){
+    OpenRttFile();  // Lazy open
     if(m_rtt.is_open()){
         float now=Simulator::Now().GetSeconds();
-        m_rtt<<now<<"\t"<<seq<<"\t"<<rtt<<std::endl;
-    }    
+        m_rtt<<now<<"\t"<<seq<<"\t"<<rtt<<"\t"<<smoothed_rtt<<std::endl;
+    }
 }
 void DqcTrace::OnBw(int32_t kbps){
+    OpenBandwidthFile();  // Lazy open
     if(m_bw.is_open()){
         float now=Simulator::Now().GetSeconds();
         m_bw<<now<<"\t"<<kbps<<std::endl;
-    }       
-    
+    }
+
 }
 void DqcTrace::OnGoodput(uint32_t kbps){
+    OpenGoodputFile();  // Lazy open
 	if(m_googput.is_open()){
 		float now=Simulator::Now().GetSeconds();
         m_googput<<now<<"\t"<<kbps<<std::endl;
 	}
 }
 void DqcTrace::OnSendRate(int32_t kbps){
+    OpenSendRateFile();  // Lazy open
     if(m_sendRate.is_open()){
         float now=Simulator::Now().GetSeconds();
         m_sendRate<<now<<"\t"<<kbps<<std::endl;
     }
 }
-void DqcTrace::OnRecvRate(int32_t kbps){
+void DqcTrace::OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps){
+    OpenRecvRateFile();  // Lazy open
     if(m_recvRate.is_open()){
         float now=Simulator::Now().GetSeconds();
-        m_recvRate<<now<<"\t"<<kbps<<std::endl;
+        m_recvRate<<now<<"\t"<<instant_kbps<<"\t"<<bw_estimate_kbps<<std::endl;
     }
 }
 void DqcTrace::OnBbrMode(int32_t mode){
+    OpenBbrModeFile();  // Lazy open
     if(m_bbrMode.is_open()){
         float now=Simulator::Now().GetSeconds();
         // mode encoding:
@@ -199,9 +231,16 @@ void DqcTrace::OnBbrMode(int32_t mode){
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
     }
 }
+void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,int32_t bw_estimate_kbps){
+    OpenUpPhaseFile();  // Lazy open
+    if(m_upPhase.is_open()){
+        m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<cycles<<"\t"<<bw_estimate_kbps<<std::endl;
+    }
+}
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
                         uint64_t recv_bytes,uint64_t duration,
                        float avg_owd){
+    OpenStatsFile();  // Lazy open
 	if(m_stats.is_open()){
         double loss_rate=10000.0-10000.0*recv_count/largest;
         m_stats<<(float)(loss_rate/100)<<std::endl;
@@ -223,6 +262,7 @@ void DqcTrace::Close(){
     CloseSendRateFile();
     CloseRecvRateFile();
     CloseBbrModeFile();
+    CloseUpPhaseFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -262,6 +302,12 @@ void DqcTrace::CloseBbrModeFile(){
     if(m_bbrMode.is_open()){
         m_bbrMode.flush();
         m_bbrMode.close();
+    }
+}
+void DqcTrace::CloseUpPhaseFile(){
+    if(m_upPhase.is_open()){
+        m_upPhase.flush();
+        m_upPhase.close();
     }
 }
 void DqcTrace::CloseStatsFile(){

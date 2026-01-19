@@ -150,7 +150,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
                         uint32_t max_bps=0,uint32_t cid=0,bool ecn=false,uint32_t emucons=1)
 {
     Ptr<DqcSender> sendApp = CreateObject<DqcSender> (cc_type,ecn);
-    Ptr<DqcReceiver> recvApp = CreateObject<DqcReceiver>();
+    Ptr<DqcReceiver> recvApp = CreateObject<DqcReceiver>(100);  // 100ms goodput统计间隔，更实时
     sender->AddApplication (sendApp);
     receiver->AddApplication (recvApp);
     sendApp->SetNumEmulatedConnections(emucons);
@@ -465,7 +465,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
 }
 
 int main (int argc, char *argv[]){
-    int sim_time=80;
+    int sim_time=20;
     int ins[]={1};
 
     // Command line arguments

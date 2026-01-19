@@ -86,6 +86,11 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
     return model_.BandwidthEstimate();
   }
 
+  // Get the latest bandwidth sample (instant receive rate)
+  QuicBandwidth BandwidthLatest() const {
+    return model_.bandwidth_latest();
+  }
+
   QuicByteCount GetCongestionWindow() const override;
 
   QuicByteCount GetSlowStartThreshold() const override { return 0; }

@@ -127,7 +127,7 @@ static void InstallDqc( dqc::CongestionControlType cc_type,
     }
     if(trace){
         sendApp->SetBwTraceFuc(MakeCallback(&DqcTrace::OnBw,trace));
-	sendApp->SetTraceOwdAtSender(MakeCallback(&DqcTrace::OnRtt,trace));
+        sendApp->SetRttTraceFuc(MakeCallback(&DqcTrace::OnRtt,trace));
 
         recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));

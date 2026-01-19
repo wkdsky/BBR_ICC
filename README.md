@@ -215,7 +215,7 @@ freqccv3：Cruise阶段结束时，用new_refill替换原来的refill阶段，�
   RTT，可以立即进入 PROBE_UP
   3. 确保 PROBE_UP 起点一致：无论从什么状态进入，都尽量让
   inflight 稳定在 ~0.75*BDP 附近再开始探测
-  
+
 new_refill退出后进入up阶段，在up阶段按freqccv2 的波动方式进行周期性波动（只在up阶段波动，其余阶段不波动，即没有波动模式这个参数，但有其他参数，包括频率和幅度），Up阶段的退出条件与原方案保持一致
 
   # 使用默认参数（所有流相同）
@@ -232,3 +232,30 @@ new_refill退出后进入up阶段，在up阶段按freqccv2 的波动方式进行
   # 混合配置
   ./waf --run "8_freqccv3 --freq1=1.0 --amp1=miu2 --freq2=2.0 
   --amp2=miu4 --sim_time=100"
+
+接收速率是 BandwidthEstimate()记录的，它是BBR的带宽窗口估计，是一个平滑的、持久的值，不会跟随发送速率快速振荡。ICC中分析的是瞬时ACK速率。
+
+速率对比画图：python3 scripts/analyze_oscillation.py 2>&1
+
+  | 文件            | 表头
+                         |
+  |---------------|----------------------------------------------
+  -------------------|
+  | _rtt.txt      | #time(s) seq rtt(ms) smoothed_rtt(ms)
+                     |
+  | _recvrate.txt | #time(s) instant_recv_rate(kbps) 
+  bw_estimate(kbps)              |
+  | _upphase.txt  | #start_time(s) duration(ms) freq(Hz) cycles 
+  bw_estimate(kbps)   |
+  | _sendrate.txt | #time(s) pacing_rate(kbps)
+                     |
+  | _bw.txt       | #time(s) bandwidth(kbps)
+                     |
+  | _bbrmode.txt  | #time(s) mode
+                     |
+  | _owd.txt      | #time(s) seq owd(ms) size(bytes)
+                     |
+  | _good.txt     | #time(s) goodput(kbps)
+                     |
+  | _stats.txt    | #loss_rate(%) avg_throughput(kbps) 
+  avg_owd(ms) total_recv_bytes |

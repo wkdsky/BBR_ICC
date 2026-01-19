@@ -14,6 +14,7 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_SEND_RATE=0x20,
     E_DQC_RECV_RATE=0x40,
     E_DQC_BBR_MODE=0x80,
+    E_DQC_UP_PHASE=0x100,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -27,25 +28,27 @@ public:
     }
     void Log(std::string name,uint16_t enable);
     void OnOwd(uint32_t seq,uint32_t owd,uint32_t size);
-    void OnRtt(uint32_t seq,uint32_t rtt);
+    void OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt);
     void OnBw(int32_t kbps);
     void OnGoodput(uint32_t kbps);
     void OnSendRate(int32_t kbps);
-    void OnRecvRate(int32_t kbps);
+    void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
     void OnBbrMode(int32_t mode);
+    void OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,int32_t bw_estimate_kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
 private:
     void Close();
-    void OpenOwdFile(std::string name);
-    void OpenRttFile(std::string name);
-    void OpenBandwidthFile(std::string name);
-    void OpenGoodputFile(std::string name);
-    void OpenSendRateFile(std::string name);
-    void OpenRecvRateFile(std::string name);
-    void OpenBbrModeFile(std::string name);
-    void OpenStatsFile(std::string name);
+    void OpenOwdFile();
+    void OpenRttFile();
+    void OpenBandwidthFile();
+    void OpenGoodputFile();
+    void OpenSendRateFile();
+    void OpenRecvRateFile();
+    void OpenBbrModeFile();
+    void OpenUpPhaseFile();
+    void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
     void CloseBandwidthFile();
@@ -53,8 +56,11 @@ private:
     void CloseSendRateFile();
     void CloseRecvRateFile();
     void CloseBbrModeFile();
+    void CloseUpPhaseFile();
     void CloseStatsFile();
     int m_id=0;
+    std::string m_name;       // Store the log name for lazy file opening
+    uint16_t m_enable=0;      // Store the enable flags
     TraceStats m_traceStatsCb;
     std::fstream m_owd;
     std::fstream m_rtt;
@@ -63,6 +69,7 @@ private:
     std::fstream m_sendRate;
     std::fstream m_recvRate;
     std::fstream m_bbrMode;
+    std::fstream m_upPhase;
     std::fstream m_stats;
 };
 class DqcTraceState{

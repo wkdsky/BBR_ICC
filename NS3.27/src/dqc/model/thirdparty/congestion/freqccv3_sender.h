@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <functional>
 
 #include "quic_bbr2_sender.h"
 #include "quic_export.h"
@@ -86,6 +87,10 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   //          4=PROBE_BW_REFILL (NEW_REFILL), 5=PROBE_BW_UP, 6=PROBE_RTT
   int32_t GetCurrentBbrModeIndex() const;
 
+  // Callback for tracing UP phase info
+  typedef std::function<void(double start_time, double duration_ms, double freq_hz, int cycles, int32_t bw_kbps)> UpPhaseTraceCallback;
+  void SetUpPhaseTraceCallback(UpPhaseTraceCallback cb) { up_phase_trace_cb_ = cb; }
+
   // FreqCCv3-specific parameters for NEW_REFILL
   static constexpr float kNewRefillHighThreshold = 0.75f;   // Upper threshold for BDP
   static constexpr float kNewRefillLowThreshold = 0.70f;    // Lower threshold for BDP
@@ -154,6 +159,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   static constexpr double kMinUpDurationSec = 0.3;     // Below this, reduce pacing gain
   static constexpr double kMaxUpDurationSec = 0.8;     // Above this, increase pacing gain
   static constexpr float kPacingGainAdjustStep = 0.02f; // Step size for pacing gain adjustment
+
+  // UP phase trace callback
+  UpPhaseTraceCallback up_phase_trace_cb_;
 };
 
 }  // namespace dqc

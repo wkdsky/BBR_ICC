@@ -75,6 +75,9 @@ void DqcSender::SetRecvRateTraceFuc(TraceRecvRate cb){
 void DqcSender::SetBbrModeTraceFuc(TraceBbrMode cb){
     m_traceBbrModeCb=cb;
 }
+void DqcSender::SetUpPhaseTraceFuc(TraceUpPhase cb){
+    m_traceUpPhaseCb=cb;
+}
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
     if(!m_traceLossDelay.IsNull()){
         int32_t num=(int32_t)seq.ToUint64();
@@ -101,6 +104,17 @@ void DqcSender::Bind(uint16_t port){
 	RttStats* rtt_stats=sent_manager->GetRttStats();
 	rtt_stats->UpdateRtt(TimeDelta::FromMilliseconds(100),TimeDelta::FromMilliseconds(0),ProtoTime::Zero());
 	NS_LOG_INFO(rtt_stats->smoothed_rtt().ToMicroseconds());
+
+    // Set UP phase trace callback for FreqCCv3
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv3){
+        FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
+        freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, int cycles, int32_t bw_kbps){
+            if(!m_traceUpPhaseCb.IsNull()){
+                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, cycles, bw_kbps);
+            }
+        });
+    }
 }
 InetSocketAddress DqcSender::GetLocalAddress(){
     Ptr<Node> node=GetNode();
@@ -324,17 +338,37 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
             SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
             RttStats* rtt_stats=sent_manager->GetRttStats();
             uint32_t rtt=(uint32_t)rtt_stats->latest_rtt().ToMilliseconds();
-            m_traceRttCb(seq,rtt);
+            uint32_t smoothed_rtt=(uint32_t)rtt_stats->smoothed_rtt().ToMilliseconds();
+            m_traceRttCb(seq,rtt,smoothed_rtt);
         }
-        // Trace recv rate (delivery rate / bandwidth estimate from ACK) if callback is set
-        // This is the ack_rate calculated as in BBR: bytes_acked / time_between_acks
+        // Trace recv rate if callback is set
+        // Column 1: instant receive rate (bandwidth_latest from bandwidth sampler)
+        // Column 2: bandwidth estimate (BandwidthEstimate())
         if(!m_traceRecvRateCb.IsNull()){
             SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
             SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
             if(algo){
-                // BandwidthEstimate returns the delivery rate (min of send_rate, ack_rate)
-                QuicBandwidth recv_rate = algo->BandwidthEstimate();
-                m_traceRecvRateCb((int32_t)recv_rate.ToKBitsPerSecond());
+                // BandwidthEstimate returns the estimated bandwidth (min of max_bw, bw_lo)
+                QuicBandwidth bw_estimate = algo->BandwidthEstimate();
+                // Get instant receive rate (bandwidth_latest) if available
+                int32_t instant_kbps = 0;
+                if(algo->GetCongestionControlType() == kBBRv2){
+                    Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
+                    instant_kbps = (int32_t)bbrv2->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kFreqCC){
+                    FreqccSender* freqcc = static_cast<FreqccSender*>(algo);
+                    instant_kbps = (int32_t)freqcc->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kFreqCCv2){
+                    FreqCCv2Sender* freqccv2 = static_cast<FreqCCv2Sender*>(algo);
+                    instant_kbps = (int32_t)freqccv2->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kFreqCCv3){
+                    FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
+                    instant_kbps = (int32_t)freqccv3->BandwidthLatest().ToKBitsPerSecond();
+                } else {
+                    // Fallback to bandwidth estimate for other algorithms
+                    instant_kbps = (int32_t)bw_estimate.ToKBitsPerSecond();
+                }
+                m_traceRecvRateCb(instant_kbps, (int32_t)bw_estimate.ToKBitsPerSecond());
             }
         }
     }
