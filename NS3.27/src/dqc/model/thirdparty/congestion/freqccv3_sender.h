@@ -93,7 +93,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // FreqCCv3-specific parameters for NEW_REFILL
   static constexpr float kNewRefillHighThreshold = 0.75f;   // Upper threshold for BDP
-  static constexpr float kNewRefillLowThreshold = 0.70f;    // Lower threshold for BDP
+  static constexpr float kNewRefillLowThreshold = 0.72f;    // Lower threshold for BDP
   static constexpr float kNewRefillDrainingPacingGain = 0.75f;  // Pacing gain when draining
   static constexpr float kNewRefillFillingPacingGain = 1.0f;    // Pacing gain when filling (same as original refill)
 
@@ -168,6 +168,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // UP phase trace callback
   UpPhaseTraceCallback up_phase_trace_cb_;
+
+  // Bandwidth estimate before entering UP phase (for early exit handling)
+  QuicBandwidth bandwidth_before_up_;
+
+  // Flag to track if UP phase exited early due to loss/ECN
+  bool up_phase_exited_early_;
 };
 
 }  // namespace dqc

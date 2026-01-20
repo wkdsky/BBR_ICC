@@ -54,7 +54,10 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       last_up_duration_sec_(0.0),
       // Initialize adaptive pacing gain
       up_pacing_gain_(kDefaultUpPacingGain),
-      current_up_pacing_gain_(kDefaultUpPacingGain) {
+      current_up_pacing_gain_(kDefaultUpPacingGain),
+      // Initialize bandwidth tracking for early exit handling
+      bandwidth_before_up_(QuicBandwidth::Zero()),
+      up_phase_exited_early_(false) {
   QUIC_DVLOG(2) << this << " Initializing FreqCCv3Sender @ " << now;
 }
 
@@ -177,8 +180,8 @@ void FreqCCv3Sender::UpdateNewRefillState(QuicByteCount bytes_in_flight) {
     // Inflight > 0.75*BDP + 2*MSS + MaxAckHeight: need to drain
     new_refill_state_ = NewRefillState::kDraining;
     QUIC_DVLOG(3) << "FreqCCv3: Entering kDraining state, pacing_gain=0.75";
-  } else if (bytes_in_flight <= low_threshold) {
-    // Inflight <= 0.70*BDP + 2*MSS + MaxAckHeight: need to fill
+  } else if (bytes_in_flight < low_threshold) {
+    // Inflight < 0.70*BDP + 2*MSS + MaxAckHeight: need to fill
     new_refill_state_ = NewRefillState::kFilling;
     QUIC_DVLOG(3) << "FreqCCv3: Entering kFilling state, pacing_gain=1.0";
   } else {
@@ -189,16 +192,8 @@ void FreqCCv3Sender::UpdateNewRefillState(QuicByteCount bytes_in_flight) {
 }
 
 float FreqCCv3Sender::GetNewRefillPacingGain() const {
-  switch (new_refill_state_) {
-    case NewRefillState::kDraining:
-      return kNewRefillDrainingPacingGain;  // 0.75
-    case NewRefillState::kFilling:
-      return kNewRefillFillingPacingGain;   // 1.0
-    case NewRefillState::kDone:
-    case NewRefillState::kNotInNewRefill:
-    default:
-      return 1.0f;
-  }
+  // Always return 1.0 to match BBRv2's refill behavior (requested by user)
+  return 1.0f;
 }
 
 bool FreqCCv3Sender::ShouldExitNewRefill(QuicByteCount bytes_in_flight) const {
@@ -250,6 +245,10 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
   // Get phase before parent update
   Bbr2ProbeBwMode::CyclePhase phase_before = GetCurrentProbeBwPhase();
 
+  // Check if we're in PROBE_UP and there are losses or ECN marks
+  bool in_probe_up_before = (phase_before == Bbr2ProbeBwMode::CyclePhase::PROBE_UP);
+  bool has_loss_or_ecn = (!lost_packets.empty()) || (GetBytesEcnInRounds() > 0);
+
   // Call parent implementation
   Bbr2Sender::OnCongestionEvent(rtt_updated, prior_in_flight, event_time,
                                 acked_packets, lost_packets);
@@ -273,6 +272,7 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
       // Entering NEW_REFILL: determine initial state based on inflight
       in_new_refill_ = true;
       UpdateNewRefillState(prior_in_flight);
+
       QUIC_DVLOG(2) << "FreqCCv3: Entering NEW_REFILL @ " << event_time
                     << ", inflight=" << prior_in_flight
                     << ", state=" << static_cast<int>(new_refill_state_);
@@ -280,7 +280,6 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
       // Apply the appropriate pacing gain
       model_.set_pacing_gain(GetNewRefillPacingGain());
     }
-
     // If in NEW_REFILL, check if we should continue or exit
     if (in_new_refill_ && current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL) {
       // Get current bytes in flight after processing
@@ -316,10 +315,15 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
       oscillation_start_time_ = event_time;
       up_phase_start_time_ = event_time;  // Record UP phase start time for adaptive frequency
 
+      // Save bandwidth estimate before entering UP phase (for early exit handling)
+      bandwidth_before_up_ = model_.MaxBandwidth();
+      up_phase_exited_early_ = false;
+
       QUIC_DVLOG(2) << "FreqCCv3: Entering PROBE_UP, starting oscillation @ " << event_time
                     << ", freq=" << oscillation_freq_hz_ << "Hz, up_phase_count=" << up_phase_count_
                     << ", up_pacing_gain=" << up_pacing_gain_
-                    << ", amplitude_bps=" << GetCurrentAmplitudeBps();
+                    << ", amplitude_bps=" << GetCurrentAmplitudeBps()
+                    << ", bandwidth_before_up=" << bandwidth_before_up_;
 
       // Save the frequency and pacing gain that will be used in this UP phase (for tracing later)
       current_oscillation_freq_hz_ = oscillation_freq_hz_;
@@ -340,6 +344,25 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     bool need_cleanup = !in_probe_up && (oscillation_start_time_ != QuicTime::Zero());
 
     if (leaving_probe_up || need_cleanup) {
+      // Check if UP phase exited early due to loss/ECN
+      // Early exit is detected if we were in PROBE_UP before parent update and had loss/ECN
+      if (in_probe_up_before && has_loss_or_ecn && !in_probe_up) {
+        up_phase_exited_early_ = true;
+        QUIC_DVLOG(2) << "FreqCCv3: UP phase exited early due to loss/ECN @ " << event_time
+                      << ", bandwidth_before_up=" << bandwidth_before_up_;
+
+        // Apply bandwidth reduction: use bandwidth_before_up * 0.8
+        if (!bandwidth_before_up_.IsZero()) {
+          QuicBandwidth reduced_bandwidth = bandwidth_before_up_ * 0.8;
+          QUIC_DVLOG(2) << "FreqCCv3: Reducing bandwidth from " << bandwidth_before_up_
+                        << " to " << reduced_bandwidth << " (0.8x) due to early exit";
+
+          // Force set the max bandwidth filter to the reduced value
+          // This bypasses the normal max_filter update mechanism
+          model_.ForceSetMaxBandwidth(reduced_bandwidth);
+        }
+      }
+
       // Calculate UP phase duration and adapt frequency for next UP phase
       if (up_phase_start_time_ != QuicTime::Zero()) {
         TimeDelta up_duration = event_time - up_phase_start_time_;
@@ -526,8 +549,18 @@ QuicBandwidth FreqCCv3Sender::PacingRate(QuicByteCount bytes_in_flight) const {
 }
 
 QuicByteCount FreqCCv3Sender::GetCongestionWindow() const {
-  // Return BBRv2's original cwnd
-  return cwnd_;
+  QuicByteCount cwnd = cwnd_;
+  
+  // During NEW_REFILL, cap CWND to the high threshold (0.75 BDP)
+  // This ensures we drain if inflight is too high, or stop filling when we reach the target.
+  if (in_new_refill_) {
+    QuicByteCount cap = CalculateInflightThreshold(kNewRefillHighThreshold);
+    if (cwnd > cap) {
+      cwnd = cap;
+    }
+  }
+  
+  return cwnd;
 }
 
 int32_t FreqCCv3Sender::GetCurrentBbrModeIndex() const {

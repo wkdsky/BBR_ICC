@@ -252,6 +252,12 @@ class QUIC_EXPORT_PRIVATE Bbr2MaxBandwidthFilter {
     return std::max(max_bandwidth_[0], max_bandwidth_[1]);
   }
 
+  // Force set the max bandwidth (for special cases like early exit from PROBE_UP)
+  void ForceSet(QuicBandwidth bandwidth) {
+    max_bandwidth_[0] = bandwidth;
+    max_bandwidth_[1] = bandwidth;
+  }
+
  private:
   QuicBandwidth max_bandwidth_[2] = {QuicBandwidth::Zero(),
                                      QuicBandwidth::Zero()};
@@ -341,6 +347,10 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   void RestartRound();
 
   void AdvanceMaxBandwidthFilter() { max_bandwidth_filter_.Advance(); }
+
+  void ForceSetMaxBandwidth(QuicBandwidth bandwidth) {
+    max_bandwidth_filter_.ForceSet(bandwidth);
+  }
 
   void OnApplicationLimited() { bandwidth_sampler_.OnAppLimited(); }
   void OnEcnUpdate();

@@ -159,7 +159,44 @@ ICC（Inter-flow Congestion Control）的发送速率波动与频域检测相关
   设计意图：inflight_hi 代表"不会导致过度丢包的最大 inflight 量"，它应该略高于
   BDP，以便充分利用带宽，同时通过 headroom 预留空间避免持续排队。
 
+原版中，inflight_hi（即被认为会导致拥塞的在途数据量上限）的更新主要发生在
+  PROBE_BW 模式的各个子阶段中。具体的更新时机和逻辑如下：
 
+  1. 任意 PROBE_BW 子阶段 (DOWN, CRUISE, REFILL, UP)
+  在这些阶段收到 ACK 处理拥塞事件时，都会调用 MaybeAdaptUpperBounds 尝试更新。
+
+   * 因拥塞而减少 (被动调整)：
+       * 条件：检测到由 inflight 过高导致的丢包（loss_events >= 2）或 ECN 标记。
+       * 操作：将 inflight_hi 大幅减少。
+       * 公式：inflight_hi = max(inflight_at_send, target_inflight * (1 -
+         beta))。其中 beta 通常为 0.3，意味着这是一种类似乘性减小（Multiplicative
+         Decrease）的操作。
+
+   * 因 BDP 增长而增加 (被动调整)：
+       * 条件：没有发生拥塞，但当前发送时的
+         inflight（inflight_at_send）实际上已经超过了记录的 inflight_hi。
+       * 操作：这说明网络状况变好了，之前的上限过低。将 inflight_hi
+         更新（提升）为当前的 inflight_at_send。
+
+  2. 仅在 PROBE_UP 阶段 (主动探测)
+  这是 BBRv2 主动寻找更高 inflight 容量的核心阶段，调用 ProbeInflightHighUpward。
+
+   * 主动增加 (Active Increase)：
+       * 前提条件：
+           1. CWND Limited：当前的发送受限于拥塞窗口（说明管道已填满）。
+           2. Inflight Hi Used：当前的 inflight_hi 已经被充分利用（prior_cwnd >=
+              inflight_hi）。
+       * 操作：根据成功确认的数据量逐步增加 inflight_hi。
+       * 逻辑：inflight_hi += delta *
+         MSS。这是一种试探性的增长（通常呈指数级或线性级），试图在不造成严重拥塞的
+         前提下，推高系统的吞吐量上限。
+
+  总结
+   * PROBE_UP：既可能主动增加（探测成功），也可能大幅减少（探测失败，触发丢包）。
+   * CRUISE / REFILL / DOWN：主要负责监控和减少（如果由于某种原因 inflight
+     依然过高导致丢包），或者在 BDP 自然增长时被动提升上限。
+
+     
 freqccv2，以BBRv2为蓝本，但down的pacing gain小一些，改为0.5，退出条件改为当前RTT小于等于1.05倍的min RTT或至少运行了两个min rtt的时间，up的pacing gain小一些，改为1.1（这些都不要改动原来的BBRv2），此外，让其也在新的BBRv2上进行波动，波动方式和模式与freqcc相同，但给波动模式增加一个 refill_up模式，即让波动只存在于refill和up阶段，其他参数和选项与freqcc一致
 
  * FreqCCv2 features:

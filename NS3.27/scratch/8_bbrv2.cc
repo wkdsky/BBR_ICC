@@ -118,7 +118,7 @@ uint32_t msQdelay;
 const uint64_t TOPO_SENDER_BW       =   10 * 1000000;    // in bps
 const uint64_t TOPO_SENDER_PDELAY   =   1;    // in ms
 const uint64_t TOPO_BOTTLE_BW       =   16 * 1000000;    // in bps
-const uint64_t TOPO_BOTTLE_PDELAY   =   18;    // in ms
+const uint64_t TOPO_BOTTLE_PDELAY   =   28;    // in ms
 const uint64_t TOPO_DEFAULT_QDELAY  =   (TOPO_SENDER_PDELAY*2+TOPO_BOTTLE_PDELAY)*2;    // in ms
 
 link_config_t p4p[]={
