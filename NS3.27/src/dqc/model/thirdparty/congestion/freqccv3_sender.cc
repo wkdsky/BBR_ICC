@@ -885,8 +885,7 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
 
             if (freq_analysis_trace_cb_) {
                 // Timestamp: window center
-                TimeDelta center_offset = window_size * 0.5;
-                QuicTime center_time = win_start + center_offset;
+                QuicTime center_time = win_start;
                 double start_s = (center_time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
                 double dur_ms = static_cast<double>(window_size.ToMilliseconds());
                 double adopted_ms = 0.0;
