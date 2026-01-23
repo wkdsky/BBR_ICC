@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <fftw3.h>
 
 #include "quic_logging.h"
 #include "quic_bbr2_probe_bw.h"
@@ -57,7 +58,13 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       current_up_pacing_gain_(kDefaultUpPacingGain),
       // Initialize bandwidth tracking for early exit handling
       bandwidth_before_up_(QuicBandwidth::Zero()),
-      up_phase_exited_early_(false) {
+      up_phase_exited_early_(false),
+      last_up_phase_end_time_(QuicTime::Zero()),
+      last_up_phase_start_time_(QuicTime::Zero()),
+      last_up_phase_peak_freq_(0.0),
+      last_up_window_size_(TimeDelta::Zero()),
+      last_up_phase_valid_(false),
+      last_ack_time_(QuicTime::Zero()) {
   QUIC_DVLOG(2) << this << " Initializing FreqCCv3Sender @ " << now;
 }
 
@@ -122,9 +129,9 @@ bool FreqCCv3Sender::ShouldOscillate() const {
   return current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP;
 }
 
-QuicBandwidth FreqCCv3Sender::CalculateOscillationOffset(QuicTime now) const {
+int64_t FreqCCv3Sender::CalculateOscillationOffset(QuicTime now) const {
   if (!ShouldOscillate() || oscillation_start_time_ == QuicTime::Zero()) {
-    return QuicBandwidth::Zero();
+    return 0;
   }
 
   // Calculate time since oscillation started
@@ -155,7 +162,7 @@ QuicBandwidth FreqCCv3Sender::CalculateOscillationOffset(QuicTime now) const {
   uint64_t amplitude_bps = GetCurrentAmplitudeBps();
   int64_t offset_bps = static_cast<int64_t>(triangle_value * amplitude_bps);
 
-  return QuicBandwidth::FromBitsPerSecond(offset_bps);
+  return offset_bps;
 }
 
 QuicByteCount FreqCCv3Sender::CalculateInflightThreshold(float bdp_factor) const {
@@ -242,6 +249,23 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
   // Update current time
   current_time_ = event_time;
 
+  // STFT: Calculate Instantaneous Rate and Push to Buffer
+  if (last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_) {
+      QuicByteCount acked_bytes = 0;
+      for (const auto& ack : acked_packets) {
+          acked_bytes += ack.bytes_acked;
+      }
+      if (acked_bytes > 0) {
+          TimeDelta delta = event_time - last_ack_time_;
+          QuicBandwidth rate = QuicBandwidth::FromBytesAndTimeDelta(acked_bytes, delta);
+          signal_history_.push_back({event_time, rate});
+          
+          // Safety cap to prevent memory explosion if not cleared
+          while (signal_history_.size() > 20000) signal_history_.pop_front();
+      }
+  }
+  last_ack_time_ = event_time;
+
   // Get phase before parent update
   Bbr2ProbeBwMode::CyclePhase phase_before = GetCurrentProbeBwPhase();
 
@@ -311,9 +335,30 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     bool entering_probe_up = in_probe_up && !was_in_probe_up_before;
 
     if (entering_probe_up) {
-      // Reset oscillation start time when entering PROBE_UP
+      // STFT: START of NEW UP Phase = END of Previous Interval
+      // Analyze Previous Interval (from last_up_phase_end_time_ to now)
+      if (last_up_phase_valid_ && last_up_phase_end_time_ != QuicTime::Zero()) {
+          // Analyze Interval with threshold
+          PerformFreqAnalysis(last_up_phase_end_time_, event_time, last_up_phase_peak_freq_ * 2.0 / 3.0, 0.0);
+          
+          // Clear history older than event_time (Start of this UP)
+          while (!signal_history_.empty() && signal_history_.front().time < event_time) {
+              signal_history_.pop_front();
+          }
+      } else {
+          // Invalid or first run, clear history up to now
+          while (!signal_history_.empty() && signal_history_.front().time < event_time) {
+              signal_history_.pop_front();
+          }
+          if (signal_history_.empty()) signal_history_.clear();
+      }
+      
+      // Reset UP state
       oscillation_start_time_ = event_time;
-      up_phase_start_time_ = event_time;  // Record UP phase start time for adaptive frequency
+      up_phase_start_time_ = event_time;
+      last_up_phase_start_time_ = event_time;
+      last_up_phase_peak_freq_ = 0.0;
+      last_up_phase_valid_ = false;
 
       // Save bandwidth estimate before entering UP phase (for early exit handling)
       bandwidth_before_up_ = model_.MaxBandwidth();
@@ -350,26 +395,33 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
         up_phase_exited_early_ = true;
         QUIC_DVLOG(2) << "FreqCCv3: UP phase exited early due to loss/ECN @ " << event_time
                       << ", bandwidth_before_up=" << bandwidth_before_up_;
-
-        // Apply bandwidth reduction: use bandwidth_before_up * 0.8
-        if (!bandwidth_before_up_.IsZero()) {
-          QuicBandwidth reduced_bandwidth = bandwidth_before_up_ * 0.8;
-          QUIC_DVLOG(2) << "FreqCCv3: Reducing bandwidth from " << bandwidth_before_up_
-                        << " to " << reduced_bandwidth << " (0.8x) due to early exit";
-
-          // Force set the max bandwidth filter to the reduced value
-          // This bypasses the normal max_filter update mechanism
-          model_.ForceSetMaxBandwidth(reduced_bandwidth);
-        }
       }
 
       // Calculate UP phase duration and adapt frequency for next UP phase
       if (up_phase_start_time_ != QuicTime::Zero()) {
         TimeDelta up_duration = event_time - up_phase_start_time_;
         last_up_duration_sec_ = static_cast<double>(up_duration.ToMicroseconds()) / 1000000.0;
+        
+        // STFT: Mark end of UP phase
+        last_up_phase_end_time_ = event_time;
 
         // Calculate how many cycles occurred in this UP phase
         double cycles_in_up = last_up_duration_sec_ * current_oscillation_freq_hz_;  // Use the frequency that WAS used in this UP phase
+
+        // STFT: Check Validity
+        if (cycles_in_up >= kMinCyclesPerUp) {
+            last_up_phase_valid_ = true;
+            // Analyze THIS UP Phase
+            // From last_up_phase_start_time_ to last_up_phase_end_time_
+            PerformFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_, 0.0, current_oscillation_freq_hz_);
+        } else {
+            last_up_phase_valid_ = false;
+            // Abandon cache for this UP phase
+            // We clear history up to now to ensure we don't use it
+             while (!signal_history_.empty() && signal_history_.front().time < event_time) {
+                signal_history_.pop_front();
+            }
+        }
 
         QUIC_DVLOG(2) << "FreqCCv3: Leaving PROBE_UP, duration=" << last_up_duration_sec_
                       << "s, cycles=" << cycles_in_up << ", freq=" << current_oscillation_freq_hz_ << "Hz"
@@ -391,8 +443,11 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
             }
           }
 
-          if (cycles_in_up < kMinCyclesPerUp || cycles_in_up > kMaxCyclesPerUp) {
+          // Adapt frequency only if cycles are too high (cycles > kMaxCyclesPerUp)
+          // We ignore the case where cycles < kMinCyclesPerUp as per request
+          if (cycles_in_up > kMaxCyclesPerUp) {
             // Recalculate frequency to achieve kTargetCyclesPerUp cycles in the recorded duration
+            // kTargetCyclesPerUp is (kMinCyclesPerUp + kMaxCyclesPerUp) / 2 = (2 + 5) / 2 = 3
             double new_freq = static_cast<double>(kTargetCyclesPerUp) / last_up_duration_sec_;
 
             // Clamp frequency to [dynamic_min_freq_hz, kMaxFreqHz]
@@ -479,7 +534,8 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
             float freq_hz_used = static_cast<float>(current_oscillation_freq_hz_);  // The frequency that WAS used in this UP phase
             float pacing_gain_used = current_up_pacing_gain_;  // The pacing gain that WAS used in this UP phase
             int32_t bw_estimate_kbps = static_cast<int32_t>(model_.MaxBandwidth().ToKBitsPerSecond());
-            up_phase_trace_cb_(start_time_sec, duration_ms, freq_hz_used, actual_cycles, pacing_gain_used, bw_estimate_kbps);
+            bool exit_due_to_queueing = !up_phase_exited_early_;
+            up_phase_trace_cb_(start_time_sec, duration_ms, freq_hz_used, exit_due_to_queueing, actual_cycles, pacing_gain_used, bw_estimate_kbps);
           }
         }
 
@@ -532,11 +588,11 @@ QuicBandwidth FreqCCv3Sender::PacingRate(QuicByteCount bytes_in_flight) const {
   }
 
   // Calculate oscillation offset based on current time
-  QuicBandwidth offset = CalculateOscillationOffset(current_time_);
+  int64_t offset_bps = CalculateOscillationOffset(current_time_);
 
   // Apply offset to base rate
   int64_t base_bps = static_cast<int64_t>(base_rate.ToBitsPerSecond());
-  int64_t offset_bps = static_cast<int64_t>(offset.ToBitsPerSecond());
+  // int64_t offset_bps = static_cast<int64_t>(offset.ToBitsPerSecond()); // No longer needed
   int64_t final_bps = base_bps + offset_bps;
 
   // Ensure pacing rate doesn't go negative or too low
@@ -602,4 +658,230 @@ int32_t FreqCCv3Sender::GetCurrentBbrModeIndex() const {
   }
 }
 
+// Helper to perform DFT on a set of uniform samples
+// Returns (Peak Frequency Hz, Avg Rate kbps)
+FreqCCv3Sender::AnalysisResult FreqCCv3Sender::AnalyzeWindow(const std::vector<FreqSignalSample>& samples, TimeDelta window_duration) const {
+    if (samples.empty()) return {0.0, 0};
+
+    // 1. Calculate Average Rate
+    double sum_rate = 0;
+    for (const auto& s : samples) {
+        sum_rate += s.rate.ToKBitsPerSecond();
+    }
+    int32_t avg_rate = static_cast<int32_t>(sum_rate / samples.size());
+
+    // 2. Resample to uniform grid for FFT
+    // Sample rate Fs=500Hz (2ms interval)
+    double step_s = 0.002; 
+    double duration_s = static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
+    int N = static_cast<int>(duration_s / step_s);
+    
+    if (N < 8) return {0.0, avg_rate}; // Too small for meaningful analysis
+
+    // Allocate buffers for FFTW
+    double *in = (double*) fftw_malloc(sizeof(double) * N);
+    fftw_complex *out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (N/2 + 1));
+    
+    // Linear interpolation to uniform grid
+    double t_start = (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+    size_t sample_idx = 0;
+    double mean_val = 0.0;
+    
+    for (int i = 0; i < N; ++i) {
+        double t_target = t_start + i * step_s;
+        
+        while (sample_idx < samples.size() - 1) {
+            double t_next = (samples[sample_idx+1].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+            if (t_next >= t_target) break;
+            sample_idx++;
+        }
+        
+        double val;
+        if (sample_idx >= samples.size() - 1) {
+            val = static_cast<double>(samples.back().rate.ToKBitsPerSecond());
+        } else {
+            double t1 = (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+            double t2 = (samples[sample_idx+1].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+            double r1 = static_cast<double>(samples[sample_idx].rate.ToKBitsPerSecond());
+            double r2 = static_cast<double>(samples[sample_idx+1].rate.ToKBitsPerSecond());
+            
+            if (std::abs(t2 - t1) < 1e-6) {
+                val = r1;
+            } else {
+                double fraction = (t_target - t1) / (t2 - t1);
+                val = r1 + fraction * (r2 - r1);
+            }
+        }
+        in[i] = val;
+        mean_val += val;
+    }
+    mean_val /= N;
+
+    // 3. Detrend (Mean subtraction) and Windowing (Hann)
+    for (int i = 0; i < N; ++i) {
+        in[i] -= mean_val;
+        // Hann Window
+        double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (N - 1)));
+        in[i] *= hann;
+    }
+
+    // 4. FFT
+    fftw_plan p = fftw_plan_dft_r2c_1d(N, in, out, FFTW_ESTIMATE);
+    fftw_execute(p);
+
+    // 5. Peak Detection
+    double Fs = 1.0 / step_s;
+    double max_mag = -1.0;
+    double peak_freq = 0.0;
+    
+    // Search positive frequencies (skip DC)
+    for (int k = 1; k < N/2 + 1; ++k) {
+        double mag = out[k][0]*out[k][0] + out[k][1]*out[k][1];
+        if (mag > max_mag) {
+            max_mag = mag;
+            peak_freq = k * Fs / N;
+        }
+    }
+
+    fftw_destroy_plan(p);
+    fftw_free(in);
+    fftw_free(out);
+
+    return {peak_freq, avg_rate};
+}
+
+void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz, double expected_freq_hz) {
+    if (start_time >= end_time || signal_history_.empty()) return;
+
+    // Filter samples in range
+    std::vector<FreqSignalSample> range_samples;
+    for (const auto& s : signal_history_) {
+        if (s.time >= start_time && s.time <= end_time) {
+            range_samples.push_back(s);
+        }
+    }
+    
+    if (range_samples.empty()) return;
+
+    TimeDelta duration = end_time - start_time;
+    TimeDelta window_size = TimeDelta::Zero();
+
+    // 1. Adaptive Window Size Selection
+    if (expected_freq_hz > 0.0) {
+        TimeDelta min_rtt = model_.MinRtt();
+        TimeDelta default_win = min_rtt;
+        if (default_win.IsZero() || default_win > duration) default_win = duration;
+        if (default_win < TimeDelta::FromMilliseconds(50)) default_win = TimeDelta::FromMilliseconds(50);
+        if (default_win > duration) default_win = duration;
+
+        // Try candidates: default (RTT), 2*RTT, etc.
+        std::vector<TimeDelta> candidates;
+        candidates.push_back(default_win);
+        if (!min_rtt.IsZero()) {
+            candidates.push_back(2 * min_rtt);
+        }
+        
+        bool found = false;
+        double lower_bound = 0.8 * expected_freq_hz;
+        double upper_bound = 1.2 * expected_freq_hz;
+        
+        for (const auto& win : candidates) {
+             if (win > duration) continue;
+             
+             // Check first window of this size
+             std::vector<FreqSignalSample> win_samples;
+             QuicTime win_end = start_time + win;
+             
+             for (const auto& s : range_samples) {
+                if (s.time >= start_time && s.time <= win_end) {
+                    win_samples.push_back(s);
+                }
+             }
+             
+             AnalysisResult res = AnalyzeWindow(win_samples, win);
+             if (res.peak_freq_hz >= lower_bound && res.peak_freq_hz <= upper_bound) {
+                 window_size = win;
+                 found = true;
+                 QUIC_DVLOG(2) << "FreqCCv3: Adaptive Window Found: " << window_size.ToMilliseconds() 
+                               << "ms for freq " << expected_freq_hz << "Hz (Detected: " << res.peak_freq_hz << "Hz)";
+                 break; 
+             }
+        }
+        
+        if (!found) {
+            window_size = default_win;
+            QUIC_DVLOG(2) << "FreqCCv3: Adaptive Window Failed, using default: " << window_size.ToMilliseconds() << "ms";
+        }
+        
+        last_up_window_size_ = window_size;
+
+    } else {
+        // Interval Phase: Use stored window size from last UP phase
+        if (last_up_window_size_ > TimeDelta::Zero()) {
+            window_size = last_up_window_size_;
+        } else {
+             TimeDelta min_rtt = model_.MinRtt();
+             window_size = (!min_rtt.IsZero()) ? min_rtt : duration;
+        }
+        if (window_size > duration) window_size = duration;
+        if (window_size < TimeDelta::FromMilliseconds(50)) window_size = TimeDelta::FromMilliseconds(50);
+        if (window_size > duration) window_size = duration; 
+    }
+
+    // 2. Sliding Window Analysis
+    // Overlap 85%
+    double overlap = 0.85; 
+    TimeDelta step_size = TimeDelta::FromMicroseconds(static_cast<int64_t>(window_size.ToMicroseconds() * (1.0 - overlap)));
+    if (step_size < TimeDelta::FromMilliseconds(1)) step_size = TimeDelta::FromMilliseconds(1); 
+
+    QuicTime win_start = start_time;
+    while (win_start + window_size <= end_time) {
+        QuicTime win_end = win_start + window_size;
+        
+        // Extract window samples
+        std::vector<FreqSignalSample> win_samples;
+        for (const auto& s : range_samples) {
+            if (s.time >= win_start && s.time <= win_end) {
+                win_samples.push_back(s);
+            }
+        }
+        
+        AnalysisResult result = AnalyzeWindow(win_samples, window_size);
+        
+        bool record = true;
+        if (threshold_freq_hz > 0.0) {
+            if (result.peak_freq_hz < threshold_freq_hz) {
+                record = false;
+            }
+        } else {
+             // In UP phase, track max freq
+             if (result.peak_freq_hz > last_up_phase_peak_freq_) {
+                 last_up_phase_peak_freq_ = result.peak_freq_hz;
+             }
+        }
+
+        if (record && freq_analysis_trace_cb_) {
+            // Timestamp: window center
+            TimeDelta center_offset = window_size * 0.5;
+            QuicTime center_time = win_start + center_offset;
+            double start_s = (center_time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+            double dur_ms = static_cast<double>(window_size.ToMilliseconds());
+            double adopted_ms = 0.0;
+            if (last_up_window_size_ > TimeDelta::Zero()) {
+                 adopted_ms = static_cast<double>(last_up_window_size_.ToMilliseconds());
+            } else if (expected_freq_hz > 0.0) {
+                 // In UP phase, if last_up_window_size_ not set yet (should be set by adaptive logic above), use window_size
+                 adopted_ms = dur_ms; 
+            } else {
+                 // In Interval phase, if last_up_window_size_ not set, use default
+                 adopted_ms = dur_ms;
+            }
+            
+            freq_analysis_trace_cb_(start_s, adopted_ms, dur_ms, result.peak_freq_hz, result.avg_rate_kbps);
+        }
+
+        // Advance
+        win_start = win_start + step_size;
+    }
+}
 }  // namespace dqc

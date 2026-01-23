@@ -13,11 +13,20 @@
 #include <cstdint>
 #include <string>
 #include <functional>
+#include <deque>
+#include <vector>
+#include <complex>
 
 #include "quic_bbr2_sender.h"
 #include "quic_export.h"
 
 namespace dqc {
+
+// Structure to store signal samples for STFT analysis
+struct FreqSignalSample {
+  QuicTime time;
+  QuicBandwidth rate;
+};
 
 // Amplitude mode for the oscillation (same as FreqCCv2)
 enum class FreqCCv3AmplitudeMode {
@@ -88,8 +97,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   int32_t GetCurrentBbrModeIndex() const;
 
   // Callback for tracing UP phase info (added pacing_gain parameter)
-  typedef std::function<void(double start_time, double duration_ms, double freq_hz, int cycles, float pacing_gain, int32_t bw_kbps)> UpPhaseTraceCallback;
+  typedef std::function<void(double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps)> UpPhaseTraceCallback;
   void SetUpPhaseTraceCallback(UpPhaseTraceCallback cb) { up_phase_trace_cb_ = cb; }
+
+  // Callback for Freq Analysis Trace
+  typedef std::function<void(double, double, double, double, int32_t)> FreqAnalysisTraceCallback;
+  void SetFreqAnalysisTraceCallback(FreqAnalysisTraceCallback cb) { freq_analysis_trace_cb_ = cb; }
 
   // FreqCCv3-specific parameters for NEW_REFILL
   static constexpr float kNewRefillHighThreshold = 0.75f;   // Upper threshold for BDP
@@ -99,7 +112,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
  private:
   // Calculate oscillation offset based on current time and parameters
-  QuicBandwidth CalculateOscillationOffset(QuicTime now) const;
+  int64_t CalculateOscillationOffset(QuicTime now) const;
 
   // Check if oscillation should be active (only during PROBE_UP)
   bool ShouldOscillate() const;
@@ -136,6 +149,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   mutable Bbr2Mode last_mode_;              // Track mode for detecting transitions
   mutable Bbr2ProbeBwMode::CyclePhase last_probe_bw_phase_;  // Track probe_bw phase
   mutable QuicTime current_time_;           // Current time, updated on each packet sent
+  mutable QuicTime last_ack_time_;          // Time of last ACK for rate calc
 
   // NEW_REFILL state
   NewRefillState new_refill_state_;         // Current state within NEW_REFILL
@@ -148,7 +162,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   static constexpr int kTargetCyclesPerUp = 3;    // Target number of cycles per UP phase (reduced from 15)
   static constexpr int kMinCyclesPerUp = 2;       // Minimum cycles threshold (reduced from 10)
   static constexpr int kMaxCyclesPerUp = 5;       // Maximum cycles threshold (reduced from 20)
-  static constexpr double kMinFreqHz = 1.0;       // Minimum frequency limit (1 Hz)
+  static constexpr double kMinFreqHz = 50.0;       // Minimum frequency limit (1 Hz)
   static constexpr double kMaxFreqHz = 100.0;     // Maximum frequency limit (reduced from 500 Hz)
 
   // Adaptive pacing gain for PROBE_UP phase (based on RTT multiples)
@@ -169,11 +183,32 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // UP phase trace callback
   UpPhaseTraceCallback up_phase_trace_cb_;
 
+  // Freq analysis trace callback
+  FreqAnalysisTraceCallback freq_analysis_trace_cb_;
+
   // Bandwidth estimate before entering UP phase (for early exit handling)
   QuicBandwidth bandwidth_before_up_;
 
   // Flag to track if UP phase exited early due to loss/ECN
   bool up_phase_exited_early_;
+
+  // Perform STFT analysis on a segment of the signal
+  void PerformFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz = 0.0, double expected_freq_hz = 0.0);
+
+  // Helper to run DFT and find peak frequency
+  struct AnalysisResult {
+      double peak_freq_hz;
+      int32_t avg_rate_kbps;
+  };
+  AnalysisResult AnalyzeWindow(const std::vector<FreqSignalSample>& samples, TimeDelta window_duration) const;
+  
+  // STFT Analysis State
+  std::deque<FreqSignalSample> signal_history_;
+  QuicTime last_up_phase_end_time_;         // End time of the last UP phase
+  QuicTime last_up_phase_start_time_;       // Start time of the last UP phase
+  double last_up_phase_peak_freq_;          // Peak freq found in last UP phase
+  TimeDelta last_up_window_size_;           // Window size used for last UP phase
+  bool last_up_phase_valid_;                // Whether last UP phase had >= kMinCyclesPerUp
 };
 
 }  // namespace dqc

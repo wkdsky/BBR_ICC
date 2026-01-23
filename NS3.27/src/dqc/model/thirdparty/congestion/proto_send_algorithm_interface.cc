@@ -5,6 +5,7 @@
 #include "freqcc_sender.h"
 #include "freqccv2_sender.h"
 #include "freqccv3_sender.h"
+#include "freqccv4_sender.h"
 #include "quic_bbr2_sender.h"
 #include "quic_bbr_sender.h"
 #include "couple_bbr_sender.h"
@@ -323,6 +324,15 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
         }
         case kFreqCCv3:{
             return new FreqCCv3Sender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+                               stats);
+        }
+        case kFreqCCv4:{
+            return new FreqCCv4Sender(clock->Now(),
                                rtt_stats,
                                unacked_packets,
                                initial_congestion_window,

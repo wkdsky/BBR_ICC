@@ -15,6 +15,7 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_RECV_RATE=0x40,
     E_DQC_BBR_MODE=0x80,
     E_DQC_UP_PHASE=0x100,
+    E_DQC_FREQ_ANALYSIS=0x200,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -26,6 +27,7 @@ public:
     void SetStatsTraceFuc(TraceStats cb){
         m_traceStatsCb=cb;
     }
+    void SetCongestionControlType(uint32_t type);
     void Log(std::string name,uint16_t enable);
     void OnOwd(uint32_t seq,uint32_t owd,uint32_t size);
     void OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt);
@@ -34,7 +36,8 @@ public:
     void OnSendRate(int32_t kbps);
     void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
     void OnBbrMode(int32_t mode);
-    void OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
+    void OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
+    void OnFreqAnalysis(double start_time, double adopted_window_ms, double duration_ms, double peak_freq_hz, int32_t avg_rate_kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -48,6 +51,7 @@ private:
     void OpenRecvRateFile();
     void OpenBbrModeFile();
     void OpenUpPhaseFile();
+    void OpenFreqAnalysisFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -57,10 +61,12 @@ private:
     void CloseRecvRateFile();
     void CloseBbrModeFile();
     void CloseUpPhaseFile();
+    void CloseFreqAnalysisFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
     uint16_t m_enable=0;      // Store the enable flags
+    uint32_t m_ccType=0;
     TraceStats m_traceStatsCb;
     std::fstream m_owd;
     std::fstream m_rtt;
@@ -70,6 +76,7 @@ private:
     std::fstream m_recvRate;
     std::fstream m_bbrMode;
     std::fstream m_upPhase;
+    std::fstream m_freqAnalysis;
     std::fstream m_stats;
 };
 class DqcTraceState{

@@ -8,6 +8,7 @@
 #include "freqcc_sender.h"
 #include "freqccv2_sender.h"
 #include "freqccv3_sender.h"
+#include "freqccv4_sender.h"
 #include "quic_bbr2_sender.h"
 #include "proto_send_algorithm_interface.h"
 using namespace dqc;
@@ -78,6 +79,9 @@ void DqcSender::SetBbrModeTraceFuc(TraceBbrMode cb){
 void DqcSender::SetUpPhaseTraceFuc(TraceUpPhase cb){
     m_traceUpPhaseCb=cb;
 }
+void DqcSender::SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb){
+    m_traceFreqAnalysisCb=cb;
+}
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
     if(!m_traceLossDelay.IsNull()){
         int32_t num=(int32_t)seq.ToUint64();
@@ -109,9 +113,22 @@ void DqcSender::Bind(uint16_t port){
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
     if(algo && algo->GetCongestionControlType() == kFreqCCv3){
         FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
-        freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, int cycles, float pacing_gain, int32_t bw_kbps){
+        freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
             if(!m_traceUpPhaseCb.IsNull()){
-                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, cycles, pacing_gain, bw_kbps);
+                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
+            }
+        });
+        // Set Freq Analysis Trace Callback
+        freqccv3->SetFreqAnalysisTraceCallback([this](double start_time, double adopted_window_ms, double duration_ms, double peak_freq_hz, int32_t avg_rate_kbps){
+            if(!m_traceFreqAnalysisCb.IsNull()){
+                m_traceFreqAnalysisCb(start_time, adopted_window_ms, duration_ms, peak_freq_hz, avg_rate_kbps);
+            }
+        });
+    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
+            if(!m_traceUpPhaseCb.IsNull()){
+                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
             }
         });
     }
@@ -223,6 +240,10 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
         } else if(algo && algo->GetCongestionControlType() == kFreqCCv3){
             FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
             int32_t mode_index = freqccv3->GetCurrentBbrModeIndex();
+            m_traceBbrModeCb(mode_index);
+        } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+            FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+            int32_t mode_index = freqccv4->GetCurrentBbrModeIndex();
             m_traceBbrModeCb(mode_index);
         } else if(algo && algo->GetCongestionControlType() == kBBRv2){
             Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
@@ -364,6 +385,9 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 } else if(algo->GetCongestionControlType() == kFreqCCv3){
                     FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
                     instant_kbps = (int32_t)freqccv3->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kFreqCCv4){
+                    FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+                    instant_kbps = (int32_t)freqccv4->BandwidthLatest().ToKBitsPerSecond();
                 } else {
                     // Fallback to bandwidth estimate for other algorithms
                     instant_kbps = (int32_t)bw_estimate.ToKBitsPerSecond();
@@ -520,6 +544,44 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
         }
         freqccv3->SetOscillationAmplitude(amp_mode, fixed_bps);
         // Note: FreqCCv3 only oscillates during PROBE_UP, no oscillation mode setting needed
+    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+
+        // Set frequency (initial base frequency)
+        freqccv4->SetOscillationFrequency(freq_hz);
+
+        // Set amplitude mode
+        FreqCCv4AmplitudeMode amp_mode = FreqCCv4AmplitudeMode::kFixed;
+        uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
+
+        if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
+            amp_mode = FreqCCv4AmplitudeMode::kMiu2;
+        } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
+            amp_mode = FreqCCv4AmplitudeMode::kMiu3;
+        } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
+            amp_mode = FreqCCv4AmplitudeMode::kMiu4;
+        } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
+            amp_mode = FreqCCv4AmplitudeMode::kMiu8;
+        } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
+            amp_mode = FreqCCv4AmplitudeMode::kSR2;
+        } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
+            amp_mode = FreqCCv4AmplitudeMode::kSR3;
+        } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
+            amp_mode = FreqCCv4AmplitudeMode::kSR4;
+        } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
+            amp_mode = FreqCCv4AmplitudeMode::kSR8;
+        } else {
+            amp_mode = FreqCCv4AmplitudeMode::kFixed;
+            if(amplitude_mode != "0" && !amplitude_mode.empty()) {
+                try {
+                    double val = std::stod(amplitude_mode);
+                    if(val > 0) {
+                        fixed_bps = static_cast<uint64_t>(val * 1000000);
+                    }
+                } catch(...) {}
+            }
+        }
+        freqccv4->SetOscillationAmplitude(amp_mode, fixed_bps);
     }
 }
 }  // namespace ns3

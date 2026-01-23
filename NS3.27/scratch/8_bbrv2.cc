@@ -465,7 +465,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
 }
 
 int main (int argc, char *argv[]){
-    int sim_time=20;
+    int sim_time=30;
     int ins[]={1};
 
     // Command line arguments

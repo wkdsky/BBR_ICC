@@ -4,6 +4,7 @@
 #include <string>
 #include "ns3/dqc_trace.h"
 #include "ns3/simulator.h"
+#include "proto_types.h"
 //app http://www.cplusplus.com/reference/fstream/fstream/open/
 namespace ns3{
 std::string kDqcTracePath;
@@ -13,6 +14,9 @@ void set_dqc_trace_folder(std::string &path){
 DqcTrace::DqcTrace(int id):m_id(id){}
 DqcTrace::~DqcTrace(){
     Close();
+}
+void DqcTrace::SetCongestionControlType(uint32_t type){
+    m_ccType=type;
 }
 void DqcTrace::Log(std::string name,uint16_t enable){
     // Just store the name and enable flags, files will be opened lazily on first write
@@ -144,7 +148,11 @@ void DqcTrace::OpenUpPhaseFile(){
     }
     m_upPhase.open(path.c_str(), std::fstream::out);
     if(m_upPhase.is_open()){
-        m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\tcycles\tpacing_gain\tbw_estimate(kbps)"<<std::endl;
+        if (m_ccType == dqc::kFreqCCv4) {
+            m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\t1.25BDP_exit\tcycles\tbw_estimate(kbps)"<<std::endl;
+        } else {
+            m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\t1.25BDP_exit\tcycles\tpacing_gain\tbw_estimate(kbps)"<<std::endl;
+        }
     }
 }
 void DqcTrace::OpenStatsFile(){
@@ -231,10 +239,20 @@ void DqcTrace::OnBbrMode(int32_t mode){
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
     }
 }
-void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
+void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
     OpenUpPhaseFile();  // Lazy open
     if(m_upPhase.is_open()){
-        m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<cycles<<"\t"<<pacing_gain<<"\t"<<bw_estimate_kbps<<std::endl;
+        if (m_ccType == dqc::kFreqCCv4) {
+            m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<(exit_due_to_queueing?"true":"false")<<"\t"<<cycles<<"\t"<<bw_estimate_kbps<<std::endl;
+        } else {
+            m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<(exit_due_to_queueing?"true":"false")<<"\t"<<cycles<<"\t"<<pacing_gain<<"\t"<<bw_estimate_kbps<<std::endl;
+        }
+    }
+}
+void DqcTrace::OnFreqAnalysis(double start_time, double adopted_window_ms, double duration_ms, double peak_freq_hz, int32_t avg_rate_kbps){
+    OpenFreqAnalysisFile(); // Lazy open
+    if(m_freqAnalysis.is_open()){
+        m_freqAnalysis<<start_time<<"\t"<<adopted_window_ms<<"\t"<<duration_ms<<"\t"<<peak_freq_hz<<"\t"<<avg_rate_kbps<<std::endl;
     }
 }
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
@@ -263,6 +281,7 @@ void DqcTrace::Close(){
     CloseRecvRateFile();
     CloseBbrModeFile();
     CloseUpPhaseFile();
+    CloseFreqAnalysisFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -310,9 +329,31 @@ void DqcTrace::CloseUpPhaseFile(){
         m_upPhase.close();
     }
 }
+void DqcTrace::CloseFreqAnalysisFile(){
+    if(m_freqAnalysis.is_open()){
+        m_freqAnalysis.flush();
+        m_freqAnalysis.close();
+    }
+}
 void DqcTrace::CloseStatsFile(){
     if(m_stats.is_open()){
         m_stats.close();
+    }
+}
+void DqcTrace::OpenFreqAnalysisFile(){
+    if(!(m_enable & E_DQC_FREQ_ANALYSIS) || m_freqAnalysis.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_freq.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_freq.txt";
+    }
+    m_freqAnalysis.open(path.c_str(), std::fstream::out);
+    if(m_freqAnalysis.is_open()){
+        m_freqAnalysis<<"#start_time(s)\tadopted_window(ms)\tduration(ms)\tpeak_freq(Hz)\tavg_rate(kbps)"<<std::endl;
     }
 }
 DqcTraceState::DqcTraceState(std::string name){
