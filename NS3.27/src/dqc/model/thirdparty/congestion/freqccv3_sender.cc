@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <algorithm>
+#include <numeric>
+#include <vector>
 #include <fftw3.h>
 
 #include "quic_logging.h"
@@ -15,8 +17,27 @@ namespace dqc {
 namespace {
 // Default oscillation parameters
 const double kDefaultOscillationFreqHz = 1.0;  // 1 Hz default
+
+// Helper for Linear Detrending
+void LinearDetrend(std::vector<double>& data) {
+    size_t n = data.size();
+    if (n < 2) return;
+    double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_xx = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        sum_x += i;
+        sum_y += data[i];
+        sum_xy += i * data[i];
+        sum_xx += i * i;
+    }
+    double slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+    double intercept = (sum_y - slope * sum_x) / n;
+    for (size_t i = 0; i < n; ++i) {
+        data[i] -= (slope * i + intercept);
+    }
+}
 }  // namespace
 
+// ... (keep existing constexpr definitions)
 // Define static constexpr members for linking
 constexpr float FreqCCv3Sender::kMinUpPacingGain;
 constexpr float FreqCCv3Sender::kMaxUpPacingGain;
@@ -685,7 +706,6 @@ FreqCCv3Sender::AnalysisResult FreqCCv3Sender::AnalyzeWindow(const std::vector<F
     // Linear interpolation to uniform grid
     double t_start = (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
     size_t sample_idx = 0;
-    double mean_val = 0.0;
     
     for (int i = 0; i < N; ++i) {
         double t_target = t_start + i * step_s;
@@ -713,35 +733,64 @@ FreqCCv3Sender::AnalysisResult FreqCCv3Sender::AnalyzeWindow(const std::vector<F
             }
         }
         in[i] = val;
-        mean_val += val;
     }
-    mean_val /= N;
 
-    // 3. Detrend (Mean subtraction) and Windowing (Hann)
+    // 3. System ID Preprocessing: Linear Detrending
+    // Required to eliminate low frequency drift caused by ACK sampling
+    std::vector<double> in_vec(in, in + N);
+    LinearDetrend(in_vec);
+    for (int i=0; i<N; ++i) in[i] = in_vec[i];
+
+    // 4. Windowing (Hann)
     for (int i = 0; i < N; ++i) {
-        in[i] -= mean_val;
-        // Hann Window
         double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (N - 1)));
         in[i] *= hann;
     }
 
-    // 4. FFT
+    // 5. FFT
     fftw_plan p = fftw_plan_dft_r2c_1d(N, in, out, FFTW_ESTIMATE);
     fftw_execute(p);
 
-    // 5. Peak Detection
+    // 6. Peak Detection with Physical Constraints and Sub-bin Estimation
     double Fs = 1.0 / step_s;
     double max_mag = -1.0;
     double peak_freq = 0.0;
+    int peak_k = 0;
+
+    // Physical constraints
+    double T_total = duration_s;
+    double min_freq_bound = 1.0 / T_total; // Ignore below 1/TotalTime
     
-    // Search positive frequencies (skip DC)
-    for (int k = 1; k < N/2 + 1; ++k) {
-        double mag = out[k][0]*out[k][0] + out[k][1]*out[k][1];
+    // Find min and max bin
+    int k_min = static_cast<int>(min_freq_bound * N / Fs);
+    if (k_min < 1) k_min = 1;
+    int k_max = N / 2; // Nyquist
+
+    // Search for max magnitude
+    for (int k = k_min; k < k_max; ++k) {
+        // Power Spectrum Normalization: |X[k]|^2 / N
+        double mag = (out[k][0]*out[k][0] + out[k][1]*out[k][1]) / N;
         if (mag > max_mag) {
             max_mag = mag;
-            peak_freq = k * Fs / N;
+            peak_k = k;
         }
     }
+
+    // Sub-bin Parabolic Interpolation
+    if (peak_k > k_min && peak_k < k_max) {
+         double alpha = (out[peak_k-1][0]*out[peak_k-1][0] + out[peak_k-1][1]*out[peak_k-1][1]) / N;
+         double beta = max_mag;
+         double gamma = (out[peak_k+1][0]*out[peak_k+1][0] + out[peak_k+1][1]*out[peak_k+1][1]) / N;
+         
+         double delta = 0.5 * (alpha - gamma) / (alpha - 2.0 * beta + gamma);
+         peak_freq = (peak_k + delta) * Fs / N;
+    } else {
+         peak_freq = peak_k * Fs / N;
+    }
+    
+    // Check against noise floor (simple relative threshold)
+    // If the peak is not significant enough (e.g., compared to average energy), it might be noise
+    // For now, we return the found peak, but PerformFreqAnalysis can filter based on consistency.
 
     fftw_destroy_plan(p);
     fftw_free(in);
@@ -766,57 +815,24 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
     TimeDelta duration = end_time - start_time;
     TimeDelta window_size = TimeDelta::Zero();
 
-    // 1. Adaptive Window Size Selection
+    // 1. Adaptive Window Size Selection: Inverse Frequency Based
+    // WinLen ~ Alpha / f_target. We use Alpha = 4 cycles for good resolution/stability trade-off.
     if (expected_freq_hz > 0.0) {
-        TimeDelta min_rtt = model_.MinRtt();
-        TimeDelta default_win = min_rtt;
-        if (default_win.IsZero() || default_win > duration) default_win = duration;
-        if (default_win < TimeDelta::FromMilliseconds(50)) default_win = TimeDelta::FromMilliseconds(50);
-        if (default_win > duration) default_win = duration;
-
-        // Try candidates: default (RTT), 2*RTT, etc.
-        std::vector<TimeDelta> candidates;
-        candidates.push_back(default_win);
-        if (!min_rtt.IsZero()) {
-            candidates.push_back(2 * min_rtt);
-        }
-        
-        bool found = false;
-        double lower_bound = 0.8 * expected_freq_hz;
-        double upper_bound = 1.2 * expected_freq_hz;
-        
-        for (const auto& win : candidates) {
-             if (win > duration) continue;
-             
-             // Check first window of this size
-             std::vector<FreqSignalSample> win_samples;
-             QuicTime win_end = start_time + win;
-             
-             for (const auto& s : range_samples) {
-                if (s.time >= start_time && s.time <= win_end) {
-                    win_samples.push_back(s);
-                }
-             }
-             
-             AnalysisResult res = AnalyzeWindow(win_samples, win);
-             if (res.peak_freq_hz >= lower_bound && res.peak_freq_hz <= upper_bound) {
-                 window_size = win;
-                 found = true;
-                 QUIC_DVLOG(2) << "FreqCCv3: Adaptive Window Found: " << window_size.ToMilliseconds() 
-                               << "ms for freq " << expected_freq_hz << "Hz (Detected: " << res.peak_freq_hz << "Hz)";
-                 break; 
-             }
-        }
-        
-        if (!found) {
-            window_size = default_win;
-            QUIC_DVLOG(2) << "FreqCCv3: Adaptive Window Failed, using default: " << window_size.ToMilliseconds() << "ms";
-        }
-        
-        last_up_window_size_ = window_size;
+         double target_cycles = 4.0;
+         double required_duration_s = target_cycles / expected_freq_hz;
+         window_size = TimeDelta::FromMicroseconds(static_cast<int64_t>(required_duration_s * 1000000.0));
+         
+         // Constraints
+         if (window_size > duration) window_size = duration; // Cannot exceed available data
+         TimeDelta min_rtt = model_.MinRtt();
+         if (!min_rtt.IsZero() && window_size < min_rtt) window_size = min_rtt; // At least 1 RTT
+         
+         last_up_window_size_ = window_size;
+         QUIC_DVLOG(2) << "FreqCCv3: Adaptive Window set to " << window_size.ToMilliseconds() 
+                       << "ms based on expected freq " << expected_freq_hz << "Hz (4 cycles)";
 
     } else {
-        // Interval Phase: Use stored window size from last UP phase
+        // Interval Phase: Use stored window size from last UP phase or default
         if (last_up_window_size_ > TimeDelta::Zero()) {
             window_size = last_up_window_size_;
         } else {
@@ -825,16 +841,17 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
         }
         if (window_size > duration) window_size = duration;
         if (window_size < TimeDelta::FromMilliseconds(50)) window_size = TimeDelta::FromMilliseconds(50);
-        if (window_size > duration) window_size = duration; 
     }
 
-    // 2. Sliding Window Analysis
-    // Overlap 85%
+    // 2. Sliding Window Analysis with Trajectory Tracking
+    // Overlap 85% for smooth trajectory
     double overlap = 0.85; 
     TimeDelta step_size = TimeDelta::FromMicroseconds(static_cast<int64_t>(window_size.ToMicroseconds() * (1.0 - overlap)));
     if (step_size < TimeDelta::FromMilliseconds(1)) step_size = TimeDelta::FromMilliseconds(1); 
 
+    std::vector<double> detected_freqs;
     QuicTime win_start = start_time;
+    
     while (win_start + window_size <= end_time) {
         QuicTime win_end = win_start + window_size;
         
@@ -848,40 +865,55 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
         
         AnalysisResult result = AnalyzeWindow(win_samples, window_size);
         
-        bool record = true;
-        if (threshold_freq_hz > 0.0) {
-            if (result.peak_freq_hz < threshold_freq_hz) {
-                record = false;
-            }
-        } else {
-             // In UP phase, track max freq
-             if (result.peak_freq_hz > last_up_phase_peak_freq_) {
-                 last_up_phase_peak_freq_ = result.peak_freq_hz;
-             }
+        // Upper Bound Frequency Constraint (e.g., 5 * 1/(2*RTT)) to filter ACK noise
+        // This is a relaxed Nyquist/Stability check
+        double max_valid_freq = 0.0;
+        TimeDelta min_rtt = model_.MinRtt();
+        if (!min_rtt.IsZero()) {
+            double rtt_s = static_cast<double>(min_rtt.ToMicroseconds()) / 1000000.0;
+            max_valid_freq = 5.0 / (2.0 * rtt_s); // Allow up to 5th harmonic of Nyquist base? Broad filter.
         }
+        
+        bool valid = true;
+        if (max_valid_freq > 0.0 && result.peak_freq_hz > max_valid_freq) valid = false;
+        
+        // Threshold check (existing)
+        if (threshold_freq_hz > 0.0 && result.peak_freq_hz < threshold_freq_hz) valid = false;
 
-        if (record && freq_analysis_trace_cb_) {
-            // Timestamp: window center
-            TimeDelta center_offset = window_size * 0.5;
-            QuicTime center_time = win_start + center_offset;
-            double start_s = (center_time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
-            double dur_ms = static_cast<double>(window_size.ToMilliseconds());
-            double adopted_ms = 0.0;
-            if (last_up_window_size_ > TimeDelta::Zero()) {
-                 adopted_ms = static_cast<double>(last_up_window_size_.ToMilliseconds());
-            } else if (expected_freq_hz > 0.0) {
-                 // In UP phase, if last_up_window_size_ not set yet (should be set by adaptive logic above), use window_size
-                 adopted_ms = dur_ms; 
-            } else {
-                 // In Interval phase, if last_up_window_size_ not set, use default
-                 adopted_ms = dur_ms;
+        if (valid) {
+            detected_freqs.push_back(result.peak_freq_hz);
+
+            if (freq_analysis_trace_cb_) {
+                // Timestamp: window center
+                TimeDelta center_offset = window_size * 0.5;
+                QuicTime center_time = win_start + center_offset;
+                double start_s = (center_time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+                double dur_ms = static_cast<double>(window_size.ToMilliseconds());
+                double adopted_ms = 0.0;
+                if (last_up_window_size_ > TimeDelta::Zero()) {
+                     adopted_ms = static_cast<double>(last_up_window_size_.ToMilliseconds());
+                } else {
+                     adopted_ms = dur_ms;
+                }
+                
+                freq_analysis_trace_cb_(start_s, adopted_ms, dur_ms, result.peak_freq_hz, result.avg_rate_kbps);
             }
-            
-            freq_analysis_trace_cb_(start_s, adopted_ms, dur_ms, result.peak_freq_hz, result.avg_rate_kbps);
         }
 
         // Advance
         win_start = win_start + step_size;
+    }
+
+    // 3. Trajectory Stability Analysis for Controller Feedback
+    // Instead of simple Max, use Median of detected frequencies to filter transient noise
+    if (!detected_freqs.empty() && threshold_freq_hz <= 0.0) { // Only update controller state if not in threshold check mode (i.e. in UP phase)
+        std::sort(detected_freqs.begin(), detected_freqs.end());
+        double median_freq = detected_freqs[detected_freqs.size() / 2];
+        
+        // Update the tracked peak frequency with the robust median estimate
+        if (median_freq > last_up_phase_peak_freq_) {
+            last_up_phase_peak_freq_ = median_freq;
+        }
     }
 }
 }  // namespace dqc
