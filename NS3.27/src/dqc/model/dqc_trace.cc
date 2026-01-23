@@ -249,10 +249,10 @@ void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,boo
         }
     }
 }
-void DqcTrace::OnFreqAnalysis(double start_time, double adopted_window_ms, double duration_ms, double peak_freq_hz, int32_t avg_rate_kbps){
+void DqcTrace::OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps){
     OpenFreqAnalysisFile(); // Lazy open
     if(m_freqAnalysis.is_open()){
-        m_freqAnalysis<<start_time<<"\t"<<adopted_window_ms<<"\t"<<duration_ms<<"\t"<<peak_freq_hz<<"\t"<<avg_rate_kbps<<std::endl;
+        m_freqAnalysis<<start_time<<"\t"<<duration_sec<<"\t"<<sender_peak_freq_hz<<"\t"<<receiver_peak_freq_hz<<"\t"<<avg_rate_kbps<<std::endl;
     }
 }
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
@@ -353,7 +353,7 @@ void DqcTrace::OpenFreqAnalysisFile(){
     }
     m_freqAnalysis.open(path.c_str(), std::fstream::out);
     if(m_freqAnalysis.is_open()){
-        m_freqAnalysis<<"#start_time(s)\tadopted_window(ms)\tduration(ms)\tpeak_freq(Hz)\tavg_rate(kbps)"<<std::endl;
+        m_freqAnalysis<<"#start_time(s)\tduration(s)\tsender_peak_freq(Hz)\treceiver_peak_freq(Hz)\tavg_rate(kbps)"<<std::endl;
     }
 }
 DqcTraceState::DqcTraceState(std::string name){

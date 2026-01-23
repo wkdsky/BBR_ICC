@@ -101,6 +101,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   void SetUpPhaseTraceCallback(UpPhaseTraceCallback cb) { up_phase_trace_cb_ = cb; }
 
   // Callback for Freq Analysis Trace
+  // Parameters: (start_time_s, duration_s, sender_peak_freq_hz, receiver_peak_freq_hz, avg_rate_kbps)
+  // Now outputs individual frequency peaks detected in sliding windows, not entire UP phases
   typedef std::function<void(double, double, double, double, int32_t)> FreqAnalysisTraceCallback;
   void SetFreqAnalysisTraceCallback(FreqAnalysisTraceCallback cb) { freq_analysis_trace_cb_ = cb; }
 
@@ -109,6 +111,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   static constexpr float kNewRefillLowThreshold = 0.72f;    // Lower threshold for BDP
   static constexpr float kNewRefillDrainingPacingGain = 0.75f;  // Pacing gain when draining
   static constexpr float kNewRefillFillingPacingGain = 1.0f;    // Pacing gain when filling (same as original refill)
+
+  // Single-peak detection tolerance (Hz)
+  static constexpr double kPeakFreqTolerance = 10.0;  // 10 Hz tolerance for peak continuity
 
  private:
   // Calculate oscillation offset based on current time and parameters
@@ -203,12 +208,26 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   AnalysisResult AnalyzeWindow(const std::vector<FreqSignalSample>& samples, TimeDelta window_duration) const;
   
   // STFT Analysis State
-  std::deque<FreqSignalSample> signal_history_;
+  std::deque<FreqSignalSample> signal_history_;          // Receiver rate signal (ACK-based)
+  std::deque<FreqSignalSample> sender_rate_history_;     // Sender rate signal (packet-send-based)
   QuicTime last_up_phase_end_time_;         // End time of the last UP phase
   QuicTime last_up_phase_start_time_;       // Start time of the last UP phase
   double last_up_phase_peak_freq_;          // Peak freq found in last UP phase
   TimeDelta last_up_window_size_;           // Window size used for last UP phase
   bool last_up_phase_valid_;                // Whether last UP phase had >= kMinCyclesPerUp
+  double sender_max_peak_freq_hz_;          // Max peak freq from sender rate in current UP phase
+  QuicTime last_packet_sent_time_;          // Time of last packet sent for sender rate calc
+
+  // Optimized STFT window state
+  double optimized_window_sec_;             // Cached optimized window length in seconds
+  bool window_optimized_;                   // Whether window has been optimized
+
+  // Helper function to optimize STFT window based on sender rate
+  // Returns optimized window size in seconds
+  double OptimizeSTFTWindow(const std::vector<FreqSignalSample>& sender_samples,
+                            QuicTime start_time,
+                            QuicTime end_time,
+                            double target_freq_hz);
 };
 
 }  // namespace dqc

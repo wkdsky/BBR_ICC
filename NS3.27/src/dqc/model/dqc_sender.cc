@@ -119,9 +119,10 @@ void DqcSender::Bind(uint16_t port){
             }
         });
         // Set Freq Analysis Trace Callback
-        freqccv3->SetFreqAnalysisTraceCallback([this](double start_time, double adopted_window_ms, double duration_ms, double peak_freq_hz, int32_t avg_rate_kbps){
+        // Parameters: (start_time_s, adopted_window_ms, sender_peak_freq_hz, receiver_peak_freq_hz, avg_rate_kbps)
+        freqccv3->SetFreqAnalysisTraceCallback([this](double start_time, double adopted_window_ms, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps){
             if(!m_traceFreqAnalysisCb.IsNull()){
-                m_traceFreqAnalysisCb(start_time, adopted_window_ms, duration_ms, peak_freq_hz, avg_rate_kbps);
+                m_traceFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, receiver_peak_freq_hz, avg_rate_kbps);
             }
         });
     } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
