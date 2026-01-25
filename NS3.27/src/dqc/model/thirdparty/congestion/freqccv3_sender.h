@@ -115,6 +115,19 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Single-peak detection tolerance (Hz)
   static constexpr double kPeakFreqTolerance = 10.0;  // 10 Hz tolerance for peak continuity
 
+  // ===== PHYSICAL CONSTRAINT PARAMETERS =====
+  // CONSTRAINT 1: Energy Threshold - reject low-energy noise windows
+  static constexpr double kEnergyThresholdRatio = 0.2;  // Peak must be > 20% of total energy
+
+  // CONSTRAINT 2: Expected Frequency Gate - reject out-of-range frequencies
+  static constexpr double kFreqDeviationTolerance = 0.30;  // ±30% deviation allowed
+
+  // CONSTRAINT 3: ACK Signal Smoothing - temporal smoothing window
+  static constexpr double kSmoothingWindowMs = 10.0;  // 10ms moving average for receiver rate
+
+  // CONSTRAINT 4: Minimum Peak Duration - reject transient peaks
+  static constexpr double kMinPeakDurationCycles = 0.75;  // Peak must span at least 0.75 cycles (relaxed)
+
  private:
   // Calculate oscillation offset based on current time and parameters
   int64_t CalculateOscillationOffset(QuicTime now) const;
@@ -200,12 +213,19 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Perform STFT analysis on a segment of the signal
   void PerformFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz = 0.0, double expected_freq_hz = 0.0);
 
-  // Helper to run DFT and find peak frequency
+  // Helper to run DFT and find peak frequency with physical constraints
   struct AnalysisResult {
       double peak_freq_hz;
       int32_t avg_rate_kbps;
+      bool valid;  // CONSTRAINT: Whether this result passes physical validity checks
   };
-  AnalysisResult AnalyzeWindow(const std::vector<FreqSignalSample>& samples, TimeDelta window_duration) const;
+  AnalysisResult AnalyzeWindow(const std::vector<FreqSignalSample>& samples,
+                               TimeDelta window_duration,
+                               double expected_freq_hz) const;
+
+  // CONSTRAINT 3: ACK signal preprocessing - smooth receiver rate signal
+  std::vector<FreqSignalSample> SmoothSignal(const std::vector<FreqSignalSample>& raw_samples,
+                                             double smoothing_window_ms) const;
   
   // STFT Analysis State
   std::deque<FreqSignalSample> signal_history_;          // Receiver rate signal (ACK-based)
@@ -218,16 +238,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   double sender_max_peak_freq_hz_;          // Max peak freq from sender rate in current UP phase
   QuicTime last_packet_sent_time_;          // Time of last packet sent for sender rate calc
 
-  // Optimized STFT window state
-  double optimized_window_sec_;             // Cached optimized window length in seconds
-  bool window_optimized_;                   // Whether window has been optimized
-
-  // Helper function to optimize STFT window based on sender rate
-  // Returns optimized window size in seconds
-  double OptimizeSTFTWindow(const std::vector<FreqSignalSample>& sender_samples,
-                            QuicTime start_time,
-                            QuicTime end_time,
-                            double target_freq_hz);
+  // Simple window size calculation for STFT based on target frequency and RTT
+  // Returns window size in seconds
+  double CalculateSTFTWindowSize(double target_freq_hz) const;
 };
 
 }  // namespace dqc
