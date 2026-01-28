@@ -57,9 +57,14 @@ void DqcSender::SetSentSeqTraceFuc(TraceSentSeq cb){
 }
 void DqcSender::SetTraceLossPacketDelay(TraceLossPacketDelay cb){
     m_traceLossDelay=cb;
-    m_connection.SetTraceLossPacketDelay([this](PacketNumber seq,uint32_t rtt){
-        OnPacketLossInfo(seq,rtt);
-    });
+    EnsureLossTraceHooked();
+}
+void DqcSender::SetLossRateTraceFuc(TraceLossRate cb){
+    m_traceLossRateCb=cb;
+    EnsureLossTraceHooked();
+    if(m_running && !m_lossRateTimer.IsRunning()){
+        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
+    }
 }
 void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 	 m_traceOwd=cb;
@@ -73,6 +78,9 @@ void DqcSender::SetSendRateTraceFuc(TraceSendRate cb){
 void DqcSender::SetRecvRateTraceFuc(TraceRecvRate cb){
     m_traceRecvRateCb=cb;
 }
+void DqcSender::SetInflightTraceFuc(TraceInflight cb){
+    m_traceInflightCb=cb;
+}
 void DqcSender::SetBbrModeTraceFuc(TraceBbrMode cb){
     m_traceBbrModeCb=cb;
 }
@@ -82,11 +90,35 @@ void DqcSender::SetUpPhaseTraceFuc(TraceUpPhase cb){
 void DqcSender::SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb){
     m_traceFreqAnalysisCb=cb;
 }
-void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt){
+void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost){
+    m_lossBytesInterval+=bytes_lost;
     if(!m_traceLossDelay.IsNull()){
         int32_t num=(int32_t)seq.ToUint64();
-        m_traceLossDelay(num,rtt);
+        m_traceLossDelay(num,rtt,bytes_lost);
     }
+}
+void DqcSender::LossRateTick(){
+    if(!m_traceLossRateCb.IsNull()){
+        float loss_rate=0.0f;
+        if(m_sentBytesInterval>0){
+            loss_rate=(float)(100.0*m_lossBytesInterval/m_sentBytesInterval);
+        }
+        m_traceLossRateCb(loss_rate);
+    }
+    m_lossBytesInterval=0;
+    m_sentBytesInterval=0;
+    if(m_running){
+        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
+    }
+}
+void DqcSender::EnsureLossTraceHooked(){
+    if(m_lossTraceHooked){
+        return;
+    }
+    m_connection.SetTraceLossPacketDelay([this](PacketNumber seq,uint32_t rtt,PacketLength bytes_lost){
+        OnPacketLossInfo(seq,rtt,bytes_lost);
+    });
+    m_lossTraceHooked=true;
 }
 void DqcSender::Bind(uint16_t port){
     if (m_socket== NULL) {
@@ -172,6 +204,9 @@ void DqcSender::DataGenerator(int times){
 }
 void DqcSender::StartApplication(){
     m_running=true;
+    if(!m_traceLossRateCb.IsNull() && !m_lossRateTimer.IsRunning()){
+        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
+    }
     if(m_enableEngineTimer){
         m_connection.SendInitData();
         UpdateEngineEvent();        
@@ -184,6 +219,7 @@ void DqcSender::StopApplication(){
     m_running=false;
 	m_processTimer.Cancel();
 	m_engineTimer.Cancel();
+    m_lossRateTimer.Cancel();
     m_sinks.clear();
 }
 void DqcSender::RecvPacket(Ptr<Socket> socket){
@@ -209,6 +245,7 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	TimeTag tag;
     tag.SetSentTime (ms);
 	p->AddPacketTag (tag);
+    m_sentBytesInterval+=p->GetSize();
 	if(!m_traceBwCb.IsNull()){
 		QuicBandwidth send_bw=m_connection.EstimatedBandwidth();
 		m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());
@@ -251,6 +288,14 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
             int32_t mode_index = bbrv2->GetCurrentBbrModeIndex();
             m_traceBbrModeCb(mode_index);
         }
+    }
+    // Trace inflight bytes and cwnd
+    if(!m_traceInflightCb.IsNull()){
+        SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+        ByteCount in_flight = 0;
+        ByteCount cwnd = 0;
+        sent_manager->InFlight(&in_flight, &cwnd);
+        m_traceInflightCb((int32_t)in_flight, (int32_t)cwnd);
     }
     m_socket->SendTo(p,0,InetSocketAddress{m_peerIp,m_peerPort});
 }

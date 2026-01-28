@@ -1,5 +1,5 @@
 .makepp/
-
+test*.log
 NS3.27/build/
 NS3.27/.waf*
 NS3.27/traces

@@ -44,8 +44,10 @@ public:
     void SetBwTraceFuc(TraceBandwidth cb);
     typedef Callback<void,int32_t> TraceSentSeq;
     void SetSentSeqTraceFuc(TraceSentSeq cb);
-    typedef Callback<void,uint32_t,uint32_t> TraceLossPacketDelay;
+    typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceLossPacketDelay;
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb);
+    typedef Callback<void,float> TraceLossRate;
+    void SetLossRateTraceFuc(TraceLossRate cb);
     typedef Callback<void,uint32_t,uint32_t> TraceOwdAtSender;
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
     typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceRtt;
@@ -54,6 +56,8 @@ public:
     void SetSendRateTraceFuc(TraceSendRate cb);
     typedef Callback<void,int32_t,int32_t> TraceRecvRate;
     void SetRecvRateTraceFuc(TraceRecvRate cb);
+    typedef Callback<void,int32_t,int32_t> TraceInflight;
+    void SetInflightTraceFuc(TraceInflight cb);
     typedef Callback<void,int32_t> TraceBbrMode;
     void SetBbrModeTraceFuc(TraceBbrMode cb);
     typedef Callback<void,double,double,double,bool,int,float,int32_t> TraceUpPhase;
@@ -68,7 +72,7 @@ public:
     }
     void SendToNetwork(Ptr<Packet> p);
     void OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) override;
-    void OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt);
+    void OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost);
     uint32_t GetId() const {return m_id;}
     void SetSenderId(uint32_t id);
     void RegisterOnewayDelaySink(OneWayDelaySink *sink);
@@ -85,6 +89,8 @@ private:
     void CheckNoPacketOut();
     void EngineEvent();
     void UpdateEngineEvent();
+    void LossRateTick();
+    void EnsureLossTraceHooked();
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
     bool m_running{false};
@@ -119,8 +125,15 @@ private:
     TraceRtt m_traceRttCb;
     TraceSendRate m_traceSendRateCb;
     TraceRecvRate m_traceRecvRateCb;
+    TraceInflight m_traceInflightCb;
     TraceBbrMode m_traceBbrModeCb;
     TraceUpPhase m_traceUpPhaseCb;
     TraceFreqAnalysis m_traceFreqAnalysisCb;
+    TraceLossRate m_traceLossRateCb;
+    EventId m_lossRateTimer;
+    uint32_t m_lossRateIntervalMs{100};
+    uint64_t m_lossBytesInterval{0};
+    uint64_t m_sentBytesInterval{0};
+    bool m_lossTraceHooked{false};
 };
 }

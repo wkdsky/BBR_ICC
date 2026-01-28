@@ -16,6 +16,8 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_BBR_MODE=0x80,
     E_DQC_UP_PHASE=0x100,
     E_DQC_FREQ_ANALYSIS=0x200,
+    E_DQC_INFLIGHT=0x400,
+    E_DQC_LOSS_RATE=0x800,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -35,7 +37,9 @@ public:
     void OnGoodput(uint32_t kbps);
     void OnSendRate(int32_t kbps);
     void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
+    void OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes);
     void OnBbrMode(int32_t mode);
+    void OnLossRate(float loss_rate);
     void OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
     void OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
@@ -49,7 +53,9 @@ private:
     void OpenGoodputFile();
     void OpenSendRateFile();
     void OpenRecvRateFile();
+    void OpenInflightFile();
     void OpenBbrModeFile();
+    void OpenLossRateFile();
     void OpenUpPhaseFile();
     void OpenFreqAnalysisFile();
     void OpenStatsFile();
@@ -59,7 +65,9 @@ private:
     void CloseGoodputFile();
     void CloseSendRateFile();
     void CloseRecvRateFile();
+    void CloseInflightFile();
     void CloseBbrModeFile();
+    void CloseLossRateFile();
     void CloseUpPhaseFile();
     void CloseFreqAnalysisFile();
     void CloseStatsFile();
@@ -74,10 +82,14 @@ private:
     std::fstream m_googput;
     std::fstream m_sendRate;
     std::fstream m_recvRate;
+    std::fstream m_inflight;
     std::fstream m_bbrMode;
+    std::fstream m_lossRate;
     std::fstream m_upPhase;
     std::fstream m_freqAnalysis;
     std::fstream m_stats;
+    int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
+    int32_t m_lastBwKbps = -1;  // Track last bw to avoid duplicate records
 };
 class DqcTraceState{
 public:

@@ -43,7 +43,7 @@ public:
     		dqc::ProtoTime timestamp) override;
     bool OnAckFrameEnd(dqc::PacketNumber start) override;
     bool OnStopWaitingFrame(const dqc::PacketNumber least_unacked) override;
-    void SendAckFrame();
+	void SendAckFrame();
 private:
 	virtual void StartApplication() override;
 	virtual void StopApplication() override;
@@ -68,7 +68,7 @@ private:
     dqc::ProtoFramer m_frameDecoder;
     dqc::ProtoFramer m_frameEncoder;
     IntervalSet<dqc::StreamOffset> m_recvInterval;
-	TraceOwd m_traceOwdCb;
+    TraceOwd m_traceOwdCb;
     TraceStats m_traceStatsCb;
     TraceGoodput m_traceGoodputCb;
     bool m_ecn_flag{false};

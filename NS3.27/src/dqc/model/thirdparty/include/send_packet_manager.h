@@ -9,7 +9,7 @@
 #include "random.h"
 #include <functional>
 namespace dqc{
-using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t)>;
+using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t,PacketLength)>;
 class SendPacketManager{
 public:
     SendPacketManager(ProtoClock *clock,QuicConnectionStats* stats,StreamAckedObserver *acked_observer);

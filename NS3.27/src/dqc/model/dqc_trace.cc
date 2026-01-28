@@ -119,6 +119,22 @@ void DqcTrace::OpenRecvRateFile(){
         m_recvRate<<"#time(s)\tinstant_recv_rate(kbps)\tbw_estimate(kbps)"<<std::endl;
     }
 }
+void DqcTrace::OpenInflightFile(){
+    if(!(m_enable & E_DQC_INFLIGHT) || m_inflight.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_inflight.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_inflight.txt";
+    }
+    m_inflight.open(path.c_str(), std::fstream::out);
+    if(m_inflight.is_open()){
+        m_inflight<<"#time(s)\tinflight(bytes)\tcwnd(bytes)"<<std::endl;
+    }
+}
 void DqcTrace::OpenBbrModeFile(){
     if(!(m_enable & E_DQC_BBR_MODE) || m_bbrMode.is_open()) return;
     char buf[FILENAME_MAX];
@@ -133,6 +149,22 @@ void DqcTrace::OpenBbrModeFile(){
     m_bbrMode.open(path.c_str(), std::fstream::out);
     if(m_bbrMode.is_open()){
         m_bbrMode<<"#time(s)\tmode"<<std::endl;
+    }
+}
+void DqcTrace::OpenLossRateFile(){
+    if(!(m_enable & E_DQC_LOSS_RATE) || m_lossRate.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path= std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_lossrate.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_lossrate.txt";
+    }
+    m_lossRate.open(path.c_str(), std::fstream::out);
+    if(m_lossRate.is_open()){
+        m_lossRate<<"#time(s)\tloss_rate(%)"<<std::endl;
     }
 }
 void DqcTrace::OpenUpPhaseFile(){
@@ -187,6 +219,11 @@ void DqcTrace::OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt){
 }
 void DqcTrace::OnBw(int32_t kbps){
     OpenBandwidthFile();  // Lazy open
+    // Only record if bw changed from last recorded value
+    if(kbps == m_lastBwKbps){
+        return;
+    }
+    m_lastBwKbps = kbps;
     if(m_bw.is_open()){
         float now=Simulator::Now().GetSeconds();
         m_bw<<now<<"\t"<<kbps<<std::endl;
@@ -214,8 +251,23 @@ void DqcTrace::OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps){
         m_recvRate<<now<<"\t"<<instant_kbps<<"\t"<<bw_estimate_kbps<<std::endl;
     }
 }
+void DqcTrace::OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes){
+    OpenInflightFile();  // Lazy open
+    if(m_inflight.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_inflight<<now<<"\t"<<inflight_bytes<<"\t"<<cwnd_bytes<<std::endl;
+    }
+}
 void DqcTrace::OnBbrMode(int32_t mode){
     OpenBbrModeFile();  // Lazy open
+
+    // Only record if mode changed from last recorded mode
+    if(mode == m_lastBbrMode){
+        return;  // Skip recording if mode hasn't changed
+    }
+
+    m_lastBbrMode = mode;  // Update last mode
+
     if(m_bbrMode.is_open()){
         float now=Simulator::Now().GetSeconds();
         // mode encoding:
@@ -237,6 +289,13 @@ void DqcTrace::OnBbrMode(int32_t mode){
         };
         const char* mode_name = (mode >= 0 && mode <= 6) ? mode_names[mode] : "unknown";
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
+    }
+}
+void DqcTrace::OnLossRate(float loss_rate){
+    OpenLossRateFile();  // Lazy open
+    if(m_lossRate.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_lossRate<<now<<"\t"<<loss_rate<<std::endl;
     }
 }
 void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
@@ -279,7 +338,9 @@ void DqcTrace::Close(){
 	CloseGoodputFile();
     CloseSendRateFile();
     CloseRecvRateFile();
+    CloseInflightFile();
     CloseBbrModeFile();
+    CloseLossRateFile();
     CloseUpPhaseFile();
     CloseFreqAnalysisFile();
     CloseStatsFile();
@@ -317,10 +378,22 @@ void DqcTrace::CloseRecvRateFile(){
         m_recvRate.close();
     }
 }
+void DqcTrace::CloseInflightFile(){
+    if(m_inflight.is_open()){
+        m_inflight.flush();
+        m_inflight.close();
+    }
+}
 void DqcTrace::CloseBbrModeFile(){
     if(m_bbrMode.is_open()){
         m_bbrMode.flush();
         m_bbrMode.close();
+    }
+}
+void DqcTrace::CloseLossRateFile(){
+    if(m_lossRate.is_open()){
+        m_lossRate.flush();
+        m_lossRate.close();
     }
 }
 void DqcTrace::CloseUpPhaseFile(){

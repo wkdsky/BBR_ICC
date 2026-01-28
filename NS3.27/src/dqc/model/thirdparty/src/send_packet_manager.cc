@@ -352,7 +352,7 @@ void SendPacketManager::InvokeLossDetection(ProtoTime time){
         MarkForRetrans(it->packet_number);
         if(trace_lost_){
             uint32_t rtt=rtt_stats_.smoothed_rtt().ToMilliseconds();
-            trace_lost_(it->packet_number,rtt);
+            trace_lost_(it->packet_number,rtt,it->bytes_lost);
         }
     }
     // in repeat acked case;
