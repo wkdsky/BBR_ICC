@@ -58,6 +58,9 @@ bool SendPacketManager::OnSentPacket(SerializedPacket *packet,PacketNumber old,
                                     packet_number,packet->len,has_retrans);
     }
     unacked_packets_.AddSentPacket(packet,old,send_ts,has_retrans);
+    if(trace_sent_){
+        trace_sent_(packet_number,packet->len,send_ts);
+    }
     return true;
 }
 const TimeDelta SendPacketManager::TimeUntilSend(ProtoTime now) const{
@@ -145,6 +148,7 @@ void SendPacketManager::OnAckStart(PacketNumber largest_acked,TimeDelta ack_dela
 		}
 	}
     rtt_updated_=MaybeUpdateRTT(largest_acked,ack_delay_time,ack_receive_time);
+    last_ack_delay_=ack_delay_time;
     ack_packet_itor_=last_ack_frame_.packets.rbegin();
 }
 void SendPacketManager::OnAckRange(PacketNumber start,PacketNumber end){
@@ -210,12 +214,21 @@ AckResult SendPacketManager::OnAckEnd(ProtoTime ack_receive_time){
                     }
                 }
 			   it->bytes_acked=info->bytes_sent;
+               if(trace_acked_){
+                   trace_acked_(seq,info->bytes_sent,info->sent_time);
+               }
                unacked_packets_.RemoveFromInflight(seq);
             }
             last_ack_frame_.packets.Add(seq);
         }
     }
     const bool acked_new_packet = !packets_acked_.empty();
+    if(acked_new_packet && trace_ack_event_){
+        uint32_t acked_pkts=static_cast<uint32_t>(packets_acked_.size());
+        uint32_t ack_delay_ms=static_cast<uint32_t>(last_ack_delay_.ToMilliseconds());
+        uint32_t rtt_ms=static_cast<uint32_t>(rtt_stats_.smoothed_rtt().ToMilliseconds());
+        trace_ack_event_(ack_receive_time,acked_bytes,acked_pkts,largest_acked_,ack_delay_ms,rtt_ms);
+    }
     unacked_packets_.AddDelivered(acked_bytes);
     PostProcessNewlyAckedPackets(ack_receive_time,rtt_updated_,prior_bytes_in_flight);
     sent_time_=ProtoTime::Zero();
@@ -352,7 +365,12 @@ void SendPacketManager::InvokeLossDetection(ProtoTime time){
         MarkForRetrans(it->packet_number);
         if(trace_lost_){
             uint32_t rtt=rtt_stats_.smoothed_rtt().ToMilliseconds();
-            trace_lost_(it->packet_number,rtt,it->bytes_lost);
+            TransmissionInfo *info=unacked_packets_.GetTransmissionInfo(it->packet_number);
+            ProtoTime sent_time=ProtoTime::Zero();
+            if(info){
+                sent_time=info->sent_time;
+            }
+            trace_lost_(it->packet_number,rtt,it->bytes_lost,sent_time);
         }
     }
     // in repeat acked case;

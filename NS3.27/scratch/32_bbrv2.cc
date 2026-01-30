@@ -133,6 +133,8 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetInflightTraceFuc(MakeCallback(&DqcTrace::OnInflight,trace));
         sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
         sendApp->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate,trace));
+        sendApp->SetAckEventTraceFuc(MakeCallback(&DqcTrace::OnAckEvent,trace));
+        sendApp->SetAckEpisodeTraceFuc(MakeCallback(&DqcTrace::OnAckEpisode,trace));
     }
     return sendApp;
 }
@@ -251,7 +253,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
             stat->RegisterCongestionType(test_pair);
         }
         trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_LOSS_RATE);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE);
 
         float flow_start_time = 0.001 * (i + 1);
         Ptr<DqcSender> sender = InstallDqc(cc, c.Get(i), c.Get(34 + i),

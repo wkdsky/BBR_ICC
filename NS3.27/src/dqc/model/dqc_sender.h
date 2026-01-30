@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <map>
 #include <vector>
 #include "ns3/event-id.h"
 #include "ns3/callback.h"
@@ -16,6 +17,7 @@
 #include "ns3/proto_socket.h"
 #include "ns3/process_alarm_factory.h"
 #include "ns3/proto_con.h"
+#include "ns3/dqc_trace.h"
 namespace ns3{
 class DqcSender;
 class OneWayDelaySink{
@@ -46,7 +48,7 @@ public:
     void SetSentSeqTraceFuc(TraceSentSeq cb);
     typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceLossPacketDelay;
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb);
-    typedef Callback<void,float> TraceLossRate;
+    typedef Callback<void,double,float,float> TraceLossRate;
     void SetLossRateTraceFuc(TraceLossRate cb);
     typedef Callback<void,uint32_t,uint32_t> TraceOwdAtSender;
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
@@ -64,6 +66,10 @@ public:
     void SetUpPhaseTraceFuc(TraceUpPhase cb);
     typedef Callback<void,double,double,double,double,int32_t> TraceFreqAnalysis;
     void SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb);
+    typedef Callback<void,const AckEventRecord &> TraceAckEvent;
+    void SetAckEventTraceFuc(TraceAckEvent cb);
+    typedef Callback<void,const AckEpisodeRecord &> TraceAckEpisode;
+    void SetAckEpisodeTraceFuc(TraceAckEpisode cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -72,7 +78,7 @@ public:
     }
     void SendToNetwork(Ptr<Packet> p);
     void OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) override;
-    void OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost);
+    void OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost,dqc::ProtoTime sent_ts);
     uint32_t GetId() const {return m_id;}
     void SetSenderId(uint32_t id);
     void RegisterOnewayDelaySink(OneWayDelaySink *sink);
@@ -89,8 +95,21 @@ private:
     void CheckNoPacketOut();
     void EngineEvent();
     void UpdateEngineEvent();
-    void LossRateTick();
+    void OnPacketSent(dqc::ProtoTime sent_ts,uint32_t bytes_sent);
+    void OnPacketAcked(dqc::ProtoTime sent_ts,uint32_t bytes_acked);
+    void FlushLossWindows(bool final_flush);
+    uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
+    void EnsureAckTraceHooked();
+    void OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
+                            uint32_t acked_pkts,dqc::PacketNumber largest_acked,
+                            uint32_t ack_delay_ms,uint32_t rtt_ms);
+    void StartAckEpisode(int32_t type,int64_t start_us,double ack_interval_ms,
+                         uint64_t acked_bytes,double ack_rate_kbps,
+                         double pacing_rate_kbps,double sample_bias);
+    void UpdateAckEpisode(int64_t ack_us,double ack_interval_ms,uint64_t acked_bytes,
+                          double ack_rate_kbps,double pacing_rate_kbps,double sample_bias);
+    void EmitAckEpisode(int64_t end_us);
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
     bool m_running{false};
@@ -130,10 +149,42 @@ private:
     TraceUpPhase m_traceUpPhaseCb;
     TraceFreqAnalysis m_traceFreqAnalysisCb;
     TraceLossRate m_traceLossRateCb;
-    EventId m_lossRateTimer;
-    uint32_t m_lossRateIntervalMs{100};
-    uint64_t m_lossBytesInterval{0};
-    uint64_t m_sentBytesInterval{0};
+    TraceAckEvent m_traceAckEventCb;
+    TraceAckEpisode m_traceAckEpisodeCb;
     bool m_lossTraceHooked{false};
+    bool m_ackTraceHooked{false};
+    struct LossWindowStats{
+        uint64_t sent_bytes{0};
+        uint64_t acked_bytes{0};
+        uint64_t lost_bytes{0};
+    };
+    std::map<uint64_t,LossWindowStats> m_lossWindows;
+    uint64_t m_lossWindowIntervalUs{100000};
+    uint64_t m_cumSentBytes{0};
+    uint64_t m_cumLostBytes{0};
+
+    bool m_ackBaselineInitialized{false};
+    double m_ackBaselineIatMs{0.0};
+    double m_ackBaselineBytes{0.0};
+    double m_ackBaselineRateKbps{0.0};
+    double m_ackEwmaAlpha{0.1};
+    double m_ackCompIatFactor{0.5};
+    double m_ackCompRateFactor{1.5};
+    double m_ackAggIatFactor{2.0};
+    double m_ackAggBytesFactor{2.0};
+    int m_ackEpisodeNonMatchLimit{2};
+    dqc::ProtoTime m_lastAckRecvTime{dqc::ProtoTime::Zero()};
+    int32_t m_ackEpisodeType{-1};
+    int m_ackEpisodeNonMatchCount{0};
+    int64_t m_ackEpisodeStartUs{0};
+    int64_t m_ackEpisodeLastMatchUs{0};
+    uint32_t m_ackEpisodeEvents{0};
+    uint64_t m_ackEpisodeBytes{0};
+    double m_ackEpisodeIatMinMs{0.0};
+    double m_ackEpisodeIatMaxMs{0.0};
+    double m_ackEpisodeAckRatePeakKbps{0.0};
+    double m_ackEpisodePacingRateSumKbps{0.0};
+    uint32_t m_ackEpisodePacingRateCount{0};
+    double m_ackEpisodeBiasPeak{0.0};
 };
 }

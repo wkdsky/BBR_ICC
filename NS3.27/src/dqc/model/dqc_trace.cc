@@ -164,7 +164,42 @@ void DqcTrace::OpenLossRateFile(){
     }
     m_lossRate.open(path.c_str(), std::fstream::out);
     if(m_lossRate.is_open()){
-        m_lossRate<<"#time(s)\tloss_rate(%)"<<std::endl;
+        m_lossRate<<"#time(s)\tloss_rate(%)\tcum_loss_rate(%)"<<std::endl;
+    }
+}
+void DqcTrace::OpenAckEventFile(){
+    if(!(m_enable & E_DQC_ACK_EVENT) || m_ackEvent.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path= std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_ackevent.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_ackevent.txt";
+    }
+    m_ackEvent.open(path.c_str(), std::fstream::out);
+    if(m_ackEvent.is_open()){
+        m_ackEvent<<"#time(s)\tacked_bytes\tacked_pkts\tlargest_acked\tack_delay(ms)\trtt(ms)\t"
+                  <<"ack_interval(ms)\tack_rate(kbps)\tpacing_rate(kbps)\tsample_bias"<<std::endl;
+    }
+}
+void DqcTrace::OpenAckEpisodeFile(){
+    if(!(m_enable & E_DQC_ACK_EPISODE) || m_ackEpisode.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path= std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_ackepisode.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_ackepisode.txt";
+    }
+    m_ackEpisode.open(path.c_str(), std::fstream::out);
+    if(m_ackEpisode.is_open()){
+        m_ackEpisode<<"#type\tstart(s)\tend(s)\tduration(ms)\tack_events\tacked_bytes\t"
+                    <<"iat_min(ms)\tiat_max(ms)\tack_rate_peak(kbps)\t"
+                    <<"pacing_rate_mean(kbps)\tbias_peak"<<std::endl;
     }
 }
 void DqcTrace::OpenUpPhaseFile(){
@@ -291,11 +326,30 @@ void DqcTrace::OnBbrMode(int32_t mode){
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
     }
 }
-void DqcTrace::OnLossRate(float loss_rate){
+void DqcTrace::OnLossRate(double time_sec,float loss_rate,float cumulative_loss_rate){
     OpenLossRateFile();  // Lazy open
     if(m_lossRate.is_open()){
-        float now=Simulator::Now().GetSeconds();
-        m_lossRate<<now<<"\t"<<loss_rate<<std::endl;
+        m_lossRate<<time_sec<<"\t"<<loss_rate<<"\t"<<cumulative_loss_rate<<std::endl;
+    }
+}
+void DqcTrace::OnAckEvent(const AckEventRecord &record){
+    OpenAckEventFile();  // Lazy open
+    if(m_ackEvent.is_open()){
+        m_ackEvent<<record.time_sec<<"\t"<<record.acked_bytes<<"\t"<<record.acked_pkts<<"\t"
+                  <<record.largest_acked<<"\t"<<record.ack_delay_ms<<"\t"<<record.rtt_ms<<"\t"
+                  <<record.ack_interval_ms<<"\t"<<record.ack_rate_kbps<<"\t"
+                  <<record.pacing_rate_kbps<<"\t"<<record.sample_bias<<std::endl;
+    }
+}
+void DqcTrace::OnAckEpisode(const AckEpisodeRecord &record){
+    OpenAckEpisodeFile();  // Lazy open
+    if(m_ackEpisode.is_open()){
+        const char* type_name = (record.type==0) ? "compress" : "aggregate";
+        m_ackEpisode<<type_name<<"\t"<<record.start_sec<<"\t"<<record.end_sec<<"\t"
+                    <<record.duration_ms<<"\t"<<record.ack_events<<"\t"<<record.acked_bytes<<"\t"
+                    <<record.iat_min_ms<<"\t"<<record.iat_max_ms<<"\t"
+                    <<record.ack_rate_peak_kbps<<"\t"<<record.pacing_rate_mean_kbps<<"\t"
+                    <<record.bias_peak<<std::endl;
     }
 }
 void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
@@ -341,6 +395,8 @@ void DqcTrace::Close(){
     CloseInflightFile();
     CloseBbrModeFile();
     CloseLossRateFile();
+    CloseAckEventFile();
+    CloseAckEpisodeFile();
     CloseUpPhaseFile();
     CloseFreqAnalysisFile();
     CloseStatsFile();
@@ -394,6 +450,18 @@ void DqcTrace::CloseLossRateFile(){
     if(m_lossRate.is_open()){
         m_lossRate.flush();
         m_lossRate.close();
+    }
+}
+void DqcTrace::CloseAckEventFile(){
+    if(m_ackEvent.is_open()){
+        m_ackEvent.flush();
+        m_ackEvent.close();
+    }
+}
+void DqcTrace::CloseAckEpisodeFile(){
+    if(m_ackEpisode.is_open()){
+        m_ackEpisode.flush();
+        m_ackEpisode.close();
     }
 }
 void DqcTrace::CloseUpPhaseFile(){

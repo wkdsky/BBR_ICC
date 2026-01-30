@@ -9,7 +9,10 @@
 #include "random.h"
 #include <functional>
 namespace dqc{
-using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t,PacketLength)>;
+using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t,PacketLength,ProtoTime)>;
+using TracePacketSent=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
+using TracePacketAcked=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
+using TraceAckEvent=std::function<void(ProtoTime,uint64_t,uint32_t,PacketNumber,uint32_t,uint32_t)>;
 class SendPacketManager{
 public:
     SendPacketManager(ProtoClock *clock,QuicConnectionStats* stats,StreamAckedObserver *acked_observer);
@@ -74,6 +77,9 @@ public:
     }
     const TimeDelta GetRetransmissionDelay(size_t consecutive_rto_count) const;
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb){trace_lost_=std::move(cb);}
+    void SetTracePacketSent(TracePacketSent cb){trace_sent_=std::move(cb);}
+    void SetTracePacketAcked(TracePacketAcked cb){trace_acked_=std::move(cb);}
+    void SetTraceAckEvent(TraceAckEvent cb){trace_ack_event_=std::move(cb);}
     std::pair<PacketNumber,TimeDelta> GetOneWayDelayInfo() { return one_way_delay_;}
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
@@ -111,6 +117,10 @@ private:
     std::unique_ptr<SendAlgorithmInterface> send_algorithm_{nullptr};
     bool fast_retrans_flag_{false};
     TraceLossPacketDelay trace_lost_;
+    TracePacketSent trace_sent_;
+    TracePacketAcked trace_acked_;
+    TraceAckEvent trace_ack_event_;
+    TimeDelta last_ack_delay_{TimeDelta::Zero()};
     ProtoTime sent_time_{ProtoTime::Zero()};
     ProtoTime recv_time_{ProtoTime::Zero()};
     std::pair<PacketNumber,TimeDelta> one_way_delay_;

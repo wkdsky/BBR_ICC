@@ -63,50 +63,75 @@ ICC（Inter-flow Congestion Control）的发送速率波动与频域检测相关
 
   BBRv2 PROBE_BW 各阶段退出条件
 
+  关键变量/默认值（来源：quic_bbr2_misc.h + quic_bbr2_probe_bw.cc）：
+  - end_of_round_trip：一轮 RTT 结束时置 true（BBRv2 的 round 计数器判定完成一轮）
+  - cycle_start_time：进入 PROBE_DOWN 时设置，用于衡量本轮探测周期时长
+  - probe_wait_time = probe_bw_probe_base_duration + Rand[0, probe_bw_probe_max_rand_duration]
+    - 默认：2s + Rand[0,1s]，即 2~3 秒
+  - rounds_since_probe：每轮 RTT 结束时递增；进入 PROBE_DOWN 时随机初始化为 [0, probe_bw_max_probe_rand_rounds)（默认 0 或 1）
+  - reno_rounds = probe_bw_probe_reno_gain * target_bytes_inflight / MSS（默认 probe_bw_probe_reno_gain=1.0）
+  - probe_bw_full_loss_count = 2，loss_threshold = 0.02（2%）
+  - inflight_hi_with_headroom = inflight_hi * (1 - inflight_hi_headroom)，默认 headroom=0.15
+
   1. PROBE_DOWN (探测下降阶段) 退出条件
 
-  1) 退出到 PROBE_REFILL 的条件（quic_bbr2_probe_bw.cc:126-180）：
+  1) 退出到 PROBE_REFILL（quic_bbr2_probe_bw.cc:126-180）：
+  1.1) 快速退出（网络状态：上一轮因“风险探测”提前退出，但未发生实际过高探测）：
+    - 条件：last_cycle_stopped_risky_probe=true 且 last_cycle_probed_too_high=false
+    - 触发时机：进入 PROBE_DOWN 后第一轮 RTT 结束（rounds_in_phase==1 且 end_of_round_trip）
+    - 这些标记的来源：
+      - last_cycle_stopped_risky_probe 仅在 PROBE_UP 因 is_risky 退出时被置 true
+      - last_cycle_probed_too_high 仅在 PROBE_UP 因丢包/ECN 过高退出时置 true
+  1.2) 时间/共存触发（网络状态：周期运行足够久，或为了与 Reno 共存触发探测）：
+    - 条件：IsTimeToProbeBandwidth() 为 true
+    - 触发方式：
+      - 周期时长 > probe_wait_time（默认 2~3s，从 PROBE_DOWN 开始计）
+      - 或 rounds_since_probe >= min(probe_bw_probe_max_rounds, reno_rounds)
 
-  1.1) 快速退出：如果上一轮 stopped_risky_probe=true 且 probed_too_high=false，在第一轮结束时直接进入  REFILL（第142-145行）
-  1.2) 时间到达：IsTimeToProbeBandwidth() 返回 true（第150-153行），具体包括：
-    - 周期持续时间超过 probe_wait_time（随机值 = base_duration + 随机延迟）
-    - 或者满足 Reno 共存条件：rounds_since_probe >= min(probe_bw_probe_max_rounds, reno_rounds)
-
-  2) 退出到 PROBE_CRUISE 的条件：
-
-  2.1) 比例时间退出：HasStayedLongEnoughInProbeDown() 返回 true，即在 PROBE_DOWN 阶段停留时间超过  MinRtt（第155-159行）
-
-  2.2) 排空完成：同时满足以下两个条件（第161-179行）：
-    - prior_in_flight <= inflight_hi_with_headroom（有足够的 headroom，默认设定为0.85 inflight_hi）
-    - prior_in_flight < BDP（已排空到目标值以下）
+  2) 退出到 PROBE_CRUISE（quic_bbr2_probe_bw.cc:155-179）：
+  2.1) 比例时间退出（网络状态：已在 PROBE_DOWN 待满一段最小 RTT）：
+    - 条件：HasStayedLongEnoughInProbeDown() 为 true
+    - 具体时间：phase_duration > MinRtt
+  2.2) 排空完成（网络状态：inflight 已排空到目标以下，队列基本清空）：
+    - 条件：prior_in_flight <= inflight_hi_with_headroom 且 prior_in_flight < BDP
 
   ---
   2. PROBE_CRUISE (巡航阶段) 退出条件
 
   1) 退出到 PROBE_REFILL（quic_bbr2_probe_bw.cc:379-389）：
-  - IsTimeToProbeBandwidth() 返回 true，即：
-    - 周期持续时间超过 probe_wait_time
-    - 或者满足 Reno 共存条件
+  - IsTimeToProbeBandwidth() 为 true
+    - 周期时长 > probe_wait_time（默认 2~3s，从 PROBE_DOWN 开始计）
+    - 或 rounds_since_probe >= min(probe_bw_probe_max_rounds, reno_rounds)
 
   --- 
   3. PROBE_REFILL (填充阶段) 退出条件
 
   1) 退出到 PROBE_UP（quic_bbr2_probe_bw.cc:391-401）：
-  - rounds_in_phase > 0 且 当前是一轮的结束（end_of_round_trip = true）
-  - 即：完成一个完整的 RTT 轮次后退出
+  - rounds_in_phase > 0 且 end_of_round_trip = true
+  - 网络状态：至少经历一个完整 RTT 轮次的确认后进入 PROBE_UP
 
   ---
   4. PROBE_UP (探测上升阶段) 退出条件
 
   1) 退出到 PROBE_DOWN（quic_bbr2_probe_bw.cc:403-450）：
 
-  1.1) 探测过高：MaybeAdaptUpperBounds() 返回 ADAPTED_PROBED_TOO_HIGH（第407-410行）
-    - 条件：丢包事件数 >= probe_bw_full_loss_count 且 IsInflightTooHigh() 为 true
+  1.1) 探测过高（网络状态：本轮出现“明显过载”丢包/ECN）：
+    - 条件：loss_events_in_round >= probe_bw_full_loss_count (=2)
+      且 IsInflightTooHigh() 为 true
+    - IsInflightTooHigh 判定：
+      - bytes_lost_in_round > inflight_at_send * loss_threshold（默认 2%）
+      - 或（启用 ECN 时）delivered_ce >= delivered * ecn_thresh（默认 0.5）
+    - 结果：触发 ADAPTED_PROBED_TOO_HIGH，退出到 PROBE_DOWN，并设置 last_cycle_probed_too_high=true
   
-  1.2) 风险探测（is_risky）：上一周期 probed_too_high=true ( 丢包事件 ≥ 2 且 (丢包率 > 2% 或 ECN 标记过多)) 且 prior_in_flight >= inflight_hi（第419-426行）
+  1.2) 风险探测（is_risky，网络状态：上周期已证明“探测过高”，当前仍顶着 inflight_hi）：
+    - 条件：last_cycle_probed_too_high=true 且 prior_in_flight >= inflight_hi
+    - 结果：退出到 PROBE_DOWN，并设置 last_cycle_stopped_risky_probe=true
   
-  1.3) 队列堆积（is_queuing）：rounds_in_phase > 0 且 prior_in_flight >= queuing_threshold（第428-444行）
-    - 其中 queuing_threshold = probe_bw_probe_inflight_gain * BDP + 2*MSS + MaxAckHeight
+  1.3) 队列堆积（is_queuing，网络状态：inflight 超过“排队阈值”，出现明显排队）：
+    - 条件：rounds_in_phase > 0 且 prior_in_flight >= queuing_threshold
+    - queuing_threshold = probe_bw_probe_inflight_gain * BDP + 2*MSS + MaxAckHeight
+      - probe_bw_probe_inflight_gain 默认 1.25
+      - add_ack_height_to_queueing_threshold 默认 true，会把 MaxAckHeight 计入阈值
 
   状态转换图：
 

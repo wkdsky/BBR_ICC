@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <string>
 #include "ns3/simulator.h"
 #include "ns3/dqc_sender.h"
+#include "ns3/dqc_trace.h"
 #include "ns3/log.h"
 #include "ns3/time_tag.h"
 #include "byte_codec.h"
@@ -62,9 +64,6 @@ void DqcSender::SetTraceLossPacketDelay(TraceLossPacketDelay cb){
 void DqcSender::SetLossRateTraceFuc(TraceLossRate cb){
     m_traceLossRateCb=cb;
     EnsureLossTraceHooked();
-    if(m_running && !m_lossRateTimer.IsRunning()){
-        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
-    }
 }
 void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 	 m_traceOwd=cb;
@@ -90,35 +89,284 @@ void DqcSender::SetUpPhaseTraceFuc(TraceUpPhase cb){
 void DqcSender::SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb){
     m_traceFreqAnalysisCb=cb;
 }
-void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost){
-    m_lossBytesInterval+=bytes_lost;
+void DqcSender::SetAckEventTraceFuc(TraceAckEvent cb){
+    m_traceAckEventCb=cb;
+    EnsureAckTraceHooked();
+}
+void DqcSender::SetAckEpisodeTraceFuc(TraceAckEpisode cb){
+    m_traceAckEpisodeCb=cb;
+    EnsureAckTraceHooked();
+}
+void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost,dqc::ProtoTime sent_ts){
+    uint64_t window_id=GetLossWindowId(sent_ts);
+    m_lossWindows[window_id].lost_bytes+=bytes_lost;
+    FlushLossWindows(false);
     if(!m_traceLossDelay.IsNull()){
         int32_t num=(int32_t)seq.ToUint64();
         m_traceLossDelay(num,rtt,bytes_lost);
     }
 }
-void DqcSender::LossRateTick(){
-    if(!m_traceLossRateCb.IsNull()){
-        float loss_rate=0.0f;
-        if(m_sentBytesInterval>0){
-            loss_rate=(float)(100.0*m_lossBytesInterval/m_sentBytesInterval);
-        }
-        m_traceLossRateCb(loss_rate);
+void DqcSender::OnPacketSent(dqc::ProtoTime sent_ts,uint32_t bytes_sent){
+    uint64_t window_id=GetLossWindowId(sent_ts);
+    m_lossWindows[window_id].sent_bytes+=bytes_sent;
+}
+void DqcSender::OnPacketAcked(dqc::ProtoTime sent_ts,uint32_t bytes_acked){
+    uint64_t window_id=GetLossWindowId(sent_ts);
+    m_lossWindows[window_id].acked_bytes+=bytes_acked;
+    FlushLossWindows(false);
+}
+uint64_t DqcSender::GetLossWindowId(dqc::ProtoTime sent_ts) const{
+    uint64_t sent_us=static_cast<uint64_t>(sent_ts.ToDebuggingValue());
+    return sent_us/m_lossWindowIntervalUs;
+}
+void DqcSender::FlushLossWindows(bool final_flush){
+    if(m_traceLossRateCb.IsNull()){
+        return;
     }
-    m_lossBytesInterval=0;
-    m_sentBytesInterval=0;
-    if(m_running){
-        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
+    double now_sec=0.0;
+    if(final_flush){
+        now_sec=Simulator::Now().GetSeconds();
+    }
+    while(!m_lossWindows.empty()){
+        auto it=m_lossWindows.begin();
+        const LossWindowStats &stats=it->second;
+        if(stats.sent_bytes==0){
+            m_lossWindows.erase(it);
+            continue;
+        }
+        if(!final_flush && stats.acked_bytes+stats.lost_bytes<stats.sent_bytes){
+            break;
+        }
+        uint64_t window_lost=stats.lost_bytes;
+        uint64_t accounted=stats.acked_bytes+stats.lost_bytes;
+        if(final_flush && accounted<stats.sent_bytes){
+            window_lost+=stats.sent_bytes-accounted;
+        }
+        m_cumSentBytes+=stats.sent_bytes;
+        m_cumLostBytes+=window_lost;
+        float loss_rate=(float)(100.0*window_lost/stats.sent_bytes);
+        float cumulative_loss_rate=0.0f;
+        if(m_cumSentBytes>0){
+            cumulative_loss_rate=(float)(100.0*m_cumLostBytes/m_cumSentBytes);
+        }
+        double time_sec=(double)((it->first+1)*m_lossWindowIntervalUs)/1000000.0;
+        if(final_flush && time_sec>now_sec){
+            time_sec=now_sec;
+        }
+        m_traceLossRateCb(time_sec,loss_rate,cumulative_loss_rate);
+        m_lossWindows.erase(it);
     }
 }
 void DqcSender::EnsureLossTraceHooked(){
     if(m_lossTraceHooked){
         return;
     }
-    m_connection.SetTraceLossPacketDelay([this](PacketNumber seq,uint32_t rtt,PacketLength bytes_lost){
-        OnPacketLossInfo(seq,rtt,bytes_lost);
-    });
-    m_lossTraceHooked=true;
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    if(sent_manager){
+        sent_manager->SetTracePacketSent([this](PacketNumber,PacketLength bytes_sent,ProtoTime sent_ts){
+            OnPacketSent(sent_ts,bytes_sent);
+        });
+        sent_manager->SetTracePacketAcked([this](PacketNumber,PacketLength bytes_acked,ProtoTime sent_ts){
+            OnPacketAcked(sent_ts,bytes_acked);
+        });
+        m_connection.SetTraceLossPacketDelay([this](PacketNumber seq,uint32_t rtt,PacketLength bytes_lost,ProtoTime sent_ts){
+            OnPacketLossInfo(seq,rtt,bytes_lost,sent_ts);
+        });
+        m_lossTraceHooked=true;
+    }
+}
+void DqcSender::EnsureAckTraceHooked(){
+    if(m_ackTraceHooked){
+        return;
+    }
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    if(sent_manager){
+        sent_manager->SetTraceAckEvent([this](ProtoTime ack_receive_time,uint64_t acked_bytes,
+                                             uint32_t acked_pkts,PacketNumber largest_acked,
+                                             uint32_t ack_delay_ms,uint32_t rtt_ms){
+            OnAckEventInternal(ack_receive_time,acked_bytes,acked_pkts,largest_acked,
+                               ack_delay_ms,rtt_ms);
+        });
+        m_ackTraceHooked=true;
+    }
+}
+void DqcSender::OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
+                                   uint32_t acked_pkts,dqc::PacketNumber largest_acked,
+                                   uint32_t ack_delay_ms,uint32_t rtt_ms){
+    int64_t ack_us=ack_receive_time.ToDebuggingValue();
+    double ack_interval_ms=0.0;
+    if(m_lastAckRecvTime.IsInitialized()){
+        TimeDelta delta=ack_receive_time-m_lastAckRecvTime;
+        ack_interval_ms=static_cast<double>(delta.ToMilliseconds());
+    }
+    m_lastAckRecvTime=ack_receive_time;
+    double ack_rate_kbps=0.0;
+    if(ack_interval_ms>0.0){
+        ack_rate_kbps=(acked_bytes*8.0)/ack_interval_ms;
+    }
+    double pacing_rate_kbps=0.0;
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    if(sent_manager){
+        SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+        if(algo){
+            ByteCount in_flight = 0;
+            ByteCount cwnd = 0;
+            sent_manager->InFlight(&in_flight, &cwnd);
+            QuicBandwidth pacing_rate = algo->PacingRate(in_flight);
+            pacing_rate_kbps = pacing_rate.ToKBitsPerSecond();
+        }
+    }
+    double sample_bias=0.0;
+    if(pacing_rate_kbps>0.0){
+        sample_bias=ack_rate_kbps/pacing_rate_kbps;
+    }
+    if(!m_traceAckEventCb.IsNull()){
+        AckEventRecord record;
+        record.time_sec=ack_us/1000000.0;
+        record.acked_bytes=acked_bytes;
+        record.acked_pkts=acked_pkts;
+        record.largest_acked=largest_acked.ToUint64();
+        record.ack_delay_ms=ack_delay_ms;
+        record.rtt_ms=rtt_ms;
+        record.ack_interval_ms=ack_interval_ms;
+        record.ack_rate_kbps=ack_rate_kbps;
+        record.pacing_rate_kbps=pacing_rate_kbps;
+        record.sample_bias=sample_bias;
+        m_traceAckEventCb(record);
+    }
+    if(ack_interval_ms<=0.0){
+        return;
+    }
+    if(!m_ackBaselineInitialized){
+        m_ackBaselineIatMs=ack_interval_ms;
+        m_ackBaselineBytes=static_cast<double>(acked_bytes);
+        m_ackBaselineRateKbps=ack_rate_kbps;
+        m_ackBaselineInitialized=true;
+        return;
+    }
+    double baseline_iat=m_ackBaselineIatMs;
+    double baseline_bytes=m_ackBaselineBytes;
+    double baseline_rate=m_ackBaselineRateKbps;
+    bool compress=false;
+    bool aggregate=false;
+    if(baseline_rate>0.0){
+        compress=(ack_interval_ms<=m_ackCompIatFactor*baseline_iat) &&
+                 (ack_rate_kbps>=m_ackCompRateFactor*baseline_rate);
+    }
+    if(baseline_bytes>0.0){
+        aggregate=(ack_interval_ms>=m_ackAggIatFactor*baseline_iat) &&
+                  (acked_bytes>=static_cast<uint64_t>(m_ackAggBytesFactor*baseline_bytes));
+    }
+    int32_t current_type=-1;
+    if(compress || aggregate){
+        if(compress && aggregate){
+            double eps=1e-6;
+            double compression_score=baseline_iat/std::max(ack_interval_ms,eps);
+            double aggregation_score=ack_interval_ms/std::max(baseline_iat,eps);
+            current_type=(compression_score>=aggregation_score)?0:1;
+        }else if(compress){
+            current_type=0;
+        }else{
+            current_type=1;
+        }
+    }
+    if(m_ackEpisodeType!=-1){
+        if(current_type==m_ackEpisodeType){
+            UpdateAckEpisode(ack_us,ack_interval_ms,acked_bytes,
+                             ack_rate_kbps,pacing_rate_kbps,sample_bias);
+            m_ackEpisodeNonMatchCount=0;
+        }else{
+            m_ackEpisodeNonMatchCount++;
+            if(m_ackEpisodeNonMatchCount>=m_ackEpisodeNonMatchLimit){
+                EmitAckEpisode(m_ackEpisodeLastMatchUs);
+                m_ackEpisodeType=-1;
+                m_ackEpisodeNonMatchCount=0;
+                if(current_type!=-1){
+                    StartAckEpisode(current_type,ack_us,ack_interval_ms,acked_bytes,
+                                    ack_rate_kbps,pacing_rate_kbps,sample_bias);
+                }else{
+                    m_ackBaselineIatMs=(1.0-m_ackEwmaAlpha)*m_ackBaselineIatMs+m_ackEwmaAlpha*ack_interval_ms;
+                    m_ackBaselineBytes=(1.0-m_ackEwmaAlpha)*m_ackBaselineBytes+m_ackEwmaAlpha*acked_bytes;
+                    m_ackBaselineRateKbps=(1.0-m_ackEwmaAlpha)*m_ackBaselineRateKbps+m_ackEwmaAlpha*ack_rate_kbps;
+                }
+            }
+        }
+    }else if(current_type!=-1){
+        StartAckEpisode(current_type,ack_us,ack_interval_ms,acked_bytes,
+                        ack_rate_kbps,pacing_rate_kbps,sample_bias);
+    }else{
+        m_ackBaselineIatMs=(1.0-m_ackEwmaAlpha)*m_ackBaselineIatMs+m_ackEwmaAlpha*ack_interval_ms;
+        m_ackBaselineBytes=(1.0-m_ackEwmaAlpha)*m_ackBaselineBytes+m_ackEwmaAlpha*acked_bytes;
+        m_ackBaselineRateKbps=(1.0-m_ackEwmaAlpha)*m_ackBaselineRateKbps+m_ackEwmaAlpha*ack_rate_kbps;
+    }
+}
+void DqcSender::StartAckEpisode(int32_t type,int64_t start_us,double ack_interval_ms,
+                                uint64_t acked_bytes,double ack_rate_kbps,
+                                double pacing_rate_kbps,double sample_bias){
+    m_ackEpisodeType=type;
+    m_ackEpisodeStartUs=start_us;
+    m_ackEpisodeLastMatchUs=start_us;
+    m_ackEpisodeEvents=1;
+    m_ackEpisodeBytes=acked_bytes;
+    m_ackEpisodeIatMinMs=ack_interval_ms;
+    m_ackEpisodeIatMaxMs=ack_interval_ms;
+    m_ackEpisodeAckRatePeakKbps=ack_rate_kbps;
+    m_ackEpisodePacingRateSumKbps=0.0;
+    m_ackEpisodePacingRateCount=0;
+    if(pacing_rate_kbps>0.0){
+        m_ackEpisodePacingRateSumKbps=pacing_rate_kbps;
+        m_ackEpisodePacingRateCount=1;
+    }
+    m_ackEpisodeBiasPeak=sample_bias;
+}
+void DqcSender::UpdateAckEpisode(int64_t ack_us,double ack_interval_ms,uint64_t acked_bytes,
+                                 double ack_rate_kbps,double pacing_rate_kbps,double sample_bias){
+    m_ackEpisodeLastMatchUs=ack_us;
+    m_ackEpisodeEvents++;
+    m_ackEpisodeBytes+=acked_bytes;
+    if(ack_interval_ms<m_ackEpisodeIatMinMs){
+        m_ackEpisodeIatMinMs=ack_interval_ms;
+    }
+    if(ack_interval_ms>m_ackEpisodeIatMaxMs){
+        m_ackEpisodeIatMaxMs=ack_interval_ms;
+    }
+    if(ack_rate_kbps>m_ackEpisodeAckRatePeakKbps){
+        m_ackEpisodeAckRatePeakKbps=ack_rate_kbps;
+    }
+    if(pacing_rate_kbps>0.0){
+        m_ackEpisodePacingRateSumKbps+=pacing_rate_kbps;
+        m_ackEpisodePacingRateCount++;
+    }
+    if(sample_bias>m_ackEpisodeBiasPeak){
+        m_ackEpisodeBiasPeak=sample_bias;
+    }
+}
+void DqcSender::EmitAckEpisode(int64_t end_us){
+    if(m_ackEpisodeType==-1){
+        return;
+    }
+    double start_sec=m_ackEpisodeStartUs/1000000.0;
+    double end_sec=end_us/1000000.0;
+    double duration_ms=(end_us-m_ackEpisodeStartUs)/1000.0;
+    double pacing_rate_mean=0.0;
+    if(m_ackEpisodePacingRateCount>0){
+        pacing_rate_mean=m_ackEpisodePacingRateSumKbps/m_ackEpisodePacingRateCount;
+    }
+    if(!m_traceAckEpisodeCb.IsNull()){
+        AckEpisodeRecord record;
+        record.type=m_ackEpisodeType;
+        record.start_sec=start_sec;
+        record.end_sec=end_sec;
+        record.duration_ms=duration_ms;
+        record.ack_events=m_ackEpisodeEvents;
+        record.acked_bytes=m_ackEpisodeBytes;
+        record.iat_min_ms=m_ackEpisodeIatMinMs;
+        record.iat_max_ms=m_ackEpisodeIatMaxMs;
+        record.ack_rate_peak_kbps=m_ackEpisodeAckRatePeakKbps;
+        record.pacing_rate_mean_kbps=pacing_rate_mean;
+        record.bias_peak=m_ackEpisodeBiasPeak;
+        m_traceAckEpisodeCb(record);
+    }
 }
 void DqcSender::Bind(uint16_t port){
     if (m_socket== NULL) {
@@ -204,9 +452,6 @@ void DqcSender::DataGenerator(int times){
 }
 void DqcSender::StartApplication(){
     m_running=true;
-    if(!m_traceLossRateCb.IsNull() && !m_lossRateTimer.IsRunning()){
-        m_lossRateTimer=Simulator::Schedule(MilliSeconds(m_lossRateIntervalMs),&DqcSender::LossRateTick,this);
-    }
     if(m_enableEngineTimer){
         m_connection.SendInitData();
         UpdateEngineEvent();        
@@ -219,7 +464,12 @@ void DqcSender::StopApplication(){
     m_running=false;
 	m_processTimer.Cancel();
 	m_engineTimer.Cancel();
-    m_lossRateTimer.Cancel();
+    FlushLossWindows(true);
+    if(m_ackEpisodeType!=-1){
+        int64_t end_us=static_cast<int64_t>(Simulator::Now().GetSeconds()*1000000.0);
+        EmitAckEpisode(end_us);
+        m_ackEpisodeType=-1;
+    }
     m_sinks.clear();
 }
 void DqcSender::RecvPacket(Ptr<Socket> socket){
@@ -245,7 +495,6 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	TimeTag tag;
     tag.SetSentTime (ms);
 	p->AddPacketTag (tag);
-    m_sentBytesInterval+=p->GetSize();
 	if(!m_traceBwCb.IsNull()){
 		QuicBandwidth send_bw=m_connection.EstimatedBandwidth();
 		m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());

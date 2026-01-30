@@ -18,9 +18,36 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_FREQ_ANALYSIS=0x200,
     E_DQC_INFLIGHT=0x400,
     E_DQC_LOSS_RATE=0x800,
+    E_DQC_ACK_EVENT=0x1000,
+    E_DQC_ACK_EPISODE=0x2000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
+struct AckEventRecord{
+    double time_sec{0.0};
+    uint64_t acked_bytes{0};
+    uint32_t acked_pkts{0};
+    uint64_t largest_acked{0};
+    uint32_t ack_delay_ms{0};
+    uint32_t rtt_ms{0};
+    double ack_interval_ms{0.0};
+    double ack_rate_kbps{0.0};
+    double pacing_rate_kbps{0.0};
+    double sample_bias{0.0};
+};
+struct AckEpisodeRecord{
+    int32_t type{0};
+    double start_sec{0.0};
+    double end_sec{0.0};
+    double duration_ms{0.0};
+    uint32_t ack_events{0};
+    uint64_t acked_bytes{0};
+    double iat_min_ms{0.0};
+    double iat_max_ms{0.0};
+    double ack_rate_peak_kbps{0.0};
+    double pacing_rate_mean_kbps{0.0};
+    double bias_peak{0.0};
+};
 class DqcTrace{
 public:
     DqcTrace(int id=0);
@@ -39,7 +66,9 @@ public:
     void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
     void OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes);
     void OnBbrMode(int32_t mode);
-    void OnLossRate(float loss_rate);
+    void OnLossRate(double time_sec,float loss_rate,float cumulative_loss_rate);
+    void OnAckEvent(const AckEventRecord &record);
+    void OnAckEpisode(const AckEpisodeRecord &record);
     void OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
     void OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps);
     void OnStats(uint64_t recv_count,uint64_t largest,
@@ -56,6 +85,8 @@ private:
     void OpenInflightFile();
     void OpenBbrModeFile();
     void OpenLossRateFile();
+    void OpenAckEventFile();
+    void OpenAckEpisodeFile();
     void OpenUpPhaseFile();
     void OpenFreqAnalysisFile();
     void OpenStatsFile();
@@ -68,6 +99,8 @@ private:
     void CloseInflightFile();
     void CloseBbrModeFile();
     void CloseLossRateFile();
+    void CloseAckEventFile();
+    void CloseAckEpisodeFile();
     void CloseUpPhaseFile();
     void CloseFreqAnalysisFile();
     void CloseStatsFile();
@@ -85,6 +118,8 @@ private:
     std::fstream m_inflight;
     std::fstream m_bbrMode;
     std::fstream m_lossRate;
+    std::fstream m_ackEvent;
+    std::fstream m_ackEpisode;
     std::fstream m_upPhase;
     std::fstream m_freqAnalysis;
     std::fstream m_stats;
