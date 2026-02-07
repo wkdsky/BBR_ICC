@@ -6,6 +6,7 @@
 #define QUICHE_QUIC_CORE_CONGESTION_CONTROL_BBR2_SENDER_H_
 
 #include <cstdint>
+#include <functional>
 
 #include "quic_bandwidth_sampler.h"
 #include "quic_bbr2_drain.h"
@@ -151,6 +152,14 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // 4: PROBE_BW_REFILL, 5: PROBE_BW_UP, 6: PROBE_RTT
   int32_t GetCurrentBbrModeIndex() const;
 
+  using QueueDelayTraceCallback =
+      std::function<void(uint32_t queue_delay_ms,
+                         uint32_t latest_rtt_ms,
+                         uint32_t min_rtt_ms)>;
+  void SetQueueDelayTraceCallback(QueueDelayTraceCallback cb) {
+    queue_delay_trace_cb_ = cb;
+  }
+
  protected:
   // Protected members for subclasses like FreqccSender and FreqCCv2Sender
   // Note: Declaration order matters for initialization
@@ -213,6 +222,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
 
   // Debug only.
   bool last_sample_is_app_limited_;
+  QueueDelayTraceCallback queue_delay_trace_cb_;
   
   QuicByteCount ecn_ce_count_{0};
   QuicByteCount alpha_last_delivered_{0};

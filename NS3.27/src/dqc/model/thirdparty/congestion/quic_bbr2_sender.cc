@@ -185,6 +185,18 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
     OnEnterQuiescence(event_time);
   }
 
+  if (queue_delay_trace_cb_ && rtt_stats_ != nullptr) {
+    uint32_t latest_rtt_ms =
+        static_cast<uint32_t>(rtt_stats_->latest_rtt().ToMilliseconds());
+    uint32_t min_rtt_ms =
+        static_cast<uint32_t>(rtt_stats_->MinOrInitialRtt().ToMilliseconds());
+    uint32_t queue_delay_ms = 0;
+    if (latest_rtt_ms > min_rtt_ms) {
+      queue_delay_ms = latest_rtt_ms - min_rtt_ms;
+    }
+    queue_delay_trace_cb_(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+  }
+
   /*QUIC_DVLOG(3)
       << this << " END CongestionEvent(acked:" << acked_packets
       << ", lost:" << lost_packets.size() << ") "

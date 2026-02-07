@@ -1,19 +1,19 @@
 /** Network topology
  *
  *    10Mb/s, 1ms                            10Mb/s, 1ms
- * n0----L0--------|                    |------L5-------n5
+ * n0----L0--------|                    |------L5-------n6
  *                 |   8Mbps/s, 28ms    |
  *                 n4--------L4--------n5
  *    10Mb/s, 1ms  |                    |    10Mb/s, 1ms
- * n1----L1--------|                    |------L6-------n6
+ * n1----L1--------|                    |------L6-------n7
  *                 |                    |
  *                 |                    |
- * n2----L2--------|                    |------L7-------n7
+ * n2----L2--------|                    |------L7-------n8
  *                 |                    |
  *                 |                    |
- * n3----L3--------|                    |------L8-------n8
+ * n3----L3--------|                    |------L8-------n9
  *
- * 4 BBRv2 flows, 8Mbps bottleneck, 60ms RTT, buffer = 1xBDP
+ * 4 FreqCCv3 flows, 8Mbps bottleneck, 60ms RTT, buffer = 1xBDP
  */
 
 #include "ns3/core-module.h"
@@ -37,7 +37,7 @@
 using namespace ns3;
 using namespace dqc;
 using namespace std;
-NS_LOG_COMPONENT_DEFINE ("4-bbrv2");
+NS_LOG_COMPONENT_DEFINE ("4-freqccv3");
 
 const int NUM_FLOWS = 4;
 
@@ -106,11 +106,17 @@ link_config_t p4p[]={
 };
 
 
+// FreqCCv3 oscillation parameters for each flow
+double g_freq_hz[NUM_FLOWS] = {60.0, 60.0, 60.0, 60.0};           // Oscillation frequency in Hz
+std::string g_amp_mode[NUM_FLOWS] = {"miu2", "miu2", "miu2", "miu2"};  // Amplitude mode
+double g_fixed_mbps[NUM_FLOWS] = {0.0, 0.0, 0.0, 0.0};        // Fixed amplitude in Mbps
+
 static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
                         Ptr<Node> sender,Ptr<Node> receiver,
                         uint16_t send_port,uint16_t recv_port,
                         float startTime,float stopTime,
                         DqcTrace *trace, DqcTraceState *stat,
+                        double freq_hz, const std::string& amp_mode, double fixed_mbps,
                         uint32_t max_bps=0,uint32_t cid=0,bool ecn=false,uint32_t emucons=1)
 {
     Ptr<DqcSender> sendApp = CreateObject<DqcSender> (cc_type,ecn);
@@ -142,19 +148,22 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetRecvRateTraceFuc(MakeCallback(&DqcTrace::OnRecvRate,trace));
         sendApp->SetInflightTraceFuc(MakeCallback(&DqcTrace::OnInflight,trace));
         sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
+        sendApp->SetUpPhaseTraceFuc(MakeCallback(&DqcTrace::OnUpPhase,trace));
+        sendApp->SetFreqAnalysisTraceFuc(MakeCallback(&DqcTrace::OnFreqAnalysis,trace));
+        recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
         sendApp->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate,trace));
         sendApp->SetAckEventTraceFuc(MakeCallback(&DqcTrace::OnAckEvent,trace));
         sendApp->SetAckEpisodeTraceFuc(MakeCallback(&DqcTrace::OnAckEpisode,trace));
-        // recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
-        // recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
-        // recvApp->SetStatsTraceFuc(MakeCallback(&DqcTrace::OnStats,trace));
-        // trace->SetStatsTraceFuc(MakeCallback(&DqcTraceState::OnStats,stat));
+    }
+    // Configure FreqCCv3 oscillation parameters
+    if(cc_type == kFreqCCv3){
+        sendApp->ConfigureFreqCC(freq_hz, amp_mode, fixed_mbps);
     }
     return sendApp;
 }
 
-void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
-    std::string instance="4_bbrv2";  // Use script filename instead of instance number
+void ns3_freqccv3(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
+    std::string instance="4_freqccv3";  // Use script filename instead of instance number
     uint64_t linkBw   = TOPO_BOTTLE_BW;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
@@ -257,8 +266,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     // Set up the routing
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
-    // Use original BBRv2 for all 4 flows
-    dqc::CongestionControlType cc = kBBRv2;
+    // Use FreqCCv3 for all 4 flows
+    dqc::CongestionControlType cc = kFreqCCv3;
 
     uint32_t max_bps=0;
     int test_pair=1;
@@ -279,9 +288,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
-    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,flow_start_times[0]+0.001,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_UP_PHASE|DqcTraceEnable::E_DQC_FREQ_ANALYSIS|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,flow_start_times[0]+0.001,appStop,trace.get(),stat,g_freq_hz[0],g_amp_mode[0],g_fixed_mbps[0],max_bps,sender_id);
     senders.push_back(sender1);
     sender_id++;
     test_pair++;
@@ -294,9 +302,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
-    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,flow_start_times[1]+0.002,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_UP_PHASE|DqcTraceEnable::E_DQC_FREQ_ANALYSIS|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,flow_start_times[1]+0.002,appStop,trace.get(),stat,g_freq_hz[1],g_amp_mode[1],g_fixed_mbps[1],max_bps,sender_id);
     senders.push_back(sender2);
     sender_id++;
     test_pair++;
@@ -309,9 +316,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
-    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,flow_start_times[2]+0.003,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_UP_PHASE|DqcTraceEnable::E_DQC_FREQ_ANALYSIS|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,flow_start_times[2]+0.003,appStop,trace.get(),stat,g_freq_hz[2],g_amp_mode[2],g_fixed_mbps[2],max_bps,sender_id);
     senders.push_back(sender3);
     sender_id++;
     test_pair++;
@@ -324,9 +330,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
-    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,flow_start_times[3]+0.004,appStop,trace.get(),stat,max_bps,sender_id);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_UP_PHASE|DqcTraceEnable::E_DQC_FREQ_ANALYSIS|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,flow_start_times[3]+0.004,appStop,trace.get(),stat,g_freq_hz[3],g_amp_mode[3],g_fixed_mbps[3],max_bps,sender_id);
     senders.push_back(sender4);
     sender_id++;
     test_pair++;
@@ -347,18 +352,36 @@ int main (int argc, char *argv[]){
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+    // Per-flow parameters
+    cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
+    cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);
+    cmd.AddValue("freq3", "Flow 3 oscillation frequency (Hz)", g_freq_hz[2]);
+    cmd.AddValue("freq4", "Flow 4 oscillation frequency (Hz)", g_freq_hz[3]);
+    cmd.AddValue("amp1", "Flow 1 amplitude mode", g_amp_mode[0]);
+    cmd.AddValue("amp2", "Flow 2 amplitude mode", g_amp_mode[1]);
+    cmd.AddValue("amp3", "Flow 3 amplitude mode", g_amp_mode[2]);
+    cmd.AddValue("amp4", "Flow 4 amplitude mode", g_amp_mode[3]);
+    cmd.AddValue("fixed1", "Flow 1 fixed amplitude (Mbps)", g_fixed_mbps[0]);
+    cmd.AddValue("fixed2", "Flow 2 fixed amplitude (Mbps)", g_fixed_mbps[1]);
+    cmd.AddValue("fixed3", "Flow 3 fixed amplitude (Mbps)", g_fixed_mbps[2]);
+    cmd.AddValue("fixed4", "Flow 4 fixed amplitude (Mbps)", g_fixed_mbps[3]);
     cmd.Parse(argc, argv);
 
     // Print configuration
-    std::cout << "=== 4 BBRv2 Flows Configuration ===" << std::endl;
+    std::cout << "=== 4 FreqCCv3 Flows Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
-    std::cout << "Congestion control: BBRv2" << std::endl;
+    std::cout << "Congestion control: FreqCCv3" << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;
+    std::cout << "------------------------------------" << std::endl;
+    std::cout << "Per-flow parameters:" << std::endl;
+    for(int i = 0; i < NUM_FLOWS; i++){
+        std::cout << "  Flow " << (i+1) << ": freq=" << g_freq_hz[i] << "Hz, amp=" << g_amp_mode[i] << ", fixed=" << g_fixed_mbps[i] << "Mbps" << std::endl;
+    }
     std::cout << "====================================" << std::endl;
 
-    const char *algos[]={"bbrv2"};
+    const char *algos[]={"freqccv3"};
     for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
         std::string cong=std::string(algos[c]);
         std::string name=cong;
@@ -366,7 +389,7 @@ int main (int argc, char *argv[]){
         stat.reset(new DqcTraceState(name));
         auto inner_start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < sizeof(ins) / sizeof(ins[0]); ++i){
-            ns3_bbrv2(ins[i],cong,stat.get(),sim_time);
+            ns3_freqccv3(ins[i],cong,stat.get(),sim_time);
         }
         auto inner_end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> tm = inner_end - inner_start;

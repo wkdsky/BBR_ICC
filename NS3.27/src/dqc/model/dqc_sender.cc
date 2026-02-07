@@ -71,6 +71,9 @@ void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 void DqcSender::SetRttTraceFuc(TraceRtt cb){
     m_traceRttCb=cb;
 }
+void DqcSender::SetQueueDelayTraceFuc(TraceQueueDelay cb){
+    m_traceQueueDelayCb=cb;
+}
 void DqcSender::SetSendRateTraceFuc(TraceSendRate cb){
     m_traceSendRateCb=cb;
 }
@@ -393,6 +396,13 @@ void DqcSender::Bind(uint16_t port){
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
     if(algo && algo->GetCongestionControlType() == kFreqCCv3){
         FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
+        freqccv3->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
+                                                    uint32_t latest_rtt_ms,
+                                                    uint32_t min_rtt_ms){
+            if(!m_traceQueueDelayCb.IsNull()){
+                m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+            }
+        });
         freqccv3->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
             if(!m_traceUpPhaseCb.IsNull()){
                 m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
@@ -410,6 +420,15 @@ void DqcSender::Bind(uint16_t port){
         freqccv4->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
             if(!m_traceUpPhaseCb.IsNull()){
                 m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
+            }
+        });
+    } else if(algo && algo->GetCongestionControlType() == kBBRv2){
+        Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
+        bbrv2->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
+                                                 uint32_t latest_rtt_ms,
+                                                 uint32_t min_rtt_ms){
+            if(!m_traceQueueDelayCb.IsNull()){
+                m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
             }
         });
     }
@@ -497,6 +516,16 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	p->AddPacketTag (tag);
 	if(!m_traceBwCb.IsNull()){
 		QuicBandwidth send_bw=m_connection.EstimatedBandwidth();
+		SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+		SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+		if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
+		            algo->GetCongestionControlType() == kFreqCC ||
+		            algo->GetCongestionControlType() == kFreqCCv2 ||
+		            algo->GetCongestionControlType() == kFreqCCv3 ||
+		            algo->GetCongestionControlType() == kFreqCCv4)){
+			Bbr2Sender* bbr2 = static_cast<Bbr2Sender*>(algo);
+			send_bw = bbr2->ExportDebugState().bandwidth_hi;
+		}
 		m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());
 		//NS_LOG_INFO("bw "<<std::to_string((int32_t)send_bw.ToKBitsPerSecond()));
 	}
@@ -659,7 +688,6 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
         }
         // Trace recv rate if callback is set
         // Column 1: instant receive rate (bandwidth_latest from bandwidth sampler)
-        // Column 2: bandwidth estimate (BandwidthEstimate())
         if(!m_traceRecvRateCb.IsNull()){
             SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
             SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
@@ -687,7 +715,7 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                     // Fallback to bandwidth estimate for other algorithms
                     instant_kbps = (int32_t)bw_estimate.ToKBitsPerSecond();
                 }
-                m_traceRecvRateCb(instant_kbps, (int32_t)bw_estimate.ToKBitsPerSecond());
+                m_traceRecvRateCb(instant_kbps);
             }
         }
     }

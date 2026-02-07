@@ -126,6 +126,7 @@ static void InstallDqc( dqc::CongestionControlType cc_type,
     }
     if(trace){
         sendApp->SetBwTraceFuc(MakeCallback(&DqcTrace::OnBw,trace));
+        sendApp->SetQueueDelayTraceFuc(MakeCallback(&DqcTrace::OnQueueDelay,trace));
         recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
         recvApp->SetStatsTraceFuc(MakeCallback(&DqcTrace::OnStats,trace));
@@ -252,7 +253,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);  
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_QUEUE_DELAY);  
 
     InstallDqc(cc,c.Get(0),c.Get(4),sendPort,recvPort,appStart+0.01,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;

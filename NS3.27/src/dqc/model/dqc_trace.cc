@@ -116,7 +116,23 @@ void DqcTrace::OpenRecvRateFile(){
     }
     m_recvRate.open(path.c_str(), std::fstream::out);
     if(m_recvRate.is_open()){
-        m_recvRate<<"#time(s)\tinstant_recv_rate(kbps)\tbw_estimate(kbps)"<<std::endl;
+        m_recvRate<<"#time(s)\tinstant_recv_rate(kbps)"<<std::endl;
+    }
+}
+void DqcTrace::OpenQueueDelayFile(){
+    if(!(m_enable & E_DQC_QUEUE_DELAY) || m_queueDelay.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_qdelay.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_qdelay.txt";
+    }
+    m_queueDelay.open(path.c_str(), std::fstream::out);
+    if(m_queueDelay.is_open()){
+        m_queueDelay<<"#time(s)\tqueue_delay(ms)\tlatest_rtt(ms)\tmin_rtt(ms)"<<std::endl;
     }
 }
 void DqcTrace::OpenInflightFile(){
@@ -254,11 +270,12 @@ void DqcTrace::OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt){
 }
 void DqcTrace::OnBw(int32_t kbps){
     OpenBandwidthFile();  // Lazy open
-    // Only record if bw changed from last recorded value
-    if(kbps == m_lastBwKbps){
+    int64_t now_us=Simulator::Now().GetMicroSeconds();
+    // Only record once per simulation timestamp
+    if(now_us == m_lastBwTimeUs){
         return;
     }
-    m_lastBwKbps = kbps;
+    m_lastBwTimeUs = now_us;
     if(m_bw.is_open()){
         float now=Simulator::Now().GetSeconds();
         m_bw<<now<<"\t"<<kbps<<std::endl;
@@ -279,11 +296,18 @@ void DqcTrace::OnSendRate(int32_t kbps){
         m_sendRate<<now<<"\t"<<kbps<<std::endl;
     }
 }
-void DqcTrace::OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps){
+void DqcTrace::OnRecvRate(int32_t instant_kbps){
     OpenRecvRateFile();  // Lazy open
     if(m_recvRate.is_open()){
         float now=Simulator::Now().GetSeconds();
-        m_recvRate<<now<<"\t"<<instant_kbps<<"\t"<<bw_estimate_kbps<<std::endl;
+        m_recvRate<<now<<"\t"<<instant_kbps<<std::endl;
+    }
+}
+void DqcTrace::OnQueueDelay(uint32_t queue_delay_ms,uint32_t latest_rtt_ms,uint32_t min_rtt_ms){
+    OpenQueueDelayFile();
+    if(m_queueDelay.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_queueDelay<<now<<"\t"<<queue_delay_ms<<"\t"<<latest_rtt_ms<<"\t"<<min_rtt_ms<<std::endl;
     }
 }
 void DqcTrace::OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes){
@@ -392,6 +416,7 @@ void DqcTrace::Close(){
 	CloseGoodputFile();
     CloseSendRateFile();
     CloseRecvRateFile();
+    CloseQueueDelayFile();
     CloseInflightFile();
     CloseBbrModeFile();
     CloseLossRateFile();
@@ -432,6 +457,12 @@ void DqcTrace::CloseRecvRateFile(){
     if(m_recvRate.is_open()){
         m_recvRate.flush();
         m_recvRate.close();
+    }
+}
+void DqcTrace::CloseQueueDelayFile(){
+    if(m_queueDelay.is_open()){
+        m_queueDelay.flush();
+        m_queueDelay.close();
     }
 }
 void DqcTrace::CloseInflightFile(){
@@ -575,8 +606,8 @@ void DqcTraceState::Reset(){
     m_recvCount=0;
     m_totalRecv=0;
     m_totalRecvBytes=0;
-    uint64_t m_delayCount=0;
-    uint64_t m_sumDelay=0;
+    m_delayCount=0;
+    m_sumDelay=0;
     m_delayIds.clear();
 }
 }

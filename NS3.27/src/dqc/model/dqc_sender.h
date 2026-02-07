@@ -54,9 +54,11 @@ public:
     void SetTraceOwdAtSender(TraceOwdAtSender cb);
     typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceRtt;
     void SetRttTraceFuc(TraceRtt cb);
+    typedef Callback<void,uint32_t,uint32_t,uint32_t> TraceQueueDelay;
+    void SetQueueDelayTraceFuc(TraceQueueDelay cb);
     typedef Callback<void,int32_t> TraceSendRate;
     void SetSendRateTraceFuc(TraceSendRate cb);
-    typedef Callback<void,int32_t,int32_t> TraceRecvRate;
+    typedef Callback<void,int32_t> TraceRecvRate;
     void SetRecvRateTraceFuc(TraceRecvRate cb);
     typedef Callback<void,int32_t,int32_t> TraceInflight;
     void SetInflightTraceFuc(TraceInflight cb);
@@ -142,6 +144,7 @@ private:
     TraceLossPacketDelay m_traceLossDelay;
     TraceOwdAtSender m_traceOwd;
     TraceRtt m_traceRttCb;
+    TraceQueueDelay m_traceQueueDelayCb;
     TraceSendRate m_traceSendRateCb;
     TraceRecvRate m_traceRecvRateCb;
     TraceInflight m_traceInflightCb;

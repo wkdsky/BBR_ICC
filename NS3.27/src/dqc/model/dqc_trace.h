@@ -20,6 +20,7 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_LOSS_RATE=0x800,
     E_DQC_ACK_EVENT=0x1000,
     E_DQC_ACK_EPISODE=0x2000,
+    E_DQC_QUEUE_DELAY=0x4000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -63,7 +64,8 @@ public:
     void OnBw(int32_t kbps);
     void OnGoodput(uint32_t kbps);
     void OnSendRate(int32_t kbps);
-    void OnRecvRate(int32_t instant_kbps,int32_t bw_estimate_kbps);
+    void OnRecvRate(int32_t instant_kbps);
+    void OnQueueDelay(uint32_t queue_delay_ms,uint32_t latest_rtt_ms,uint32_t min_rtt_ms);
     void OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes);
     void OnBbrMode(int32_t mode);
     void OnLossRate(double time_sec,float loss_rate,float cumulative_loss_rate);
@@ -82,6 +84,7 @@ private:
     void OpenGoodputFile();
     void OpenSendRateFile();
     void OpenRecvRateFile();
+    void OpenQueueDelayFile();
     void OpenInflightFile();
     void OpenBbrModeFile();
     void OpenLossRateFile();
@@ -96,6 +99,7 @@ private:
     void CloseGoodputFile();
     void CloseSendRateFile();
     void CloseRecvRateFile();
+    void CloseQueueDelayFile();
     void CloseInflightFile();
     void CloseBbrModeFile();
     void CloseLossRateFile();
@@ -115,6 +119,7 @@ private:
     std::fstream m_googput;
     std::fstream m_sendRate;
     std::fstream m_recvRate;
+    std::fstream m_queueDelay;
     std::fstream m_inflight;
     std::fstream m_bbrMode;
     std::fstream m_lossRate;
@@ -124,7 +129,7 @@ private:
     std::fstream m_freqAnalysis;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
-    int32_t m_lastBwKbps = -1;  // Track last bw to avoid duplicate records
+    int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates
 };
 class DqcTraceState{
 public:

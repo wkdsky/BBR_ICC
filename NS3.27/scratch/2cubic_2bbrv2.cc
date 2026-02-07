@@ -128,6 +128,7 @@ static void InstallDqc( dqc::CongestionControlType cc_type,
     if(trace){
         sendApp->SetBwTraceFuc(MakeCallback(&DqcTrace::OnBw,trace));
         sendApp->SetRttTraceFuc(MakeCallback(&DqcTrace::OnRtt,trace));
+        sendApp->SetQueueDelayTraceFuc(MakeCallback(&DqcTrace::OnQueueDelay,trace));
 
         recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
@@ -254,7 +255,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);  
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_QUEUE_DELAY);  
     InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,0,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;
     test_pair++;
@@ -266,7 +267,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_QUEUE_DELAY);
 	InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,2,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;
     test_pair++;
@@ -278,7 +279,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);  
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_QUEUE_DELAY);  
     InstallDqc(cc2,c.Get(2),c.Get(8),sendPort,recvPort,4,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;
     test_pair++;
@@ -290,7 +291,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     stat->ReisterAvgDelayId(test_pair);
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_QUEUE_DELAY);
 	InstallDqc(cc2,c.Get(3),c.Get(9),sendPort,recvPort,6,appStop,trace.get(),stat,max_bps,sender_id);
     sender_id++;
     test_pair++;
