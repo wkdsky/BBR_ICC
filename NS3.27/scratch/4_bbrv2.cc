@@ -34,6 +34,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "queue_occupancy_trace_helper.h"
 using namespace ns3;
 using namespace dqc;
 using namespace std;
@@ -87,11 +88,11 @@ uint32_t msQdelay;
 
 // Link configurations: L0-L3 (sender side), L4 (bottleneck), L5-L8 (receiver side)
 
-const uint64_t TOPO_SENDER_BW       =   10 * 1000000;    // in bps
+const uint64_t TOPO_SENDER_BW       =   16000000;    // in bps
 const uint64_t TOPO_SENDER_PDELAY   =   1;    // in ms
-const uint64_t TOPO_BOTTLE_BW       =   8 * 1000000;     // in bps
-const uint64_t TOPO_BOTTLE_PDELAY   =   28;    // in ms
-const uint64_t TOPO_DEFAULT_QDELAY  =   (TOPO_SENDER_PDELAY*2+TOPO_BOTTLE_PDELAY)*2;    // in ms
+const uint64_t TOPO_BOTTLE_BW       =   20000000;    // in bps
+const uint64_t TOPO_BOTTLE_PDELAY   =   18;    // in ms
+const uint64_t TOPO_DEFAULT_QDELAY  =   400;    // in ms
 
 link_config_t p4p[]={
 [0]={TOPO_SENDER_BW,TOPO_SENDER_PDELAY,TOPO_DEFAULT_QDELAY},   // L0: n0-n4
@@ -189,6 +190,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     NS_LOG_INFO ("Create channels");
     PointToPointHelper p2p;
     TrafficControlHelper tch;
+    std::vector<std::shared_ptr<QueueOccupancyTracer>> queue_tracers;
 
     //L0-L3 and L5-L8: Edge links (10Mbps)
     bufSize =TOPO_SENDER_BW * TOPO_DEFAULT_QDELAY / 8000;
@@ -218,6 +220,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     p2p.SetDeviceAttribute ("DataRate", DataRateValue(DataRate (TOPO_BOTTLE_BW)));
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (TOPO_BOTTLE_PDELAY)));
     NetDeviceContainer devn4n5 = p2p.Install (n4n5);
+    queue_tracers.push_back(InstallBottleneckQueueOccupancyTrace(devn4n5.Get(0), instance, NUM_FLOWS));
 
     Ipv4AddressHelper ipv4;
 
@@ -343,11 +346,20 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
 int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
+    std::string trace_path="";
 
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+    cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.Parse(argc, argv);
+    if(!trace_path.empty()){
+        if(trace_path.back() != '/'){
+            trace_path.push_back('/');
+        }
+        set_dqc_trace_folder(trace_path);
+    }
+    SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
     std::cout << "=== 4 BBRv2 Flows Configuration ===" << std::endl;

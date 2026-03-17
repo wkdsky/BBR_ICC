@@ -28,6 +28,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "queue_occupancy_trace_helper.h"
 using namespace ns3;
 using namespace dqc;
 using namespace std;
@@ -168,6 +169,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     NS_LOG_INFO ("Create channels");
     PointToPointHelper p2p;
     TrafficControlHelper tch;
+    std::vector<std::shared_ptr<QueueOccupancyTracer>> queue_tracers;
     //L0
     bufSize =config[0].bps * config[0].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
@@ -192,6 +194,7 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
     p2p.SetDeviceAttribute ("DataRate", DataRateValue(DataRate (config[1].bps)));
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (config[1].msDelay)));
     NetDeviceContainer devn2n3 = p2p.Install (n2n3);
+    queue_tracers.push_back(InstallBottleneckQueueOccupancyTrace(devn2n3.Get(0), instance + "_" + algo, 1));
     //L2
     bufSize =config[2].bps * config[2].msQdelay/8000;
     p2p.SetQueue ("ns3::DropTailQueue",
@@ -272,6 +275,20 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=60,int lo
 int main (int argc, char *argv[]){
     int sim_time=60;
     int ins[]={1};
+    std::string trace_path="";
+
+    CommandLine cmd;
+    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+    cmd.AddValue("trace_path", "Output trace directory path", trace_path);
+    cmd.Parse(argc, argv);
+    if(!trace_path.empty()){
+        if(trace_path.back() != '/'){
+            trace_path.push_back('/');
+        }
+        set_dqc_trace_folder(trace_path);
+    }
+    SetQueueOccupancyTraceFolder(trace_path);
+
     const char *algos[]={"bbrv2"};
     for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
         std::string cong=std::string(algos[c]);
@@ -289,4 +306,3 @@ int main (int argc, char *argv[]){
     }
     return 0;
 }
-

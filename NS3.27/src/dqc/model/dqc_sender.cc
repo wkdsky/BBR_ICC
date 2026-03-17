@@ -5,6 +5,7 @@
 #include "ns3/dqc_trace.h"
 #include "ns3/log.h"
 #include "ns3/time_tag.h"
+#include "ns3/flow-id-tag.h"
 #include "byte_codec.h"
 #include "proto_utils.h"
 #include "freqcc_sender.h"
@@ -514,6 +515,12 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	TimeTag tag;
     tag.SetSentTime (ms);
 	p->AddPacketTag (tag);
+    if (m_id != 0)
+    {
+        FlowIdTag flowTag;
+        flowTag.SetFlowId(m_id);
+        p->AddPacketTag(flowTag);
+    }
 	if(!m_traceBwCb.IsNull()){
 		QuicBandwidth send_bw=m_connection.EstimatedBandwidth();
 		SendPacketManager *sent_manager=m_connection.GetSentPacketManager();

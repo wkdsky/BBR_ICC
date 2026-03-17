@@ -122,7 +122,7 @@ class BBRv2BatchRunner:
         try:
             os.chdir(self.ns3_dir)
             result = subprocess.run(
-                [f"./waf", "build", f"--targets=scratch/{script_name}"],
+                [f"./waf", "build", f"--targets={script_name}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=300
@@ -158,7 +158,7 @@ class BBRv2BatchRunner:
             start_time = datetime.now()
 
             result = subprocess.run(
-                ["./waf", "--run", f"scratch/{num_flows}_bbrv2 --sim_time={sim_time}"],
+                ["./waf", "--run", f"{num_flows}_bbrv2 --sim_time={sim_time}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=600,

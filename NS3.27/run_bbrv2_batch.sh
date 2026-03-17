@@ -10,6 +10,7 @@
 #   --sender-bw <Mbps>          Edge link bandwidth (default: 10 Mbps)
 #   --bottle-bw <Mbps>          Bottleneck bandwidth (auto if not set)
 #   --bottle-delay <ms>         Bottleneck delay (default: 28 ms)
+#   --queue-bdp <factor>        Queue size in BDP units (default: 1)
 #   --sim-time <seconds>        Simulation duration (default: 30 s)
 #   --instance <id>             Instance number (default: 1)
 #   --rebuild                   Force rebuild even if no changes
@@ -24,9 +25,10 @@
 #
 #   # Run 4,16 flows with custom bottleneck delay
 #   ./run_bbrv2_batch.sh --flows 4,16 --bottle-delay 50 --sim-time 120
+#   ./run_bbrv2_batch.sh --flows 4 --bottle-delay 18 --sender-bw 8 --bottle-bw 20 --queue-bdp 1 --sim-time 120
 #################################################################################
 
-set -e
+set -euo pipefail
 
 # Color output
 RED='\033[0;31m'
@@ -39,9 +41,13 @@ NC='\033[0m' # No Color
 FLOWS="4,8,16,32"
 SENDER_BW=10
 BOTTLE_DELAY=28
+QUEUE_BDP=1
 SIM_TIME=30
 INSTANCE=1
 REBUILD=false
+CUSTOM_BOTTLE_BW=""
+RUN_TAG="$(date +%Y%m%d_%H%M%S)"
+TRACE_ROOT=""
 
 # Flow-specific defaults
 declare -A DEFAULT_BOTTLE_BW
@@ -71,6 +77,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bottle-delay)
             BOTTLE_DELAY="$2"
+            shift 2
+            ;;
+        --queue-bdp)
+            QUEUE_BDP="$2"
             shift 2
             ;;
         --sim-time)
@@ -111,6 +121,7 @@ update_script_params() {
     local sender_bw=$2
     local bottle_bw=$3
     local bottle_delay=$4
+    local queue_bdp=$5
 
     if [ ! -f "$script_file" ]; then
         echo -e "${RED}Error: Script not found: $script_file${NC}"
@@ -120,9 +131,14 @@ update_script_params() {
     # Create backup
     cp "$script_file" "$script_file.bak"
 
-    # Convert Mbps to bps
-    local sender_bps=$((sender_bw * 1000000))
-    local bottle_bps=$((bottle_bw * 1000000))
+    # Convert Mbps to bps (supports decimal Mbps, e.g., 2.5)
+    local sender_bps
+    local bottle_bps
+    sender_bps=$(awk -v bw="$sender_bw" 'BEGIN { printf "%.0f", bw * 1000000 }')
+    bottle_bps=$(awk -v bw="$bottle_bw" 'BEGIN { printf "%.0f", bw * 1000000 }')
+    # RTT ~= 2*(sender_edge + bottleneck + receiver_edge) = (2*1 + bottle_delay)*2
+    local rtt_ms=$(((2 * 1 + bottle_delay) * 2))
+    local qdelay_ms=$((queue_bdp * rtt_ms))
 
     # Update TOPO_SENDER_BW
     sed -i "s/const uint64_t TOPO_SENDER_BW.*=.*/const uint64_t TOPO_SENDER_BW       =   $sender_bps;    \/\/ in bps/" "$script_file"
@@ -133,8 +149,11 @@ update_script_params() {
     # Update TOPO_BOTTLE_PDELAY
     sed -i "s/const uint64_t TOPO_BOTTLE_PDELAY.*=.*/const uint64_t TOPO_BOTTLE_PDELAY   =   $bottle_delay;    \/\/ in ms/" "$script_file"
 
+    # Update TOPO_DEFAULT_QDELAY (queue size in BDP units)
+    sed -i "s/const uint64_t TOPO_DEFAULT_QDELAY.*=.*/const uint64_t TOPO_DEFAULT_QDELAY  =   $qdelay_ms;    \/\/ in ms/" "$script_file"
+
     echo -e "${GREEN}✓${NC} Updated: $(basename $script_file)"
-    echo "  TOPO_SENDER_BW=$sender_bw Mbps, TOPO_BOTTLE_BW=$bottle_bw Mbps, TOPO_BOTTLE_PDELAY=$bottle_delay ms"
+    echo "  TOPO_SENDER_BW=$sender_bw Mbps, TOPO_BOTTLE_BW=$bottle_bw Mbps, TOPO_BOTTLE_PDELAY=$bottle_delay ms, TOPO_DEFAULT_QDELAY=$qdelay_ms ms (${queue_bdp}BDP)"
 }
 
 # Function to run a single test
@@ -143,10 +162,17 @@ run_test() {
     local sender_bw=$2
     local bottle_bw=$3
     local bottle_delay=$4
-    local sim_time=$5
+    local queue_bdp=$5
+    local sim_time=$6
 
     local script="${num_flows}_bbrv2"
     local script_file="$SCRATCH_DIR/${script}.cc"
+    local sender_bw_tag="${sender_bw//./p}"
+    local bottle_bw_tag="${bottle_bw//./p}"
+    local scenario_dir="${TRACE_ROOT}/${num_flows}f_sender${sender_bw_tag}M_bottle${bottle_bw_tag}M_delay${bottle_delay}ms_q${queue_bdp}bdp_time${sim_time}s"
+    local trace_path="${scenario_dir}/"
+    local run_log="${scenario_dir}/run.log"
+    local bin_path="build/scratch/${script}"
 
     # Check if script exists
     if [ ! -f "$script_file" ]; then
@@ -154,26 +180,36 @@ run_test() {
         return 1
     fi
 
-    print_header "Running $num_flows flows: SENDER_BW=${sender_bw}Mbps, BOTTLE_BW=${bottle_bw}Mbps, DELAY=${bottle_delay}ms, SIM_TIME=${sim_time}s"
+    print_header "Running $num_flows flows: SENDER_BW=${sender_bw}Mbps, BOTTLE_BW=${bottle_bw}Mbps, DELAY=${bottle_delay}ms, QUEUE=${queue_bdp}BDP, SIM_TIME=${sim_time}s"
+
+    mkdir -p "$scenario_dir"
 
     # Update script parameters
-    update_script_params "$script_file" "$sender_bw" "$bottle_bw" "$bottle_delay"
+    update_script_params "$script_file" "$sender_bw" "$bottle_bw" "$bottle_delay" "$queue_bdp"
 
     # Build if needed
     echo -e "${BLUE}Building...${NC}"
     cd "$NS3_DIR"
-    if $REBUILD || [ ! -f "build/scratch/${script}" ]; then
-        ./waf build --targets=scratch/${script} > /dev/null 2>&1 || {
+    if $REBUILD || [ ! -f "$bin_path" ] || [ "$script_file" -nt "$bin_path" ]; then
+        if ! ./waf build --targets=${script} > /dev/null 2>&1; then
             echo -e "${RED}✗ Build failed for ${script}${NC}"
+            if [ -f "$script_file.bak" ]; then
+                mv "$script_file.bak" "$script_file"
+            fi
             return 1
-        }
+        fi
     fi
 
     # Run the test
     echo -e "${BLUE}Running simulation...${NC}"
     start_time=$(date +%s)
 
-    ./waf --run "scratch/${script} --sim_time=${sim_time}" 2>&1 | tee "test_${script}_${sender_bw}mbps_${bottle_bw}mbps.log"
+    if ! ./waf --run "${script} --sim_time=${sim_time} --trace_path=${trace_path}" 2>&1 | tee "$run_log"; then
+        if [ -f "$script_file.bak" ]; then
+            mv "$script_file.bak" "$script_file"
+        fi
+        return 1
+    fi
 
     end_time=$(date +%s)
     duration=$((end_time - start_time))
@@ -190,12 +226,17 @@ run_test() {
 # Main execution
 print_header "BBRv2 Batch Runner"
 
+TRACE_ROOT="traces/bbrv2_batch_ins${INSTANCE}_${RUN_TAG}"
+mkdir -p "$TRACE_ROOT"
+
 echo -e "${BLUE}Configuration:${NC}"
 echo "  Flows: $FLOWS"
 echo "  Sender BW: $SENDER_BW Mbps"
 echo "  Bottleneck Delay: $BOTTLE_DELAY ms"
+echo "  Queue: $QUEUE_BDP BDP"
 echo "  Simulation Time: $SIM_TIME seconds"
 echo "  Instance: $INSTANCE"
+echo "  Trace Root: $TRACE_ROOT"
 echo ""
 
 # Convert flow list to array
@@ -218,7 +259,7 @@ for num_flows in "${FLOW_ARRAY[@]}"; do
 
     echo -e "${YELLOW}[${current_test}/${total_tests}]${NC} Testing with $num_flows flows..."
 
-    if run_test "$num_flows" "$SENDER_BW" "$bottle_bw" "$BOTTLE_DELAY" "$SIM_TIME"; then
+    if run_test "$num_flows" "$SENDER_BW" "$bottle_bw" "$BOTTLE_DELAY" "$QUEUE_BDP" "$SIM_TIME"; then
         echo -e "${GREEN}✓ Test completed successfully${NC}"
     else
         echo -e "${RED}✗ Test failed${NC}"
@@ -228,9 +269,9 @@ for num_flows in "${FLOW_ARRAY[@]}"; do
 done
 
 print_header "All Tests Completed"
-echo -e "${GREEN}Trace files saved to: traces/${NC}"
+echo -e "${GREEN}Trace files saved to: ${TRACE_ROOT}/${NC}"
 echo ""
-ls -lh traces/ | tail -n +2 | head -20
+ls -lh "$TRACE_ROOT" | tail -n +2 | head -20
 echo ""
 
 echo -e "${BLUE}Summary:${NC}"

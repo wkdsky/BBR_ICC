@@ -1,0 +1,129 @@
+# 严格按竞争程度 rho 配置：rho = (flows * sender_bw) / bottle_bw
+# 覆盖：
+#   flows = 4,8,16,32
+#   rho   = 0.8,1.6,3.2
+#   queue-bdp = 1,4,10
+#   bottle-bw = 20,100 Mbps
+# 固定：
+#   bottle-delay = 18ms  (RTT约40ms)
+#   sim-time = 120s
+#
+# 注：sender-bw 由 rho 反推，部分组合会出现小数（如 32流@20Mbps -> 0.5/1/2）。
+# run_bbrv2_batch.sh 已支持小数 Mbps。
+
+# ===== bottle-bw=20Mbps =====
+# --- flows=4 ---
+# rho=0.8 => sender-bw=4Mbps
+--flows 4 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=8Mbps
+--flows 4 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=16Mbps
+--flows 4 --sender-bw 16 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 16 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 16 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=8 ---
+# rho=0.8 => sender-bw=2Mbps
+--flows 8 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=4Mbps
+--flows 8 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=8Mbps
+--flows 8 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 8 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=16 ---
+# rho=0.8 => sender-bw=1Mbps
+--flows 16 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=2Mbps
+--flows 16 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=4Mbps
+--flows 16 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 4 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=32 ---
+# rho=0.8 => sender-bw=0.5Mbps
+--flows 32 --sender-bw 0.5 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 0.5 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 0.5 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=1Mbps
+--flows 32 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 1 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=2Mbps
+--flows 32 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 2 --bottle-bw 20 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+
+# ===== bottle-bw=100Mbps =====
+# --- flows=4 ---
+# rho=0.8 => sender-bw=20Mbps
+--flows 4 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=40Mbps
+--flows 4 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=80Mbps
+--flows 4 --sender-bw 80 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 4 --sender-bw 80 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 4 --sender-bw 80 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=8 ---
+# rho=0.8 => sender-bw=10Mbps
+--flows 8 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=20Mbps
+--flows 8 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=40Mbps
+--flows 8 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 8 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 8 --sender-bw 40 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=16 ---
+# rho=0.8 => sender-bw=5Mbps
+--flows 16 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=10Mbps
+--flows 16 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=20Mbps
+--flows 16 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 16 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 16 --sender-bw 20 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+# --- flows=32 ---
+# rho=0.8 => sender-bw=2.5Mbps
+--flows 32 --sender-bw 2.5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 2.5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 2.5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=1.6 => sender-bw=5Mbps
+--flows 32 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 5 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+# rho=3.2 => sender-bw=10Mbps
+--flows 32 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 1 --sim-time 120
+--flows 32 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 4 --sim-time 120
+--flows 32 --sender-bw 10 --bottle-bw 100 --bottle-delay 18 --queue-bdp 10 --sim-time 120
+
+

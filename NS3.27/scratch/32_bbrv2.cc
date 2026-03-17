@@ -32,6 +32,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "queue_occupancy_trace_helper.h"
 using namespace ns3;
 using namespace dqc;
 using namespace std;
@@ -174,6 +175,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     NS_LOG_INFO ("Create channels");
     PointToPointHelper p2p;
     TrafficControlHelper tch;
+    std::vector<std::shared_ptr<QueueOccupancyTracer>> queue_tracers;
 
     //L0-L31 and L33-L64: Edge links (10Mbps)
     bufSize =TOPO_SENDER_BW * TOPO_DEFAULT_QDELAY / 8000;
@@ -203,6 +205,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     p2p.SetDeviceAttribute ("DataRate", DataRateValue(DataRate (TOPO_BOTTLE_BW)));
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (TOPO_BOTTLE_PDELAY)));
     NetDeviceContainer devn32n33 = p2p.Install (n32n33);
+    queue_tracers.push_back(InstallBottleneckQueueOccupancyTrace(devn32n33.Get(0), instance, NUM_FLOWS));
 
     Ipv4AddressHelper ipv4;
 
@@ -278,6 +281,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
 int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
+    std::string trace_path="";
 
     // Initialize link configurations
     InitializeLinks();
@@ -285,7 +289,15 @@ int main (int argc, char *argv[]){
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+    cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.Parse(argc, argv);
+    if(!trace_path.empty()){
+        if(trace_path.back() != '/'){
+            trace_path.push_back('/');
+        }
+        set_dqc_trace_folder(trace_path);
+    }
+    SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
     std::cout << "=== 32 BBRv2 Flows Configuration ===" << std::endl;

@@ -46,6 +46,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "queue_occupancy_trace_helper.h"
 using namespace ns3;
 using namespace dqc;
 using namespace std;
@@ -242,6 +243,7 @@ void ns3_freqccv3(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     NS_LOG_INFO ("Create channels");
     PointToPointHelper p2p;
     TrafficControlHelper tch;
+    std::vector<std::shared_ptr<QueueOccupancyTracer>> queue_tracers;
 
     //L0-L7 and L9-L16: Edge links (100Mbps)
     bufSize =TOPO_SENDER_BW * TOPO_DEFAULT_QDELAY / 8000;
@@ -279,6 +281,7 @@ void ns3_freqccv3(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     p2p.SetDeviceAttribute ("DataRate", DataRateValue(DataRate (TOPO_BOTTLE_BW)));
     p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (TOPO_BOTTLE_PDELAY)));
     NetDeviceContainer devn8n9 = p2p.Install (n8n9);
+    queue_tracers.push_back(InstallBottleneckQueueOccupancyTrace(devn8n9.Get(0), instance, NUM_FLOWS));
 
     Ipv4AddressHelper ipv4;
 
@@ -480,10 +483,12 @@ void ns3_freqccv3(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
 int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
+    std::string trace_path="";
 
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+    cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     // Per-flow parameters
     cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
     cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);
@@ -510,6 +515,13 @@ int main (int argc, char *argv[]){
     cmd.AddValue("fixed7", "Flow 7 fixed amplitude (Mbps)", g_fixed_mbps[6]);
     cmd.AddValue("fixed8", "Flow 8 fixed amplitude (Mbps)", g_fixed_mbps[7]);
     cmd.Parse(argc, argv);
+    if(!trace_path.empty()){
+        if(trace_path.back() != '/'){
+            trace_path.push_back('/');
+        }
+        set_dqc_trace_folder(trace_path);
+    }
+    SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
     std::cout << "=== 8 FreqCCv3 Flows Configuration ===" << std::endl;
