@@ -237,6 +237,11 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
 
     // Use BBRv2 for all flows
     dqc::CongestionControlType cc = kBBRv2;
+    if (algo == "bbrv2plus") {
+        cc = kBBRv2Plus;
+    } else if (algo == "bbrv2plus_ecn") {
+        cc = kBBRv2PlusEcn;
+    }
 
     uint32_t max_bps=0;
     int test_pair=1;
@@ -287,9 +292,11 @@ int main (int argc, char *argv[]){
     InitializeLinks();
 
     // Command line arguments
+    std::string cc_name="bbrv2";
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
+    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2plus, bbrv2plus_ecn", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
@@ -300,17 +307,17 @@ int main (int argc, char *argv[]){
     SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
-    std::cout << "=== 32 BBRv2 Flows Configuration ===" << std::endl;
+    std::cout << "=== 32 BBRv2-Style Flows Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
-    std::cout << "Congestion control: BBRv2" << std::endl;
+    std::cout << "Congestion control: " << cc_name << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;
     std::cout << "====================================" << std::endl;
 
-    const char *algos[]={"bbrv2"};
-    for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
-        std::string cong=std::string(algos[c]);
+    std::vector<std::string> algos{cc_name};
+    for (size_t c = 0; c < algos.size(); ++c){
+        std::string cong=algos[c];
         std::string name=cong;
         std::unique_ptr<DqcTraceState> stat;
         stat.reset(new DqcTraceState(name));

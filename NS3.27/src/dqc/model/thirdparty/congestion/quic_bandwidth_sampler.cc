@@ -333,7 +333,8 @@ QuicBandwidthSample QuicBandwidthSampler::OnPacketAcknowledgedInner(
   // current packet was sent. In that case, there is no bandwidth sample to
   // make.
   if (sent_packet.last_acked_packet_sent_time == ProtoTime::Zero()) {
-    LOG(FATAL)<< "sent_packet.last_acked_packet_sent_time is zero";
+    // No earlier packet had been ACKed when this packet was sent, so there is
+    // no valid send-rate sample yet. This is expected on the first ACK.
     return QuicBandwidthSample();
   }
 

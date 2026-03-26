@@ -12,12 +12,44 @@
 #include "freqccv2_sender.h"
 #include "freqccv3_sender.h"
 #include "freqccv4_sender.h"
+#include "obbr_sender.h"
+#include "proto_bbr_sender.h"
 #include "quic_bbr2_sender.h"
+#include "quic_bbr2plus_sender.h"
 #include "proto_send_algorithm_interface.h"
 using namespace dqc;
 namespace ns3{
 NS_LOG_COMPONENT_DEFINE("dqcsender");
 using namespace dqc;
+
+namespace {
+
+int32_t
+ProtoBbrModeToTraceIndex(ProtoBbrSender::Mode mode)
+{
+    switch (mode) {
+    case ProtoBbrSender::STARTUP:
+        return 0;
+    case ProtoBbrSender::DRAIN:
+        return 1;
+    case ProtoBbrSender::PROBE_BW:
+        return 3;
+    case ProtoBbrSender::PROBE_RTT:
+        return 6;
+    }
+    return 3;
+}
+
+bool
+IsBbr2StyleAlgorithm(CongestionControlType type)
+{
+    return type == kBBRv2 || type == kBBRv2Ecn ||
+           type == kBBRv2Plus || type == kBBRv2PlusEcn ||
+           type == kFreqCC || type == kFreqCCv2 ||
+           type == kFreqCCv3 || type == kFreqCCv4;
+}
+
+}  // namespace
 // in order to get the ip addr of node
 void ConvertIp32(uint32_t ip,std::string &addr){
  uint8_t first=(ip&0xff000000)>>24;
@@ -423,7 +455,10 @@ void DqcSender::Bind(uint16_t port){
                 m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
             }
         });
-    } else if(algo && algo->GetCongestionControlType() == kBBRv2){
+    } else if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
+                       algo->GetCongestionControlType() == kBBRv2Ecn ||
+                       algo->GetCongestionControlType() == kBBRv2Plus ||
+                       algo->GetCongestionControlType() == kBBRv2PlusEcn)){
         Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
         bbrv2->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
                                                  uint32_t latest_rtt_ms,
@@ -525,19 +560,32 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 		QuicBandwidth send_bw=m_connection.EstimatedBandwidth();
 		SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
 		SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-		if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
-		            algo->GetCongestionControlType() == kFreqCC ||
-		            algo->GetCongestionControlType() == kFreqCCv2 ||
-		            algo->GetCongestionControlType() == kFreqCCv3 ||
-		            algo->GetCongestionControlType() == kFreqCCv4)){
+		if(algo && IsBbr2StyleAlgorithm(algo->GetCongestionControlType())){
 			Bbr2Sender* bbr2 = static_cast<Bbr2Sender*>(algo);
 			send_bw = bbr2->ExportDebugState().bandwidth_hi;
 		}
-		m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());
+			m_traceBwCb((int32_t)send_bw.ToKBitsPerSecond());
 		//NS_LOG_INFO("bw "<<std::to_string((int32_t)send_bw.ToKBitsPerSecond()));
 	}
-    // Trace send rate (pacing rate)
-    if(!m_traceSendRateCb.IsNull()){
+	    if(!m_traceQueueDelayCb.IsNull()){
+	        SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+	        SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+	        if(algo && algo->GetCongestionControlType() == kOBBR){
+	            ObbrSender* bbr = static_cast<ObbrSender*>(algo);
+	            const uint32_t latest_rtt_ms = sent_manager->GetRttStats()->latest_rtt().ToMilliseconds();
+	            const uint32_t min_rtt_ms = bbr->GetMinRtt().ToMilliseconds();
+	            const uint32_t queue_delay_ms = latest_rtt_ms > min_rtt_ms ? latest_rtt_ms - min_rtt_ms : 0;
+	            m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+	        } else if(algo && algo->GetCongestionControlType() == kBBR){
+	            ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
+	            const uint32_t latest_rtt_ms = sent_manager->GetRttStats()->latest_rtt().ToMilliseconds();
+	            const uint32_t min_rtt_ms = bbr->GetMinRtt().ToMilliseconds();
+	            const uint32_t queue_delay_ms = latest_rtt_ms > min_rtt_ms ? latest_rtt_ms - min_rtt_ms : 0;
+	            m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+	        }
+	    }
+	    // Trace send rate (pacing rate)
+	    if(!m_traceSendRateCb.IsNull()){
         SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
         SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
         if(algo){
@@ -568,12 +616,17 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
             FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
             int32_t mode_index = freqccv4->GetCurrentBbrModeIndex();
             m_traceBbrModeCb(mode_index);
-        } else if(algo && algo->GetCongestionControlType() == kBBRv2){
-            Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
-            int32_t mode_index = bbrv2->GetCurrentBbrModeIndex();
-            m_traceBbrModeCb(mode_index);
-        }
-    }
+	        } else if(algo && IsBbr2StyleAlgorithm(algo->GetCongestionControlType())){
+	            Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
+	            m_traceBbrModeCb(bbrv2->GetCurrentBbrModeIndex());
+	        } else if(algo && algo->GetCongestionControlType() == kOBBR){
+	            ObbrSender* bbr = static_cast<ObbrSender*>(algo);
+	            m_traceBbrModeCb(bbr->GetCurrentBbrModeIndex());
+	        } else if(algo && algo->GetCongestionControlType() == kBBR){
+	            ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
+	            m_traceBbrModeCb(ProtoBbrModeToTraceIndex(bbr->ExportDebugState().mode));
+	        }
+	    }
     // Trace inflight bytes and cwnd
     if(!m_traceInflightCb.IsNull()){
         SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
@@ -703,7 +756,7 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 QuicBandwidth bw_estimate = algo->BandwidthEstimate();
                 // Get instant receive rate (bandwidth_latest) if available
                 int32_t instant_kbps = 0;
-                if(algo->GetCongestionControlType() == kBBRv2){
+                if(IsBbr2StyleAlgorithm(algo->GetCongestionControlType())){
                     Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
                     instant_kbps = (int32_t)bbrv2->BandwidthLatest().ToKBitsPerSecond();
                 } else if(algo->GetCongestionControlType() == kFreqCC){
@@ -718,6 +771,9 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 } else if(algo->GetCongestionControlType() == kFreqCCv4){
                     FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
                     instant_kbps = (int32_t)freqccv4->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kOBBR){
+                    ObbrSender* obbr = static_cast<ObbrSender*>(algo);
+                    instant_kbps = (int32_t)obbr->BandwidthLatest().ToKBitsPerSecond();
                 } else {
                     // Fallback to bandwidth estimate for other algorithms
                     instant_kbps = (int32_t)bw_estimate.ToKBitsPerSecond();

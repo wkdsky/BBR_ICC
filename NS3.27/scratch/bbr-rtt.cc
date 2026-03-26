@@ -257,6 +257,12 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=200,int l
         cc=kBBRD;
     }else if(algo.compare("bbrplus")==0){
         cc=kBBRPlus;
+    }else if(algo.compare("bbrv2plus")==0){
+        cc=kBBRv2Plus;
+    }else if(algo.compare("bbrv2plus_ecn")==0){
+        cc=kBBRv2PlusEcn;
+    }else if(algo.compare("obbr")==0){
+        cc=kOBBR;
     }else if(algo.compare("bbrrand")==0){
         cc=kBBRRand;
     }else if(algo.compare("bbrv2")==0){
@@ -344,4 +350,3 @@ int main (int argc, char *argv[]){
     }
     return 0;
 }
-

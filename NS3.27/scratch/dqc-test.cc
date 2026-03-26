@@ -232,6 +232,15 @@ int main(int argc, char *argv[]){
 	if(cc_tmp==std::string("bbr")){
 		cc=kBBR;
 		cc1=cc;
+	}else if(cc_tmp==std::string("obbr")){
+		cc=kOBBR;
+		cc1=cc;
+	}else if(cc_tmp==std::string("bbrv2plus")){
+		cc=kBBRv2Plus;
+		cc1=cc;
+	}else if(cc_tmp==std::string("bbrv2plus_ecn")){
+		cc=kBBRv2PlusEcn;
+		cc1=cc;
 	}else if(cc_tmp==std::string("bbrd")){
 		cc=kBBRD;
 		cc1=cc;

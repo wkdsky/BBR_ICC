@@ -344,9 +344,13 @@ void DqcTrace::OnBbrMode(int32_t mode){
             "probeBW_cruise",
             "probeBW_refill",
             "probeBW_up",
-            "probeRTT"
+            "probeRTT",
+            "probeBW_pre_up",
+            "probeBW_guard",
+            "probeBW_post_up",
+            "probeBW_down_slightly"
         };
-        const char* mode_name = (mode >= 0 && mode <= 6) ? mode_names[mode] : "unknown";
+        const char* mode_name = (mode >= 0 && mode <= 10) ? mode_names[mode] : "unknown";
         m_bbrMode<<now<<"\t"<<mode_name<<std::endl;
     }
 }
