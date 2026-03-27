@@ -15,7 +15,7 @@ class Bbr2Sender;
 class QUIC_EXPORT_PRIVATE Bbr2ProbeRttMode final : public Bbr2ModeBase {
  public:
   //using Bbr2ModeBase::Bbr2ModeBase;
-  Bbr2ProbeRttMode(const Bbr2Sender* sender,
+  Bbr2ProbeRttMode(Bbr2Sender* sender,
                                  Bbr2NetworkModel* model)
     : Bbr2ModeBase(sender, model){}
   void Enter(QuicTime now,

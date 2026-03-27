@@ -345,6 +345,11 @@ bool SendPacketManager::MaybeUpdateRTT(PacketNumber largest_acked,
     }
     TimeDelta send_delta=ack_receive_time-info->sent_time;
     rtt_stats_.UpdateRtt(send_delta,ack_delay_time,ack_receive_time);
+    if(trace_rtt_){
+        trace_rtt_(largest_acked,
+                   static_cast<uint32_t>(rtt_stats_.latest_rtt().ToMilliseconds()),
+                   static_cast<uint32_t>(rtt_stats_.smoothed_rtt().ToMilliseconds()));
+    }
     return true;
 }
 void SendPacketManager::PostProcessNewlyAckedPackets(ProtoTime ack_receive_time,

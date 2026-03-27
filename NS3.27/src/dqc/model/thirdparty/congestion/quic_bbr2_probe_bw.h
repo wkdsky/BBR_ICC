@@ -44,6 +44,10 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeBwMode final : public Bbr2ModeBase {
     PROBE_DOWN,
     PROBE_CRUISE,
     PROBE_REFILL,
+    PROBE_PRE_UP,
+    PROBE_GUARD,
+    PROBE_POST_UP,
+    PROBE_DOWN_SLIGHTLY,
   };
 
   static const char* CyclePhaseToString(CyclePhase phase);
@@ -62,8 +66,13 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeBwMode final : public Bbr2ModeBase {
 
   void UpdateProbeUp(QuicByteCount prior_in_flight,
                      const Bbr2CongestionEvent& congestion_event);
+  void UpdateProbePreUp(const Bbr2CongestionEvent& congestion_event);
+  void UpdateProbeGuard(const Bbr2CongestionEvent& congestion_event);
+  void UpdateProbePostUp(const Bbr2CongestionEvent& congestion_event);
   void UpdateProbeDown(QuicByteCount prior_in_flight,
                        const Bbr2CongestionEvent& congestion_event);
+  void UpdateProbeDownSlightly(QuicByteCount prior_in_flight,
+                               const Bbr2CongestionEvent& congestion_event);
   void UpdateProbeCruise(const Bbr2CongestionEvent& congestion_event);
   void UpdateProbeRefill(const Bbr2CongestionEvent& congestion_event);
 
@@ -84,7 +93,11 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeBwMode final : public Bbr2ModeBase {
                       QuicTime now);
   void EnterProbeCruise(QuicTime now);
   void EnterProbeRefill(uint64_t probe_up_rounds, QuicTime now);
+  void EnterProbePreUp(QuicTime now);
+  void EnterProbeGuard(QuicTime now);
   void EnterProbeUp(QuicTime now);
+  void EnterProbePostUp(QuicTime now);
+  void EnterProbeDownSlightly(QuicTime now);
 
   // Call right before the exit of PROBE_DOWN.
   void ExitProbeDown();

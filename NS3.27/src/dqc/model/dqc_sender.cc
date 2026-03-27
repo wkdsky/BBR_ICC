@@ -103,6 +103,7 @@ void DqcSender::SetTraceOwdAtSender(TraceOwdAtSender cb){
 }
 void DqcSender::SetRttTraceFuc(TraceRtt cb){
     m_traceRttCb=cb;
+    EnsureRttTraceHooked();
 }
 void DqcSender::SetQueueDelayTraceFuc(TraceQueueDelay cb){
     m_traceQueueDelayCb=cb;
@@ -224,6 +225,24 @@ void DqcSender::EnsureAckTraceHooked(){
                                ack_delay_ms,rtt_ms);
         });
         m_ackTraceHooked=true;
+    }
+}
+void DqcSender::EnsureRttTraceHooked(){
+    if(m_rttTraceHooked){
+        return;
+    }
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    if(sent_manager){
+        sent_manager->SetTraceRtt([this](PacketNumber largest_acked,
+                                         uint32_t rtt_ms,
+                                         uint32_t smoothed_rtt_ms){
+            if(!m_traceRttCb.IsNull()){
+                m_traceRttCb(static_cast<uint32_t>(largest_acked.ToUint64()),
+                             rtt_ms,
+                             smoothed_rtt_ms);
+            }
+        });
+        m_rttTraceHooked=true;
     }
 }
 void DqcSender::OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
@@ -416,14 +435,12 @@ void DqcSender::Bind(uint16_t port){
     if(m_ecn){
 	m_socket->SetIpTos(0x01);
     }
-    m_connection.set_packet_writer(&m_writer);
+	m_connection.set_packet_writer(&m_writer);
 	m_connection.SetTraceSentSeq(this);
     m_stream=m_connection.GetOrCreateStream(m_streamId);
     m_stream->set_stream_vistor(this);
 	SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-	RttStats* rtt_stats=sent_manager->GetRttStats();
-	rtt_stats->UpdateRtt(TimeDelta::FromMilliseconds(100),TimeDelta::FromMilliseconds(0),ProtoTime::Zero());
-	NS_LOG_INFO(rtt_stats->smoothed_rtt().ToMicroseconds());
+    EnsureRttTraceHooked();
 
     // Set UP phase trace callback for FreqCCv3
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
@@ -737,14 +754,6 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
         }
         for(auto it=m_sinks.begin();it!=m_sinks.end();it++){
             (*it)->OnOneWayDelaySample(m_id,seq,owd);
-        }
-        // Trace RTT if callback is set
-        if(!m_traceRttCb.IsNull()){
-            SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-            RttStats* rtt_stats=sent_manager->GetRttStats();
-            uint32_t rtt=(uint32_t)rtt_stats->latest_rtt().ToMilliseconds();
-            uint32_t smoothed_rtt=(uint32_t)rtt_stats->smoothed_rtt().ToMilliseconds();
-            m_traceRttCb(seq,rtt,smoothed_rtt);
         }
         // Trace recv rate if callback is set
         // Column 1: instant receive rate (bandwidth_latest from bandwidth sampler)

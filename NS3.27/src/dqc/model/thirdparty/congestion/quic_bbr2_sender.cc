@@ -145,6 +145,7 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
   if (congestion_event.end_of_round_trip&&params_.enable_ecn){
       UpdateRoundTripAlpha();
   }
+  OnCongestionEventStarted(congestion_event);
   // Number of mode changes allowed for this congestion event.
   int mode_changes_allowed = kMaxModeChangesPerCongestionEvent;
   while (true) {
@@ -476,6 +477,14 @@ int32_t Bbr2Sender::GetCurrentBbrModeIndex() const {
           return 4;
         case Bbr2ProbeBwMode::CyclePhase::PROBE_UP:
           return 5;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_PRE_UP:
+          return 7;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_GUARD:
+          return 8;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_POST_UP:
+          return 9;
+        case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY:
+          return 10;
         case Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED:
         default:
           return 2;  // Default to PROBE_DOWN
@@ -486,6 +495,41 @@ int32_t Bbr2Sender::GetCurrentBbrModeIndex() const {
       return 0;
   }
 }
+
+void Bbr2Sender::OnCongestionEventStarted(
+    const Bbr2CongestionEvent& /*congestion_event*/) {}
+
+bool Bbr2Sender::EnablePlusProbeBwPhases() const {
+  return false;
+}
+
+bool Bbr2Sender::ShouldStartProbeOnRound() const {
+  return false;
+}
+
+bool Bbr2Sender::ShouldAdvanceMaxBandwidthFilterOnRoundStart(
+    Bbr2ProbeBwMode::CyclePhase /*phase*/) const {
+  return false;
+}
+
+void Bbr2Sender::OnMaxBandwidthFilterAdvanced(
+    Bbr2ProbeBwMode::CyclePhase /*phase*/) {}
+
+bool Bbr2Sender::ShouldEnterProbeUpFromGuard() const {
+  return true;
+}
+
+bool Bbr2Sender::ShouldProbeAgainFromPostUp() const {
+  return false;
+}
+
+float Bbr2Sender::GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
+                                       float pacing_gain) const {
+  return pacing_gain;
+}
+
+void Bbr2Sender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase /*phase*/,
+                                       QuicTime /*now*/) {}
 
 std::ostream& operator<<(std::ostream& os, const Bbr2Sender::DebugState& s) {
   os << "mode: " << s.mode << "\n";

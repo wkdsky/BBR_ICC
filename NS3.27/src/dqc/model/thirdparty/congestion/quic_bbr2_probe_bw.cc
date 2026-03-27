@@ -53,10 +53,22 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
 
   if (cycle_.phase == CyclePhase::PROBE_UP) {
     UpdateProbeUp(prior_in_flight, congestion_event);
+  } else if (cycle_.phase == CyclePhase::PROBE_PRE_UP) {
+    UpdateProbePreUp(congestion_event);
+  } else if (cycle_.phase == CyclePhase::PROBE_GUARD) {
+    UpdateProbeGuard(congestion_event);
+  } else if (cycle_.phase == CyclePhase::PROBE_POST_UP) {
+    UpdateProbePostUp(congestion_event);
   } else if (cycle_.phase == CyclePhase::PROBE_DOWN) {
     UpdateProbeDown(prior_in_flight, congestion_event);
     // Maybe transition to PROBE_RTT at the end of this cycle.
     if (cycle_.phase != CyclePhase::PROBE_DOWN &&
+        model_->MaybeExpireMinRtt(congestion_event)) {
+      switch_to_probe_rtt = true;
+    }
+  } else if (cycle_.phase == CyclePhase::PROBE_DOWN_SLIGHTLY) {
+    UpdateProbeDownSlightly(prior_in_flight, congestion_event);
+    if (cycle_.phase != CyclePhase::PROBE_DOWN_SLIGHTLY &&
         model_->MaybeExpireMinRtt(congestion_event)) {
       switch_to_probe_rtt = true;
     }
@@ -111,7 +123,10 @@ QuicLimits<QuicByteCount> Bbr2ProbeBwMode::GetCwndLimits() const {
 
 bool Bbr2ProbeBwMode::IsProbingForBandwidth() const {
   return cycle_.phase == CyclePhase::PROBE_REFILL ||
-         cycle_.phase == CyclePhase::PROBE_UP;
+         cycle_.phase == CyclePhase::PROBE_PRE_UP ||
+         cycle_.phase == CyclePhase::PROBE_GUARD ||
+         cycle_.phase == CyclePhase::PROBE_UP ||
+         cycle_.phase == CyclePhase::PROBE_POST_UP;
 }
 
 Bbr2Mode Bbr2ProbeBwMode::OnExitQuiescence(QuicTime now,
@@ -252,6 +267,10 @@ Bbr2ProbeBwMode::AdaptUpperBoundsResult Bbr2ProbeBwMode::MaybeAdaptUpperBounds(
 
 bool Bbr2ProbeBwMode::IsTimeToProbeBandwidth(
     const Bbr2CongestionEvent& congestion_event) const {
+  if (sender_->EnablePlusProbeBwPhases() && sender_->ShouldStartProbeOnRound()) {
+    return true;
+  }
+
   if (HasCycleLasted(cycle_.probe_wait_time, congestion_event)) {
     return true;
   }
@@ -382,6 +401,13 @@ void Bbr2ProbeBwMode::UpdateProbeCruise(
   MaybeAdaptUpperBounds(congestion_event);
   DCHECK(!cycle_.is_sample_from_probing);
 
+  if (congestion_event.end_of_round_trip &&
+      sender_->ShouldAdvanceMaxBandwidthFilterOnRoundStart(cycle_.phase)) {
+    model_->AdvanceMaxBandwidthFilter();
+    cycle_.has_advanced_max_bw = true;
+    sender_->OnMaxBandwidthFilterAdvanced(cycle_.phase);
+  }
+
   if (IsTimeToProbeBandwidth(congestion_event)) {
     EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
     return;
@@ -395,8 +421,38 @@ void Bbr2ProbeBwMode::UpdateProbeRefill(
   DCHECK(!cycle_.is_sample_from_probing);
 
   if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
-    EnterProbeUp(congestion_event.event_time);
+    if (sender_->EnablePlusProbeBwPhases()) {
+      EnterProbePreUp(congestion_event.event_time);
+    } else {
+      EnterProbeUp(congestion_event.event_time);
+    }
     return;
+  }
+}
+
+void Bbr2ProbeBwMode::UpdateProbePreUp(
+    const Bbr2CongestionEvent& congestion_event) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_PRE_UP);
+  MaybeAdaptUpperBounds(congestion_event);
+  DCHECK(!cycle_.is_sample_from_probing);
+
+  if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
+    EnterProbeGuard(congestion_event.event_time);
+  }
+}
+
+void Bbr2ProbeBwMode::UpdateProbeGuard(
+    const Bbr2CongestionEvent& congestion_event) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_GUARD);
+  MaybeAdaptUpperBounds(congestion_event);
+  DCHECK(!cycle_.is_sample_from_probing);
+
+  if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
+    if (sender_->ShouldEnterProbeUpFromGuard()) {
+      EnterProbeUp(congestion_event.event_time);
+    } else {
+      EnterProbeDownSlightly(congestion_event.event_time);
+    }
   }
 }
 
@@ -444,8 +500,31 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
   }
 
   if (is_risky || is_queuing) {
+    if (!is_risky && is_queuing && sender_->EnablePlusProbeBwPhases()) {
+      EnterProbePostUp(congestion_event.event_time);
+      return;
+    }
     EnterProbeDown(/*probed_too_high=*/false, /*stopped_risky_probe=*/is_risky,
                    congestion_event.event_time);
+  }
+}
+
+void Bbr2ProbeBwMode::UpdateProbePostUp(
+    const Bbr2CongestionEvent& congestion_event) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_POST_UP);
+  if (MaybeAdaptUpperBounds(congestion_event) == ADAPTED_PROBED_TOO_HIGH) {
+    EnterProbeDown(/*probed_too_high=*/true, /*stopped_risky_probe=*/false,
+                   congestion_event.event_time);
+    return;
+  }
+
+  if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
+    if (sender_->ShouldProbeAgainFromPostUp()) {
+      EnterProbeUp(congestion_event.event_time);
+    } else {
+      EnterProbeDown(/*probed_too_high=*/false, /*stopped_risky_probe=*/false,
+                     congestion_event.event_time);
+    }
   }
 }
 
@@ -479,6 +558,7 @@ void Bbr2ProbeBwMode::EnterProbeDown(bool probed_too_high,
   cycle_.probe_up_bytes = std::numeric_limits<QuicByteCount>::max();
   cycle_.has_advanced_max_bw = false;
   model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
 }
 
 void Bbr2ProbeBwMode::EnterProbeCruise(QuicTime now) {
@@ -495,6 +575,7 @@ void Bbr2ProbeBwMode::EnterProbeCruise(QuicTime now) {
   cycle_.rounds_in_phase = 0;
   cycle_.phase_start_time = now;
   cycle_.is_sample_from_probing = false;
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
 }
 
 void Bbr2ProbeBwMode::EnterProbeRefill(uint64_t probe_up_rounds, QuicTime now) {
@@ -518,10 +599,41 @@ void Bbr2ProbeBwMode::EnterProbeRefill(uint64_t probe_up_rounds, QuicTime now) {
   cycle_.probe_up_rounds = probe_up_rounds;
   cycle_.probe_up_acked = 0;
   model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
+}
+
+void Bbr2ProbeBwMode::EnterProbePreUp(QuicTime now) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_REFILL);
+  QUIC_DVLOG(2) << sender_ << " Phase change: " << cycle_.phase << " ==> "
+                << CyclePhase::PROBE_PRE_UP << " after "
+                << now - cycle_.phase_start_time << ", or "
+                << cycle_.rounds_in_phase << " rounds.  @ " << now;
+  cycle_.phase = CyclePhase::PROBE_PRE_UP;
+  cycle_.rounds_in_phase = 0;
+  cycle_.phase_start_time = now;
+  cycle_.is_sample_from_probing = false;
+  model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
+}
+
+void Bbr2ProbeBwMode::EnterProbeGuard(QuicTime now) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_PRE_UP);
+  QUIC_DVLOG(2) << sender_ << " Phase change: " << cycle_.phase << " ==> "
+                << CyclePhase::PROBE_GUARD << " after "
+                << now - cycle_.phase_start_time << ", or "
+                << cycle_.rounds_in_phase << " rounds.  @ " << now;
+  cycle_.phase = CyclePhase::PROBE_GUARD;
+  cycle_.rounds_in_phase = 0;
+  cycle_.phase_start_time = now;
+  cycle_.is_sample_from_probing = false;
+  model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
 }
 
 void Bbr2ProbeBwMode::EnterProbeUp(QuicTime now) {
-  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_REFILL);
+  DCHECK(cycle_.phase == CyclePhase::PROBE_REFILL ||
+         cycle_.phase == CyclePhase::PROBE_GUARD ||
+         cycle_.phase == CyclePhase::PROBE_POST_UP);
   QUIC_DVLOG(2) << sender_ << " Phase change: " << cycle_.phase << " ==> "
                 << CyclePhase::PROBE_UP << " after "
                 << now - cycle_.phase_start_time << ", or "
@@ -533,6 +645,72 @@ void Bbr2ProbeBwMode::EnterProbeUp(QuicTime now) {
   RaiseInflightHighSlope();
 
   model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
+}
+
+void Bbr2ProbeBwMode::EnterProbePostUp(QuicTime now) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_UP);
+  QUIC_DVLOG(2) << sender_ << " Phase change: " << cycle_.phase << " ==> "
+                << CyclePhase::PROBE_POST_UP << " after "
+                << now - cycle_.phase_start_time << ", or "
+                << cycle_.rounds_in_phase << " rounds.  @ " << now;
+  cycle_.phase = CyclePhase::PROBE_POST_UP;
+  cycle_.rounds_in_phase = 0;
+  cycle_.phase_start_time = now;
+  cycle_.is_sample_from_probing = true;
+  model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
+}
+
+void Bbr2ProbeBwMode::UpdateProbeDownSlightly(
+    QuicByteCount prior_in_flight,
+    const Bbr2CongestionEvent& congestion_event) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_DOWN_SLIGHTLY);
+
+  if (congestion_event.end_of_round_trip &&
+      sender_->ShouldAdvanceMaxBandwidthFilterOnRoundStart(cycle_.phase)) {
+    model_->AdvanceMaxBandwidthFilter();
+    cycle_.has_advanced_max_bw = true;
+    sender_->OnMaxBandwidthFilterAdvanced(cycle_.phase);
+  }
+
+  MaybeAdaptUpperBounds(congestion_event);
+
+  if (IsTimeToProbeBandwidth(congestion_event)) {
+    EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
+    return;
+  }
+
+  const QuicByteCount inflight_with_headroom =
+      model_->inflight_hi_with_headroom();
+  if (prior_in_flight > inflight_with_headroom) {
+    return;
+  }
+
+  QuicByteCount bdp = model_->BDP(model_->MaxBandwidth());
+  if (prior_in_flight < bdp || HasStayedLongEnoughInProbeDown(congestion_event)) {
+    EnterProbeCruise(congestion_event.event_time);
+  }
+}
+
+void Bbr2ProbeBwMode::EnterProbeDownSlightly(QuicTime now) {
+  DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_GUARD);
+  QUIC_DVLOG(2) << sender_ << " Phase change: " << cycle_.phase << " ==> "
+                << CyclePhase::PROBE_DOWN_SLIGHTLY << " after "
+                << now - cycle_.phase_start_time << ", or "
+                << cycle_.rounds_in_phase << " rounds.  @ " << now;
+  last_cycle_probed_too_high_ = false;
+  last_cycle_stopped_risky_probe_ = false;
+
+  cycle_.cycle_start_time = now;
+  cycle_.phase = CyclePhase::PROBE_DOWN_SLIGHTLY;
+  cycle_.rounds_in_phase = 0;
+  cycle_.phase_start_time = now;
+  cycle_.probe_up_bytes = std::numeric_limits<QuicByteCount>::max();
+  cycle_.has_advanced_max_bw = false;
+  cycle_.is_sample_from_probing = false;
+  model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
 }
 
 void Bbr2ProbeBwMode::ExitProbeDown() {
@@ -557,6 +735,14 @@ const char* Bbr2ProbeBwMode::CyclePhaseToString(CyclePhase phase) {
       return "PROBE_CRUISE";
     case CyclePhase::PROBE_REFILL:
       return "PROBE_REFILL";
+    case CyclePhase::PROBE_PRE_UP:
+      return "PROBE_PRE_UP";
+    case CyclePhase::PROBE_GUARD:
+      return "PROBE_GUARD";
+    case CyclePhase::PROBE_POST_UP:
+      return "PROBE_POST_UP";
+    case CyclePhase::PROBE_DOWN_SLIGHTLY:
+      return "PROBE_DOWN_SLIGHTLY";
     default:
       break;
   }
@@ -596,7 +782,8 @@ float Bbr2ProbeBwMode::PacingGainForPhase(
   if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN) {
     return Params().probe_bw_probe_down_pacing_gain;
   }
-  return Params().probe_bw_default_pacing_gain;
+  return sender_->GetProbeBwPacingGain(phase,
+                                       Params().probe_bw_default_pacing_gain);
 }
 
 }  // namespace quic

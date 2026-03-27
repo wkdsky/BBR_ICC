@@ -179,6 +179,19 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // Helper functions for subclasses
   QuicByteCount GetTargetCongestionWindow(float gain) const;
   const QuicLimits<QuicByteCount>& cwnd_limits() const;
+  virtual void OnCongestionEventStarted(
+      const Bbr2CongestionEvent& congestion_event);
+  virtual bool EnablePlusProbeBwPhases() const;
+  virtual bool ShouldStartProbeOnRound() const;
+  virtual bool ShouldAdvanceMaxBandwidthFilterOnRoundStart(
+      Bbr2ProbeBwMode::CyclePhase phase) const;
+  virtual void OnMaxBandwidthFilterAdvanced(Bbr2ProbeBwMode::CyclePhase phase);
+  virtual bool ShouldEnterProbeUpFromGuard() const;
+  virtual bool ShouldProbeAgainFromPostUp() const;
+  virtual float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
+                                     float pacing_gain) const;
+  virtual void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
+                                     QuicTime now);
 
  private:
   void UpdatePacingRate(QuicByteCount bytes_acked);

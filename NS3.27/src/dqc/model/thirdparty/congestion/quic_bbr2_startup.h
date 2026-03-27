@@ -16,7 +16,7 @@ namespace dqc {
 class Bbr2Sender;
 class QUIC_EXPORT_PRIVATE Bbr2StartupMode final : public Bbr2ModeBase {
  public:
-  Bbr2StartupMode(const Bbr2Sender* sender,
+  Bbr2StartupMode(Bbr2Sender* sender,
                   Bbr2NetworkModel* model,
                   QuicTime now);
 

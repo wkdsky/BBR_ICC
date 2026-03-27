@@ -103,6 +103,7 @@ private:
     uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
     void EnsureAckTraceHooked();
+    void EnsureRttTraceHooked();
     void OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
                             uint32_t acked_pkts,dqc::PacketNumber largest_acked,
                             uint32_t ack_delay_ms,uint32_t rtt_ms);
@@ -156,6 +157,7 @@ private:
     TraceAckEpisode m_traceAckEpisodeCb;
     bool m_lossTraceHooked{false};
     bool m_ackTraceHooked{false};
+    bool m_rttTraceHooked{false};
     struct LossWindowStats{
         uint64_t sent_bytes{0};
         uint64_t acked_bytes{0};

@@ -28,23 +28,13 @@ class QUIC_EXPORT_PRIVATE Bbr2PlusSender final : public Bbr2Sender {
     return enable_ecn_ ? kBBRv2PlusEcn : kBBRv2Plus;
   }
 
-  void OnPacketSent(QuicTime sent_time,
-                    QuicByteCount bytes_in_flight,
-                    QuicPacketNumber packet_number,
-                    QuicByteCount bytes,
-                    HasRetransmittableData is_retransmittable) override;
-
   void OnCongestionEvent(bool rtt_updated,
                          QuicByteCount prior_in_flight,
                          QuicTime event_time,
                          const AckedPacketVector& acked_packets,
                          const LostPacketVector& lost_packets) override;
 
-  QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
-
   QuicByteCount GetCongestionWindow() const override;
-
-  int32_t GetCurrentBbrModeIndex() const override;
 
  private:
   using MinRttWindow =
@@ -58,46 +48,46 @@ class QUIC_EXPORT_PRIVATE Bbr2PlusSender final : public Bbr2Sender {
                      QuicRoundTripCount,
                      QuicRoundTripCount>;
 
-  enum class ProbeExtensionState : uint8_t {
-    kInactive,
-    kPreUp,
-    kGuard,
-    kDownSlightly,
-    kPostUp,
-  };
-
   Bbr2ProbeBwMode::CyclePhase GetCurrentProbeBwPhase() const;
   void UpdateLatestRttSample();
-  void AdvanceRoundIfNeeded(QuicRoundTripCount previous_round);
-  void OnRoundStart();
-  void OnProbePhaseChange(Bbr2ProbeBwMode::CyclePhase previous_phase,
-                          Bbr2ProbeBwMode::CyclePhase current_phase,
-                          QuicTime event_time);
+  void OnRoundStart(const Bbr2CongestionEvent& congestion_event);
   bool ShouldAdvanceBandwidthFilter() const;
   bool ShouldEnterAggressiveProbe() const;
-  QuicBandwidth RateFromGain(float gain) const;
+  bool ShouldProbeAgain() const;
+  void PickProbeWaitRounds();
   QuicByteCount GetRttCompensationBytes() const;
-  void ResetProbeExtensionState();
+  void ResetProbeCycleState();
+
+  void OnCongestionEventStarted(
+      const Bbr2CongestionEvent& congestion_event) override;
+  bool EnablePlusProbeBwPhases() const override;
+  bool ShouldStartProbeOnRound() const override;
+  bool ShouldAdvanceMaxBandwidthFilterOnRoundStart(
+      Bbr2ProbeBwMode::CyclePhase phase) const override;
+  void OnMaxBandwidthFilterAdvanced(Bbr2ProbeBwMode::CyclePhase phase) override;
+  bool ShouldEnterProbeUpFromGuard() const override;
+  bool ShouldProbeAgainFromPostUp() const override;
+  float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
+                             float pacing_gain) const override;
+  void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
+                             QuicTime now) override;
 
   const bool enable_ecn_;
 
-  // RTT-aware state borrowed from Linux BBRv2plus.
+  // RTT-aware plus state adapted to the DQC BBRv2 host implementation.
   MinRttWindow rc_min_rtt_filter_;
   MaxJitterWindow max_jitter_filter_;
-  QuicRoundTripCount last_round_count_;
-  TimeDelta ever_measured_min_rtt_;
+  TimeDelta prior_round_srtt_;
   TimeDelta last_round_srtt_;
   TimeDelta curr_round_srtt_;
+  TimeDelta prior_round_min_rtt_;
   TimeDelta last_round_min_rtt_;
   TimeDelta curr_round_min_rtt_;
-  TimeDelta min_rtt_in_cruise_;
-  TimeDelta last_min_rtt_in_cruise_;
   TimeDelta min_rtt_before_probe_;
-  QuicTime current_time_;
-  QuicTime probe_phase_start_time_;
-
-  ProbeExtensionState probe_extension_state_;
+  TimeDelta probe_up_min_rtt_;
+  mutable uint32_t probe_again_count_in_cycle_;
   int rounds_since_last_bw_advance_;
+  int probe_wait_rounds_;
 
   // Parameter surface kept close to the Linux BBRv2plus defaults.
   uint32_t rc_min_rtt_win_rounds_;
@@ -108,7 +98,11 @@ class QUIC_EXPORT_PRIVATE Bbr2PlusSender final : public Bbr2Sender {
   float fast_conv_rtt_thresh_;
   float fast_conv_preup_thresh_;
   TimeDelta fast_conv_rtt_error_;
+  float fast_conv_probe_again_thresh_;
+  uint32_t fast_conv_probe_cycle_base_;
+  uint32_t fast_conv_probe_cycle_random_;
   uint32_t fast_conv_rounds_to_advance_bw_filter_;
+  uint32_t max_probe_again_per_cycle_;
   float pre_up_pacing_gain_;
   float down_slightly_pacing_gain_;
   bool rtt_compensation_enabled_;

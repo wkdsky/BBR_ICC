@@ -537,7 +537,7 @@ QUIC_EXPORT_PRIVATE inline std::ostream& operator<<(std::ostream& os,
 class Bbr2Sender;
 class QUIC_EXPORT_PRIVATE Bbr2ModeBase {
  public:
-  Bbr2ModeBase(const Bbr2Sender* sender, Bbr2NetworkModel* model)
+  Bbr2ModeBase(Bbr2Sender* sender, Bbr2NetworkModel* model)
       : sender_(sender), model_(model) {}
 
   virtual ~Bbr2ModeBase() = default;
@@ -565,7 +565,7 @@ class QUIC_EXPORT_PRIVATE Bbr2ModeBase {
                                     QuicTime quiescence_start_time) = 0;
 
  protected:
-  const Bbr2Sender* const sender_;
+  Bbr2Sender* const sender_;
   Bbr2NetworkModel* model_;
 };
 

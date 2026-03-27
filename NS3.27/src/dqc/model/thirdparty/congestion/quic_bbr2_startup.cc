@@ -8,7 +8,7 @@
 #include "quic_logging.h"
 namespace dqc {
 
-Bbr2StartupMode::Bbr2StartupMode(const Bbr2Sender* sender,
+Bbr2StartupMode::Bbr2StartupMode(Bbr2Sender* sender,
                                  Bbr2NetworkModel* model,
                                  QuicTime now)
     : Bbr2ModeBase(sender, model),

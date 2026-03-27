@@ -13,6 +13,7 @@ using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t,PacketLength
 using TracePacketSent=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
 using TracePacketAcked=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
 using TraceAckEvent=std::function<void(ProtoTime,uint64_t,uint32_t,PacketNumber,uint32_t,uint32_t)>;
+using TraceRtt=std::function<void(PacketNumber,uint32_t,uint32_t)>;
 class SendPacketManager{
 public:
     SendPacketManager(ProtoClock *clock,QuicConnectionStats* stats,StreamAckedObserver *acked_observer);
@@ -80,6 +81,7 @@ public:
     void SetTracePacketSent(TracePacketSent cb){trace_sent_=std::move(cb);}
     void SetTracePacketAcked(TracePacketAcked cb){trace_acked_=std::move(cb);}
     void SetTraceAckEvent(TraceAckEvent cb){trace_ack_event_=std::move(cb);}
+    void SetTraceRtt(TraceRtt cb){trace_rtt_=std::move(cb);}
     std::pair<PacketNumber,TimeDelta> GetOneWayDelayInfo() { return one_way_delay_;}
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
@@ -120,6 +122,7 @@ private:
     TracePacketSent trace_sent_;
     TracePacketAcked trace_acked_;
     TraceAckEvent trace_ack_event_;
+    TraceRtt trace_rtt_;
     TimeDelta last_ack_delay_{TimeDelta::Zero()};
     ProtoTime sent_time_{ProtoTime::Zero()};
     ProtoTime recv_time_{ProtoTime::Zero()};

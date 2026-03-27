@@ -1,8 +1,6 @@
 #include "quic_bbr2plus_sender.h"
 
 #include <algorithm>
-#include <limits>
-
 #include "quic_bbr2_probe_bw.h"
 #include "quic_logging.h"
 
@@ -18,7 +16,11 @@ constexpr uint32_t kDefaultRttCompJitterWindowRounds = 4;
 constexpr float kDefaultFastConvRttThresh = 1.1f;
 constexpr float kDefaultFastConvPreUpThresh = 0.02f;
 constexpr int64_t kDefaultFastConvRttErrorUs = 2000;
+constexpr float kDefaultFastConvProbeAgainThresh = 0.02f;
+constexpr uint32_t kDefaultFastConvProbeCycleBase = 8;
+constexpr uint32_t kDefaultFastConvProbeCycleRandom = 4;
 constexpr uint32_t kDefaultFastConvRoundsToAdvanceBwFilter = 25;
+constexpr uint32_t kDefaultMaxProbeAgainPerCycle = 1;
 constexpr float kDefaultPreUpGain = 1.10f;
 constexpr float kDefaultDownSlightlyGain = 0.90f;
 
@@ -51,19 +53,17 @@ Bbr2PlusSender::Bbr2PlusSender(QuicTime now,
       enable_ecn_(enable_ecn),
       rc_min_rtt_filter_(kDefaultRcMinRttWindowRounds, InfiniteDelta(), 0),
       max_jitter_filter_(kDefaultRttCompJitterWindowRounds, TimeDelta::Zero(), 0),
-      last_round_count_(model_.RoundTripCount()),
-      ever_measured_min_rtt_(InfiniteDelta()),
+      prior_round_srtt_(TimeDelta::Zero()),
       last_round_srtt_(TimeDelta::Zero()),
       curr_round_srtt_(TimeDelta::Zero()),
+      prior_round_min_rtt_(InfiniteDelta()),
       last_round_min_rtt_(InfiniteDelta()),
       curr_round_min_rtt_(InfiniteDelta()),
-      min_rtt_in_cruise_(InfiniteDelta()),
-      last_min_rtt_in_cruise_(InfiniteDelta()),
       min_rtt_before_probe_(InfiniteDelta()),
-      current_time_(now),
-      probe_phase_start_time_(QuicTime::Zero()),
-      probe_extension_state_(ProbeExtensionState::kInactive),
+      probe_up_min_rtt_(InfiniteDelta()),
+      probe_again_count_in_cycle_(0),
       rounds_since_last_bw_advance_(0),
+      probe_wait_rounds_(0),
       rc_min_rtt_win_rounds_(kDefaultRcMinRttWindowRounds),
       rtt_comp_startup_gain_(kDefaultRttCompStartupGain),
       rtt_comp_gain_(kDefaultRttCompGain),
@@ -72,8 +72,12 @@ Bbr2PlusSender::Bbr2PlusSender(QuicTime now,
       fast_conv_rtt_thresh_(kDefaultFastConvRttThresh),
       fast_conv_preup_thresh_(kDefaultFastConvPreUpThresh),
       fast_conv_rtt_error_(TimeDelta::FromMicroseconds(kDefaultFastConvRttErrorUs)),
+      fast_conv_probe_again_thresh_(kDefaultFastConvProbeAgainThresh),
+      fast_conv_probe_cycle_base_(kDefaultFastConvProbeCycleBase),
+      fast_conv_probe_cycle_random_(kDefaultFastConvProbeCycleRandom),
       fast_conv_rounds_to_advance_bw_filter_(
           kDefaultFastConvRoundsToAdvanceBwFilter),
+      max_probe_again_per_cycle_(kDefaultMaxProbeAgainPerCycle),
       pre_up_pacing_gain_(kDefaultPreUpGain),
       down_slightly_pacing_gain_(kDefaultDownSlightlyGain),
       rtt_compensation_enabled_(true),
@@ -82,81 +86,18 @@ Bbr2PlusSender::Bbr2PlusSender(QuicTime now,
   QUIC_DVLOG(2) << this << " Initializing Bbr2PlusSender @ " << now;
 }
 
-void Bbr2PlusSender::OnPacketSent(QuicTime sent_time,
-                                  QuicByteCount bytes_in_flight,
-                                  QuicPacketNumber packet_number,
-                                  QuicByteCount bytes,
-                                  HasRetransmittableData is_retransmittable) {
-  current_time_ = sent_time;
-  Bbr2Sender::OnPacketSent(sent_time, bytes_in_flight, packet_number, bytes,
-                           is_retransmittable);
-}
-
 void Bbr2PlusSender::OnCongestionEvent(bool rtt_updated,
                                        QuicByteCount prior_in_flight,
                                        QuicTime event_time,
                                        const AckedPacketVector& acked_packets,
                                        const LostPacketVector& lost_packets) {
-  current_time_ = event_time;
-  const QuicRoundTripCount previous_round = model_.RoundTripCount();
-  const Bbr2ProbeBwMode::CyclePhase previous_phase = GetCurrentProbeBwPhase();
-
   UpdateLatestRttSample();
   Bbr2Sender::OnCongestionEvent(rtt_updated, prior_in_flight, event_time,
                                 acked_packets, lost_packets);
-  AdvanceRoundIfNeeded(previous_round);
-
-  const Bbr2ProbeBwMode::CyclePhase current_phase = GetCurrentProbeBwPhase();
-  OnProbePhaseChange(previous_phase, current_phase, event_time);
-}
-
-QuicBandwidth Bbr2PlusSender::PacingRate(QuicByteCount bytes_in_flight) const {
-  const QuicBandwidth base_rate = Bbr2Sender::PacingRate(bytes_in_flight);
-  if (mode_ != Bbr2Mode::PROBE_BW) {
-    return base_rate;
-  }
-
-  if (GetCurrentProbeBwPhase() != Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
-    return base_rate;
-  }
-
-  switch (probe_extension_state_) {
-    case ProbeExtensionState::kPreUp:
-      return RateFromGain(pre_up_pacing_gain_);
-    case ProbeExtensionState::kGuard:
-      return RateFromGain(1.0f);
-    case ProbeExtensionState::kDownSlightly:
-      return RateFromGain(down_slightly_pacing_gain_);
-    case ProbeExtensionState::kPostUp:
-      return RateFromGain(1.0f);
-    case ProbeExtensionState::kInactive:
-    default:
-      return base_rate;
-  }
 }
 
 QuicByteCount Bbr2PlusSender::GetCongestionWindow() const {
   return Bbr2Sender::GetCongestionWindow() + GetRttCompensationBytes();
-}
-
-int32_t Bbr2PlusSender::GetCurrentBbrModeIndex() const {
-  if (mode_ == Bbr2Mode::PROBE_BW &&
-      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
-    switch (probe_extension_state_) {
-      case ProbeExtensionState::kPreUp:
-        return 7;
-      case ProbeExtensionState::kGuard:
-        return 8;
-      case ProbeExtensionState::kPostUp:
-        return 9;
-      case ProbeExtensionState::kDownSlightly:
-        return 10;
-      case ProbeExtensionState::kInactive:
-      default:
-        break;
-    }
-  }
-  return Bbr2Sender::GetCurrentBbrModeIndex();
 }
 
 Bbr2ProbeBwMode::CyclePhase Bbr2PlusSender::GetCurrentProbeBwPhase() const {
@@ -176,10 +117,6 @@ void Bbr2PlusSender::UpdateLatestRttSample() {
     return;
   }
 
-  if (ever_measured_min_rtt_.IsInfinite() || latest_rtt < ever_measured_min_rtt_) {
-    ever_measured_min_rtt_ = latest_rtt;
-  }
-
   if (curr_round_min_rtt_.IsInfinite() || latest_rtt < curr_round_min_rtt_) {
     curr_round_min_rtt_ = latest_rtt;
   }
@@ -194,105 +131,57 @@ void Bbr2PlusSender::UpdateLatestRttSample() {
   }
 
   if (mode_ == Bbr2Mode::PROBE_BW &&
-      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
-    if (min_rtt_in_cruise_.IsInfinite() || latest_rtt < min_rtt_in_cruise_) {
-      min_rtt_in_cruise_ = latest_rtt;
+      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
+    if (probe_up_min_rtt_.IsInfinite() || latest_rtt < probe_up_min_rtt_) {
+      probe_up_min_rtt_ = latest_rtt;
     }
   }
 }
 
-void Bbr2PlusSender::AdvanceRoundIfNeeded(QuicRoundTripCount previous_round) {
-  const QuicRoundTripCount current_round = model_.RoundTripCount();
-  if (current_round == previous_round) {
+void Bbr2PlusSender::OnCongestionEventStarted(
+    const Bbr2CongestionEvent& congestion_event) {
+  if (!congestion_event.sample_max_bandwidth.IsZero() &&
+      congestion_event.sample_max_bandwidth >= model_.MaxBandwidth()) {
+    rounds_since_last_bw_advance_ = 0;
+  }
+
+  if (!congestion_event.end_of_round_trip) {
     return;
   }
-  last_round_count_ = current_round;
-  OnRoundStart();
+  OnRoundStart(congestion_event);
 }
 
-void Bbr2PlusSender::OnRoundStart() {
+void Bbr2PlusSender::OnRoundStart(
+    const Bbr2CongestionEvent& congestion_event) {
   ++rounds_since_last_bw_advance_;
+  if (mode_ == Bbr2Mode::PROBE_BW) {
+    Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
+    if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
+      --probe_wait_rounds_;
+    }
+  }
 
   if (!curr_round_min_rtt_.IsInfinite()) {
     rc_min_rtt_filter_.SetWindowLength(rc_min_rtt_win_rounds_);
-    rc_min_rtt_filter_.Update(curr_round_min_rtt_, last_round_count_);
+    rc_min_rtt_filter_.Update(curr_round_min_rtt_, model_.RoundTripCount());
+    prior_round_min_rtt_ = last_round_min_rtt_;
     last_round_min_rtt_ = curr_round_min_rtt_;
   }
   if (!curr_round_srtt_.IsZero()) {
+    prior_round_srtt_ = last_round_srtt_;
     last_round_srtt_ = curr_round_srtt_;
   }
 
   if (rtt_stats_ != nullptr && !rtt_stats_->mean_deviation().IsZero()) {
     max_jitter_filter_.SetWindowLength(rtt_comp_jitter_win_rounds_);
-    max_jitter_filter_.Update(rtt_stats_->mean_deviation(), last_round_count_);
-  }
-
-  if (mode_ == Bbr2Mode::PROBE_BW &&
-      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
-      !min_rtt_in_cruise_.IsInfinite()) {
-    last_min_rtt_in_cruise_ = min_rtt_in_cruise_;
-    min_rtt_in_cruise_ = InfiniteDelta();
+    max_jitter_filter_.Update(rtt_stats_->mean_deviation(),
+                              model_.RoundTripCount());
   }
 
   curr_round_min_rtt_ = InfiniteDelta();
   curr_round_srtt_ = TimeDelta::Zero();
-  UpdateLatestRttSample();
-
-  if (fast_convergence_enabled_ && ShouldAdvanceBandwidthFilter()) {
-    model_.AdvanceMaxBandwidthFilter();
-    rounds_since_last_bw_advance_ = 0;
-  }
-
-  if (GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
-    switch (probe_extension_state_) {
-      case ProbeExtensionState::kPreUp:
-        probe_extension_state_ = ProbeExtensionState::kGuard;
-        break;
-      case ProbeExtensionState::kGuard:
-        probe_extension_state_ = ShouldEnterAggressiveProbe()
-                                     ? ProbeExtensionState::kInactive
-                                     : ProbeExtensionState::kDownSlightly;
-        break;
-      case ProbeExtensionState::kDownSlightly:
-        probe_extension_state_ = ProbeExtensionState::kPostUp;
-        break;
-      case ProbeExtensionState::kPostUp:
-        probe_extension_state_ = ProbeExtensionState::kInactive;
-        break;
-      case ProbeExtensionState::kInactive:
-      default:
-        break;
-    }
-  }
-}
-
-void Bbr2PlusSender::OnProbePhaseChange(
-    Bbr2ProbeBwMode::CyclePhase previous_phase,
-    Bbr2ProbeBwMode::CyclePhase current_phase,
-    QuicTime event_time) {
-  if (mode_ != Bbr2Mode::PROBE_BW) {
-    ResetProbeExtensionState();
-    return;
-  }
-
-  if (current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
-      previous_phase != current_phase) {
-    min_rtt_in_cruise_ = InfiniteDelta();
-  }
-
-  if (current_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP &&
-      previous_phase != current_phase) {
-    min_rtt_before_probe_ = ZeroOr(last_round_min_rtt_, model_.MinRtt());
-    probe_phase_start_time_ = event_time;
-    probe_extension_state_ = fast_convergence_enabled_
-                                 ? ProbeExtensionState::kPreUp
-                                 : ProbeExtensionState::kInactive;
-    return;
-  }
-
-  if (previous_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP &&
-      current_phase != previous_phase) {
-    ResetProbeExtensionState();
+  if (congestion_event.bytes_acked > 0 || congestion_event.bytes_lost > 0) {
+    UpdateLatestRttSample();
   }
 }
 
@@ -310,7 +199,7 @@ bool Bbr2PlusSender::ShouldAdvanceBandwidthFilter() const {
     return true;
   }
 
-  if (curr_round_min_rtt_.IsInfinite()) {
+  if (last_round_min_rtt_.IsInfinite()) {
     return false;
   }
   const TimeDelta reference =
@@ -319,16 +208,16 @@ bool Bbr2PlusSender::ShouldAdvanceBandwidthFilter() const {
   if (reference.IsZero() || reference.IsInfinite()) {
     return false;
   }
-  return curr_round_min_rtt_ > reference * fast_conv_rtt_thresh_;
+  return last_round_min_rtt_ > reference * fast_conv_rtt_thresh_;
 }
 
 bool Bbr2PlusSender::ShouldEnterAggressiveProbe() const {
   const TimeDelta baseline = copa_style_
-                                 ? ZeroOr(last_round_min_rtt_, model_.MinRtt())
-                                 : ZeroOr(last_round_srtt_, model_.MinRtt());
+                                 ? ZeroOr(prior_round_min_rtt_, model_.MinRtt())
+                                 : ZeroOr(prior_round_srtt_, model_.MinRtt());
   const TimeDelta candidate = copa_style_
-                                  ? ZeroOr(curr_round_min_rtt_, model_.MinRtt())
-                                  : ZeroOr(curr_round_srtt_, model_.MinRtt());
+                                  ? ZeroOr(last_round_min_rtt_, model_.MinRtt())
+                                  : ZeroOr(last_round_srtt_, model_.MinRtt());
   if (baseline.IsZero() || baseline.IsInfinite() || candidate.IsZero() ||
       candidate.IsInfinite()) {
     return true;
@@ -340,11 +229,37 @@ bool Bbr2PlusSender::ShouldEnterAggressiveProbe() const {
   return candidate <= baseline + allowance;
 }
 
-QuicBandwidth Bbr2PlusSender::RateFromGain(float gain) const {
-  if (BandwidthEstimate().IsZero()) {
-    return Bbr2Sender::PacingRate(0);
+bool Bbr2PlusSender::ShouldProbeAgain() const {
+  if (probe_again_count_in_cycle_ >= max_probe_again_per_cycle_) {
+    return false;
   }
-  return gain * BandwidthEstimate();
+
+  const TimeDelta baseline = ZeroOr(min_rtt_before_probe_, model_.MinRtt());
+  const TimeDelta candidate = ZeroOr(probe_up_min_rtt_, model_.MinRtt());
+  if (baseline.IsZero() || baseline.IsInfinite() || candidate.IsZero() ||
+      candidate.IsInfinite()) {
+    return false;
+  }
+
+  TimeDelta allowance = baseline * fast_conv_probe_again_thresh_;
+  if (allowance > fast_conv_rtt_error_) {
+    allowance = fast_conv_rtt_error_;
+  }
+  if (candidate > baseline + allowance) {
+    return false;
+  }
+
+  ++probe_again_count_in_cycle_;
+  return true;
+}
+
+void Bbr2PlusSender::PickProbeWaitRounds() {
+  probe_wait_rounds_ = static_cast<int>(fast_conv_probe_cycle_base_);
+  if (fast_conv_probe_cycle_random_ == 0 || random_ == nullptr) {
+    return;
+  }
+  probe_wait_rounds_ +=
+      static_cast<int>(random_->nextInt() % fast_conv_probe_cycle_random_);
 }
 
 QuicByteCount Bbr2PlusSender::GetRttCompensationBytes() const {
@@ -374,9 +289,80 @@ QuicByteCount Bbr2PlusSender::GetRttCompensationBytes() const {
   return bw * (jitter * gain);
 }
 
-void Bbr2PlusSender::ResetProbeExtensionState() {
-  probe_extension_state_ = ProbeExtensionState::kInactive;
-  probe_phase_start_time_ = QuicTime::Zero();
+void Bbr2PlusSender::ResetProbeCycleState() {
+  min_rtt_before_probe_ = InfiniteDelta();
+  probe_up_min_rtt_ = InfiniteDelta();
+  probe_again_count_in_cycle_ = 0;
+}
+
+bool Bbr2PlusSender::EnablePlusProbeBwPhases() const {
+  return fast_convergence_enabled_;
+}
+
+bool Bbr2PlusSender::ShouldStartProbeOnRound() const {
+  return fast_convergence_enabled_ && probe_wait_rounds_ <= 0;
+}
+
+bool Bbr2PlusSender::ShouldAdvanceMaxBandwidthFilterOnRoundStart(
+    Bbr2ProbeBwMode::CyclePhase phase) const {
+  if (!fast_convergence_enabled_) {
+    return false;
+  }
+  if (phase != Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
+      phase != Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY) {
+    return false;
+  }
+  return ShouldAdvanceBandwidthFilter();
+}
+
+void Bbr2PlusSender::OnMaxBandwidthFilterAdvanced(
+    Bbr2ProbeBwMode::CyclePhase /*phase*/) {
+  rounds_since_last_bw_advance_ = 0;
+}
+
+bool Bbr2PlusSender::ShouldEnterProbeUpFromGuard() const {
+  return ShouldEnterAggressiveProbe();
+}
+
+bool Bbr2PlusSender::ShouldProbeAgainFromPostUp() const {
+  return ShouldProbeAgain();
+}
+
+float Bbr2PlusSender::GetProbeBwPacingGain(
+    Bbr2ProbeBwMode::CyclePhase phase,
+    float pacing_gain) const {
+  switch (phase) {
+    case Bbr2ProbeBwMode::CyclePhase::PROBE_PRE_UP:
+      return pre_up_pacing_gain_;
+    case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY:
+      return down_slightly_pacing_gain_;
+    case Bbr2ProbeBwMode::CyclePhase::PROBE_GUARD:
+    case Bbr2ProbeBwMode::CyclePhase::PROBE_POST_UP:
+      return 1.0f;
+    default:
+      return pacing_gain;
+  }
+}
+
+void Bbr2PlusSender::OnProbeBwPhaseEntered(
+    Bbr2ProbeBwMode::CyclePhase phase,
+    QuicTime /*now*/) {
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN ||
+      phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY) {
+    PickProbeWaitRounds();
+  }
+
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
+    min_rtt_before_probe_ = ZeroOr(last_round_min_rtt_, model_.MinRtt());
+    probe_up_min_rtt_ = InfiniteDelta();
+    return;
+  }
+
+  if (phase != Bbr2ProbeBwMode::CyclePhase::PROBE_GUARD &&
+      phase != Bbr2ProbeBwMode::CyclePhase::PROBE_UP &&
+      phase != Bbr2ProbeBwMode::CyclePhase::PROBE_POST_UP) {
+    ResetProbeCycleState();
+  }
 }
 
 }  // namespace dqc
