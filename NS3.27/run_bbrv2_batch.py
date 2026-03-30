@@ -15,6 +15,7 @@ import subprocess
 import argparse
 import json
 import re
+import shutil
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -36,7 +37,17 @@ class BBRv2BatchRunner:
         self.scratch_dir = self.ns3_dir / "scratch"
         self.build_dir = self.ns3_dir / "build"
         self.traces_dir = self.ns3_dir / "traces"
+        self.waf_header_dir = self.build_dir / "ns3"
         self.results = defaultdict(list)
+
+    @staticmethod
+    def resolve_probe_rtt(probe_rtt):
+        value = str(probe_rtt).strip().lower()
+        if value in {"on", "true", "1", "yes", "enable", "enabled"}:
+            return True
+        if value in {"off", "false", "0", "no", "disable", "disabled"}:
+            return False
+        raise ValueError(f"Invalid probeRTT value: {probe_rtt}")
 
     def print_header(self, title):
         """Print a formatted header"""
@@ -108,6 +119,21 @@ class BBRv2BatchRunner:
 
         return True
 
+    def sync_waf_exported_headers(self):
+        self.waf_header_dir.mkdir(parents=True, exist_ok=True)
+        headers = [
+            self.ns3_dir / "src/dqc/model/thirdparty/include/proto_types.h",
+            self.ns3_dir / "src/dqc/model/thirdparty/congestion/quic_bbr2_sender.h",
+        ]
+
+        for src in headers:
+            dst = self.waf_header_dir / src.name
+            if not dst.exists() or src.read_bytes() != dst.read_bytes():
+                if dst.exists():
+                    dst.chmod(0o644)
+                shutil.copy2(src, dst)
+                dst.chmod(0o644)
+
     def build_script(self, num_flows, force=False):
         """Build a specific script"""
         script_name = f"{num_flows}_bbrv2"
@@ -121,6 +147,7 @@ class BBRv2BatchRunner:
 
         try:
             os.chdir(self.ns3_dir)
+            self.sync_waf_exported_headers()
             result = subprocess.run(
                 [f"./waf", "build", f"--targets={script_name}"],
                 stdout=subprocess.PIPE,
@@ -138,9 +165,11 @@ class BBRv2BatchRunner:
             self.print_error(f"Build error: {e}")
             return False
 
-    def run_test(self, num_flows, sender_bw, bottle_bw, bottle_delay, sim_time):
+    def run_test(self, num_flows, sender_bw, bottle_bw, bottle_delay, sim_time, probe_rtt):
         """Run a single test"""
-        test_name = f"{num_flows}flows_{sender_bw}mbps_{bottle_bw}mbps_{bottle_delay}ms"
+        cc_name = "bbrv2" if probe_rtt else "bbrv2_noprobe_rtt"
+        probe_tag = "probeRTTon" if probe_rtt else "probeRTToff"
+        test_name = f"{num_flows}flows_{sender_bw}mbps_{bottle_bw}mbps_{bottle_delay}ms_{probe_tag}"
 
         # Update script
         if not self.update_script_params(num_flows, sender_bw, bottle_bw, bottle_delay):
@@ -151,14 +180,14 @@ class BBRv2BatchRunner:
             return False
 
         # Run
-        self.print_header(f"Running: {test_name} (SIM_TIME={sim_time}s)")
+        self.print_header(f"Running: {test_name} (SIM_TIME={sim_time}s, CC={cc_name})")
 
         try:
             os.chdir(self.ns3_dir)
             start_time = datetime.now()
 
             result = subprocess.run(
-                ["./waf", "--run", f"{num_flows}_bbrv2 --sim_time={sim_time}"],
+                ["./waf", "--run", f"{num_flows}_bbrv2 --sim_time={sim_time} --cc={cc_name}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=600,
@@ -175,7 +204,7 @@ class BBRv2BatchRunner:
             if result.returncode == 0:
                 self.print_success(f"Test completed in {duration:.1f}s")
                 self.results[num_flows].append({
-                    'config': f"{sender_bw}Mbps_{bottle_bw}Mbps_{bottle_delay}ms",
+                    'config': f"{sender_bw}Mbps_{bottle_bw}Mbps_{bottle_delay}ms_{probe_tag}",
                     'duration': duration,
                     'status': 'success',
                     'log': str(log_file)
@@ -184,7 +213,7 @@ class BBRv2BatchRunner:
             else:
                 self.print_error(f"Test failed")
                 self.results[num_flows].append({
-                    'config': f"{sender_bw}Mbps_{bottle_bw}Mbps_{bottle_delay}ms",
+                    'config': f"{sender_bw}Mbps_{bottle_bw}Mbps_{bottle_delay}ms_{probe_tag}",
                     'duration': duration,
                     'status': 'failed',
                     'log': str(log_file)
@@ -264,6 +293,8 @@ Examples:
                         help='Bottleneck delay in ms (default: 28)')
     parser.add_argument('--sim-time', type=int, default=30,
                         help='Simulation duration in seconds (default: 30)')
+    parser.add_argument('--probe-rtt', type=str, default='on',
+                        help='Enable ProbeRTT: on/off (default: on)')
     parser.add_argument('--config', type=str,
                         help='Load configuration from JSON file')
 
@@ -287,10 +318,19 @@ Examples:
                 args.bottle_bw = config.get('bottle_bw', args.bottle_bw)
                 args.bottle_delay = config.get('bottle_delay', args.bottle_delay)
                 args.sim_time = config.get('sim_time', args.sim_time)
+                args.probe_rtt = config.get('probe_rtt', args.probe_rtt)
                 runner.print_info(f"Loaded configuration from {args.config}")
         except Exception as e:
             print(f"{Colors.RED}Error loading config: {e}{Colors.END}")
             sys.exit(1)
+
+    try:
+        probe_rtt = runner.resolve_probe_rtt(args.probe_rtt)
+    except ValueError as e:
+        print(f"{Colors.RED}{e}{Colors.END}")
+        sys.exit(1)
+
+    cc_name = "bbrv2" if probe_rtt else "bbrv2_noprobe_rtt"
 
     # Default bottleneck bandwidth
     default_bottle_bw = {4: 8, 8: 16, 16: 32, 32: 64}
@@ -302,7 +342,8 @@ Examples:
     print(f"  Flows: {args.flows}")
     print(f"  Sender BW: {args.sender_bw} Mbps")
     print(f"  Bottleneck Delay: {args.bottle_delay} ms")
-    print(f"  Simulation Time: {args.sim_time} seconds\n")
+    print(f"  Simulation Time: {args.sim_time} seconds")
+    print(f"  ProbeRTT: {'on' if probe_rtt else 'off'} ({cc_name})\n")
 
     # Run tests
     total_tests = len(flows)
@@ -313,7 +354,7 @@ Examples:
 
         print(f"{Colors.YELLOW}[{idx}/{total_tests}]{Colors.END} Testing {num_flows} flows...")
 
-        if runner.run_test(num_flows, args.sender_bw, bottle_bw, args.bottle_delay, args.sim_time):
+        if runner.run_test(num_flows, args.sender_bw, bottle_bw, args.bottle_delay, args.sim_time, probe_rtt):
             success_count += 1
 
     # Print summary

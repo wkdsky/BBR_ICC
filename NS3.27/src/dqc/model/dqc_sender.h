@@ -68,10 +68,8 @@ public:
     void SetUpPhaseTraceFuc(TraceUpPhase cb);
     typedef Callback<void,double,double,double,double,int32_t> TraceFreqAnalysis;
     void SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb);
-    typedef Callback<void,const AckEventRecord &> TraceAckEvent;
-    void SetAckEventTraceFuc(TraceAckEvent cb);
-    typedef Callback<void,const AckEpisodeRecord &> TraceAckEpisode;
-    void SetAckEpisodeTraceFuc(TraceAckEpisode cb);
+    typedef Callback<void,double,double,double,double,double> TraceRttFreqAnalysis;
+    void SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -88,6 +86,7 @@ public:
 	void SetNumEmulatedConnections(int num_connections);
     // FreqCC configuration methods
     void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain");
+    void SetFreqCCIntervalWindowMultiplier(double multiplier);
 private:
 	void DataGenerator(int times);
 	virtual void StartApplication() override;
@@ -102,17 +101,7 @@ private:
     void FlushLossWindows(bool final_flush);
     uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
-    void EnsureAckTraceHooked();
     void EnsureRttTraceHooked();
-    void OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
-                            uint32_t acked_pkts,dqc::PacketNumber largest_acked,
-                            uint32_t ack_delay_ms,uint32_t rtt_ms);
-    void StartAckEpisode(int32_t type,int64_t start_us,double ack_interval_ms,
-                         uint64_t acked_bytes,double ack_rate_kbps,
-                         double pacing_rate_kbps,double sample_bias);
-    void UpdateAckEpisode(int64_t ack_us,double ack_interval_ms,uint64_t acked_bytes,
-                          double ack_rate_kbps,double pacing_rate_kbps,double sample_bias);
-    void EmitAckEpisode(int64_t end_us);
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
     bool m_running{false};
@@ -152,11 +141,9 @@ private:
     TraceBbrMode m_traceBbrModeCb;
     TraceUpPhase m_traceUpPhaseCb;
     TraceFreqAnalysis m_traceFreqAnalysisCb;
+    TraceRttFreqAnalysis m_traceRttFreqAnalysisCb;
     TraceLossRate m_traceLossRateCb;
-    TraceAckEvent m_traceAckEventCb;
-    TraceAckEpisode m_traceAckEpisodeCb;
     bool m_lossTraceHooked{false};
-    bool m_ackTraceHooked{false};
     bool m_rttTraceHooked{false};
     struct LossWindowStats{
         uint64_t sent_bytes{0};
@@ -167,29 +154,5 @@ private:
     uint64_t m_lossWindowIntervalUs{100000};
     uint64_t m_cumSentBytes{0};
     uint64_t m_cumLostBytes{0};
-
-    bool m_ackBaselineInitialized{false};
-    double m_ackBaselineIatMs{0.0};
-    double m_ackBaselineBytes{0.0};
-    double m_ackBaselineRateKbps{0.0};
-    double m_ackEwmaAlpha{0.1};
-    double m_ackCompIatFactor{0.5};
-    double m_ackCompRateFactor{1.5};
-    double m_ackAggIatFactor{2.0};
-    double m_ackAggBytesFactor{2.0};
-    int m_ackEpisodeNonMatchLimit{2};
-    dqc::ProtoTime m_lastAckRecvTime{dqc::ProtoTime::Zero()};
-    int32_t m_ackEpisodeType{-1};
-    int m_ackEpisodeNonMatchCount{0};
-    int64_t m_ackEpisodeStartUs{0};
-    int64_t m_ackEpisodeLastMatchUs{0};
-    uint32_t m_ackEpisodeEvents{0};
-    uint64_t m_ackEpisodeBytes{0};
-    double m_ackEpisodeIatMinMs{0.0};
-    double m_ackEpisodeIatMaxMs{0.0};
-    double m_ackEpisodeAckRatePeakKbps{0.0};
-    double m_ackEpisodePacingRateSumKbps{0.0};
-    uint32_t m_ackEpisodePacingRateCount{0};
-    double m_ackEpisodeBiasPeak{0.0};
 };
 }

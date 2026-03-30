@@ -35,7 +35,9 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
              Random* random,
              QuicConnectionStats* stats,
              bool enable_ecn=false,
-             QuicBbrSender* old_sender=nullptr);
+             QuicBbrSender* old_sender=nullptr,
+             CongestionControlType congestion_control_type = kBBRv2,
+             bool enable_probe_rtt = true);
 
   ~Bbr2Sender() override = default;
 
@@ -97,7 +99,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   QuicByteCount GetSlowStartThreshold() const override { return 0; }
 
   CongestionControlType GetCongestionControlType() const override {
-    return kBBRv2;
+    return congestion_control_type_;
   }
 
   std::string GetDebugState() const override;
@@ -115,6 +117,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
 
   // Returns the min of BDP and congestion window.
   QuicByteCount GetTargetBytesInflight() const;
+  bool IsProbeRttEnabled() const { return enable_probe_rtt_; }
 
   bool IsBandwidthOverestimateAvoidanceEnabled() const {
     return model_.IsBandwidthOverestimateAvoidanceEnabled();
@@ -168,6 +171,8 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   const QuicUnackedPacketMap* const unacked_packets_;
   Random* random_;
   QuicConnectionStats* connection_stats_;
+  const CongestionControlType congestion_control_type_;
+  const bool enable_probe_rtt_;
   Bbr2Params params_;
   // model_ depends on params_
   Bbr2NetworkModel model_;

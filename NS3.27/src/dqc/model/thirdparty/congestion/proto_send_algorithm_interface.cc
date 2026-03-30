@@ -304,7 +304,11 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                initial_congestion_window,
                                max_congestion_window,
                                random,
-				stats);
+				stats,
+                               false,
+                               nullptr,
+                               kBBRv2,
+                               true);
         }
         case kBBRv2Ecn:{
             return new Bbr2Sender(clock->Now(),
@@ -313,7 +317,24 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                initial_congestion_window,
                                max_congestion_window,
                                random,
-				stats,true);
+				stats,
+                               true,
+                               nullptr,
+                               kBBRv2Ecn,
+                               true);
+        }
+        case kBBRv2NoProbeRtt:{
+            return new Bbr2Sender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+				stats,
+                               false,
+                               nullptr,
+                               kBBRv2NoProbeRtt,
+                               false);
         }
         case kBBRv2Plus:{
             return new Bbr2PlusSender(clock->Now(),

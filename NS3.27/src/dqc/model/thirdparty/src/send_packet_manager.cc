@@ -223,12 +223,6 @@ AckResult SendPacketManager::OnAckEnd(ProtoTime ack_receive_time){
         }
     }
     const bool acked_new_packet = !packets_acked_.empty();
-    if(acked_new_packet && trace_ack_event_){
-        uint32_t acked_pkts=static_cast<uint32_t>(packets_acked_.size());
-        uint32_t ack_delay_ms=static_cast<uint32_t>(last_ack_delay_.ToMilliseconds());
-        uint32_t rtt_ms=static_cast<uint32_t>(rtt_stats_.smoothed_rtt().ToMilliseconds());
-        trace_ack_event_(ack_receive_time,acked_bytes,acked_pkts,largest_acked_,ack_delay_ms,rtt_ms);
-    }
     unacked_packets_.AddDelivered(acked_bytes);
     PostProcessNewlyAckedPackets(ack_receive_time,rtt_updated_,prior_bytes_in_flight);
     sent_time_=ProtoTime::Zero();

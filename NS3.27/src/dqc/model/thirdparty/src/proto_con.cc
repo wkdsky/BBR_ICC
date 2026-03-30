@@ -234,7 +234,24 @@ void ProtoCon::OnFastRetransmit(){
 	ProtoTime next=clock_->Now()+rto;
 	fast_retrans_alarm_->Update(next,TimeDelta::FromMilliseconds(1));
     bool send=SendRetransPending(TT_FAST_RETRANS);
-    std::cout<<"con time out"<<std::endl;
+    const PacketNumber least_unacked = sent_manager_.GetLeastUnacked();
+    const PacketNumber largest_acked = sent_manager_.largest_acked();
+    const uint64_t least_unacked_seq =
+        least_unacked.IsInitialized() ? least_unacked.ToUint64() : 0;
+    const uint64_t largest_acked_seq =
+        largest_acked.IsInitialized() ? largest_acked.ToUint64() : 0;
+    std::cout << "[ProtoCon timeout]"
+              << " cid=" << cid_
+              << " now_ms=" << wall_time.ToMilliseconds()
+              << " rto_ms=" << rto.ToMilliseconds()
+              << " consecutive_rto=" << sent_manager_.GetConsecutiveRtoCount()
+              << " inflight_bytes=" << sent_manager_.GetBytesInFlight()
+              << " cwnd_bytes=" << sent_manager_.GetCongestionWindow()
+              << " pending_retrans=" << sent_manager_.GetPendingRetransmissionCount()
+              << " least_unacked=" << least_unacked_seq
+              << " largest_acked=" << largest_acked_seq
+              << " send_ok=" << (send ? 1 : 0)
+              << std::endl;
     CHECK(send);
     fast_retrans_++;
 }

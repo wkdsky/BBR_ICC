@@ -50,7 +50,19 @@
 using namespace ns3;
 using namespace dqc;
 using namespace std;
-NS_LOG_COMPONENT_DEFINE ("8-bbrv2");
+#ifndef DQC_SCENARIO_LOG_COMPONENT
+#define DQC_SCENARIO_LOG_COMPONENT "8-bbrv2"
+#endif
+#ifndef DQC_SCENARIO_INSTANCE
+#define DQC_SCENARIO_INSTANCE "8_bbrv2"
+#endif
+#ifndef DQC_DEFAULT_CC
+#define DQC_DEFAULT_CC "bbrv2"
+#endif
+#ifndef DQC_SCENARIO_TITLE
+#define DQC_SCENARIO_TITLE "8 BBRv2-Style Flows"
+#endif
+NS_LOG_COMPONENT_DEFINE (DQC_SCENARIO_LOG_COMPONENT);
 
 const int NUM_FLOWS = 8;
 
@@ -180,8 +192,6 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetInflightTraceFuc(MakeCallback(&DqcTrace::OnInflight,trace));
         sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
         sendApp->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate,trace));
-        sendApp->SetAckEventTraceFuc(MakeCallback(&DqcTrace::OnAckEvent,trace));
-        sendApp->SetAckEpisodeTraceFuc(MakeCallback(&DqcTrace::OnAckEpisode,trace));
         // recvApp->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd,trace));
         // recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
         // recvApp->SetStatsTraceFuc(MakeCallback(&DqcTrace::OnStats,trace));
@@ -191,7 +201,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
 }
 
 void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
-    std::string instance="8_bbrv2";  // Use script filename instead of instance number
+    std::string instance=DQC_SCENARIO_INSTANCE;  // Use script filename instead of instance number
     uint64_t linkBw   = p4p[8].bps;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
@@ -342,6 +352,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
         cc = kBBRv2Plus;
     } else if (algo == "bbrv2plus_ecn") {
         cc = kBBRv2PlusEcn;
+    } else if (algo == "bbrv2_noprobe_rtt") {
+        cc = kBBRv2NoProbeRtt;
     }
 
     uint32_t max_bps=0;
@@ -364,7 +376,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     stat->RegisterCongestionType(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(10),sendPort,recvPort,flow_start_times[0]+0.001,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender1);
     sender_id++;
@@ -379,7 +391,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(11),sendPort,recvPort,flow_start_times[1]+0.002,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender2);
     sender_id++;
@@ -394,7 +406,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(12),sendPort,recvPort,flow_start_times[2]+0.003,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender3);
     sender_id++;
@@ -409,7 +421,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(13),sendPort,recvPort,flow_start_times[3]+0.004,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender4);
     sender_id++;
@@ -424,7 +436,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender5 = InstallDqc(cc,c.Get(4),c.Get(14),sendPort,recvPort,flow_start_times[4]+0.005,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender5);
     sender_id++;
@@ -439,7 +451,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender6 = InstallDqc(cc,c.Get(5),c.Get(15),sendPort,recvPort,flow_start_times[5]+0.006,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender6);
     sender_id++;
@@ -454,7 +466,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender7 = InstallDqc(cc,c.Get(6),c.Get(16),sendPort,recvPort,flow_start_times[6]+0.007,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender7);
     sender_id++;
@@ -469,7 +481,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     log=prefix+std::to_string(test_pair);
     trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
 |DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE
-|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
     Ptr<DqcSender> sender8 = InstallDqc(cc,c.Get(7),c.Get(17),sendPort,recvPort,flow_start_times[7]+0.008,appStop,trace.get(),stat,max_bps,sender_id);
     senders.push_back(sender8);
     sender_id++;
@@ -488,13 +500,13 @@ int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
     std::string trace_path="";
-    std::string cc_name="bbrv2";
+    std::string cc_name=DQC_DEFAULT_CC;
 
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2plus, bbrv2plus_ecn", cc_name);
+    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt, bbrv2plus, bbrv2plus_ecn", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
@@ -505,7 +517,7 @@ int main (int argc, char *argv[]){
     SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
-    std::cout << "=== 8 BBRv2-Style Flows Configuration ===" << std::endl;
+    std::cout << "=== " << DQC_SCENARIO_TITLE << " Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
     std::cout << "Congestion control: " << cc_name << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;

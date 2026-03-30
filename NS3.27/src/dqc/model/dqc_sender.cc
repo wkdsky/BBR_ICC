@@ -6,17 +6,17 @@
 #include "ns3/log.h"
 #include "ns3/time_tag.h"
 #include "ns3/flow-id-tag.h"
-#include "byte_codec.h"
-#include "proto_utils.h"
-#include "freqcc_sender.h"
-#include "freqccv2_sender.h"
-#include "freqccv3_sender.h"
-#include "freqccv4_sender.h"
-#include "obbr_sender.h"
+#include "ns3/byte_codec.h"
+#include "ns3/proto_utils.h"
+#include "ns3/freqcc_sender.h"
+#include "ns3/freqccv2_sender.h"
+#include "ns3/freqccv3_sender.h"
+#include "ns3/freqccv4_sender.h"
+#include "ns3/obbr_sender.h"
 #include "proto_bbr_sender.h"
-#include "quic_bbr2_sender.h"
-#include "quic_bbr2plus_sender.h"
-#include "proto_send_algorithm_interface.h"
+#include "ns3/quic_bbr2_sender.h"
+#include "ns3/quic_bbr2plus_sender.h"
+#include "ns3/proto_send_algorithm_interface.h"
 using namespace dqc;
 namespace ns3{
 NS_LOG_COMPONENT_DEFINE("dqcsender");
@@ -44,6 +44,7 @@ bool
 IsBbr2StyleAlgorithm(CongestionControlType type)
 {
     return type == kBBRv2 || type == kBBRv2Ecn ||
+           type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
            type == kFreqCCv3 || type == kFreqCCv4;
@@ -126,13 +127,8 @@ void DqcSender::SetUpPhaseTraceFuc(TraceUpPhase cb){
 void DqcSender::SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb){
     m_traceFreqAnalysisCb=cb;
 }
-void DqcSender::SetAckEventTraceFuc(TraceAckEvent cb){
-    m_traceAckEventCb=cb;
-    EnsureAckTraceHooked();
-}
-void DqcSender::SetAckEpisodeTraceFuc(TraceAckEpisode cb){
-    m_traceAckEpisodeCb=cb;
-    EnsureAckTraceHooked();
+void DqcSender::SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb){
+    m_traceRttFreqAnalysisCb=cb;
 }
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost,dqc::ProtoTime sent_ts){
     uint64_t window_id=GetLossWindowId(sent_ts);
@@ -212,21 +208,6 @@ void DqcSender::EnsureLossTraceHooked(){
         m_lossTraceHooked=true;
     }
 }
-void DqcSender::EnsureAckTraceHooked(){
-    if(m_ackTraceHooked){
-        return;
-    }
-    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-    if(sent_manager){
-        sent_manager->SetTraceAckEvent([this](ProtoTime ack_receive_time,uint64_t acked_bytes,
-                                             uint32_t acked_pkts,PacketNumber largest_acked,
-                                             uint32_t ack_delay_ms,uint32_t rtt_ms){
-            OnAckEventInternal(ack_receive_time,acked_bytes,acked_pkts,largest_acked,
-                               ack_delay_ms,rtt_ms);
-        });
-        m_ackTraceHooked=true;
-    }
-}
 void DqcSender::EnsureRttTraceHooked(){
     if(m_rttTraceHooked){
         return;
@@ -243,184 +224,6 @@ void DqcSender::EnsureRttTraceHooked(){
             }
         });
         m_rttTraceHooked=true;
-    }
-}
-void DqcSender::OnAckEventInternal(dqc::ProtoTime ack_receive_time,uint64_t acked_bytes,
-                                   uint32_t acked_pkts,dqc::PacketNumber largest_acked,
-                                   uint32_t ack_delay_ms,uint32_t rtt_ms){
-    int64_t ack_us=ack_receive_time.ToDebuggingValue();
-    double ack_interval_ms=0.0;
-    if(m_lastAckRecvTime.IsInitialized()){
-        TimeDelta delta=ack_receive_time-m_lastAckRecvTime;
-        ack_interval_ms=static_cast<double>(delta.ToMilliseconds());
-    }
-    m_lastAckRecvTime=ack_receive_time;
-    double ack_rate_kbps=0.0;
-    if(ack_interval_ms>0.0){
-        ack_rate_kbps=(acked_bytes*8.0)/ack_interval_ms;
-    }
-    double pacing_rate_kbps=0.0;
-    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-    if(sent_manager){
-        SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-        if(algo){
-            ByteCount in_flight = 0;
-            ByteCount cwnd = 0;
-            sent_manager->InFlight(&in_flight, &cwnd);
-            QuicBandwidth pacing_rate = algo->PacingRate(in_flight);
-            pacing_rate_kbps = pacing_rate.ToKBitsPerSecond();
-        }
-    }
-    double sample_bias=0.0;
-    if(pacing_rate_kbps>0.0){
-        sample_bias=ack_rate_kbps/pacing_rate_kbps;
-    }
-    if(!m_traceAckEventCb.IsNull()){
-        AckEventRecord record;
-        record.time_sec=ack_us/1000000.0;
-        record.acked_bytes=acked_bytes;
-        record.acked_pkts=acked_pkts;
-        record.largest_acked=largest_acked.ToUint64();
-        record.ack_delay_ms=ack_delay_ms;
-        record.rtt_ms=rtt_ms;
-        record.ack_interval_ms=ack_interval_ms;
-        record.ack_rate_kbps=ack_rate_kbps;
-        record.pacing_rate_kbps=pacing_rate_kbps;
-        record.sample_bias=sample_bias;
-        m_traceAckEventCb(record);
-    }
-    if(ack_interval_ms<=0.0){
-        return;
-    }
-    if(!m_ackBaselineInitialized){
-        m_ackBaselineIatMs=ack_interval_ms;
-        m_ackBaselineBytes=static_cast<double>(acked_bytes);
-        m_ackBaselineRateKbps=ack_rate_kbps;
-        m_ackBaselineInitialized=true;
-        return;
-    }
-    double baseline_iat=m_ackBaselineIatMs;
-    double baseline_bytes=m_ackBaselineBytes;
-    double baseline_rate=m_ackBaselineRateKbps;
-    bool compress=false;
-    bool aggregate=false;
-    if(baseline_rate>0.0){
-        compress=(ack_interval_ms<=m_ackCompIatFactor*baseline_iat) &&
-                 (ack_rate_kbps>=m_ackCompRateFactor*baseline_rate);
-    }
-    if(baseline_bytes>0.0){
-        aggregate=(ack_interval_ms>=m_ackAggIatFactor*baseline_iat) &&
-                  (acked_bytes>=static_cast<uint64_t>(m_ackAggBytesFactor*baseline_bytes));
-    }
-    int32_t current_type=-1;
-    if(compress || aggregate){
-        if(compress && aggregate){
-            double eps=1e-6;
-            double compression_score=baseline_iat/std::max(ack_interval_ms,eps);
-            double aggregation_score=ack_interval_ms/std::max(baseline_iat,eps);
-            current_type=(compression_score>=aggregation_score)?0:1;
-        }else if(compress){
-            current_type=0;
-        }else{
-            current_type=1;
-        }
-    }
-    if(m_ackEpisodeType!=-1){
-        if(current_type==m_ackEpisodeType){
-            UpdateAckEpisode(ack_us,ack_interval_ms,acked_bytes,
-                             ack_rate_kbps,pacing_rate_kbps,sample_bias);
-            m_ackEpisodeNonMatchCount=0;
-        }else{
-            m_ackEpisodeNonMatchCount++;
-            if(m_ackEpisodeNonMatchCount>=m_ackEpisodeNonMatchLimit){
-                EmitAckEpisode(m_ackEpisodeLastMatchUs);
-                m_ackEpisodeType=-1;
-                m_ackEpisodeNonMatchCount=0;
-                if(current_type!=-1){
-                    StartAckEpisode(current_type,ack_us,ack_interval_ms,acked_bytes,
-                                    ack_rate_kbps,pacing_rate_kbps,sample_bias);
-                }else{
-                    m_ackBaselineIatMs=(1.0-m_ackEwmaAlpha)*m_ackBaselineIatMs+m_ackEwmaAlpha*ack_interval_ms;
-                    m_ackBaselineBytes=(1.0-m_ackEwmaAlpha)*m_ackBaselineBytes+m_ackEwmaAlpha*acked_bytes;
-                    m_ackBaselineRateKbps=(1.0-m_ackEwmaAlpha)*m_ackBaselineRateKbps+m_ackEwmaAlpha*ack_rate_kbps;
-                }
-            }
-        }
-    }else if(current_type!=-1){
-        StartAckEpisode(current_type,ack_us,ack_interval_ms,acked_bytes,
-                        ack_rate_kbps,pacing_rate_kbps,sample_bias);
-    }else{
-        m_ackBaselineIatMs=(1.0-m_ackEwmaAlpha)*m_ackBaselineIatMs+m_ackEwmaAlpha*ack_interval_ms;
-        m_ackBaselineBytes=(1.0-m_ackEwmaAlpha)*m_ackBaselineBytes+m_ackEwmaAlpha*acked_bytes;
-        m_ackBaselineRateKbps=(1.0-m_ackEwmaAlpha)*m_ackBaselineRateKbps+m_ackEwmaAlpha*ack_rate_kbps;
-    }
-}
-void DqcSender::StartAckEpisode(int32_t type,int64_t start_us,double ack_interval_ms,
-                                uint64_t acked_bytes,double ack_rate_kbps,
-                                double pacing_rate_kbps,double sample_bias){
-    m_ackEpisodeType=type;
-    m_ackEpisodeStartUs=start_us;
-    m_ackEpisodeLastMatchUs=start_us;
-    m_ackEpisodeEvents=1;
-    m_ackEpisodeBytes=acked_bytes;
-    m_ackEpisodeIatMinMs=ack_interval_ms;
-    m_ackEpisodeIatMaxMs=ack_interval_ms;
-    m_ackEpisodeAckRatePeakKbps=ack_rate_kbps;
-    m_ackEpisodePacingRateSumKbps=0.0;
-    m_ackEpisodePacingRateCount=0;
-    if(pacing_rate_kbps>0.0){
-        m_ackEpisodePacingRateSumKbps=pacing_rate_kbps;
-        m_ackEpisodePacingRateCount=1;
-    }
-    m_ackEpisodeBiasPeak=sample_bias;
-}
-void DqcSender::UpdateAckEpisode(int64_t ack_us,double ack_interval_ms,uint64_t acked_bytes,
-                                 double ack_rate_kbps,double pacing_rate_kbps,double sample_bias){
-    m_ackEpisodeLastMatchUs=ack_us;
-    m_ackEpisodeEvents++;
-    m_ackEpisodeBytes+=acked_bytes;
-    if(ack_interval_ms<m_ackEpisodeIatMinMs){
-        m_ackEpisodeIatMinMs=ack_interval_ms;
-    }
-    if(ack_interval_ms>m_ackEpisodeIatMaxMs){
-        m_ackEpisodeIatMaxMs=ack_interval_ms;
-    }
-    if(ack_rate_kbps>m_ackEpisodeAckRatePeakKbps){
-        m_ackEpisodeAckRatePeakKbps=ack_rate_kbps;
-    }
-    if(pacing_rate_kbps>0.0){
-        m_ackEpisodePacingRateSumKbps+=pacing_rate_kbps;
-        m_ackEpisodePacingRateCount++;
-    }
-    if(sample_bias>m_ackEpisodeBiasPeak){
-        m_ackEpisodeBiasPeak=sample_bias;
-    }
-}
-void DqcSender::EmitAckEpisode(int64_t end_us){
-    if(m_ackEpisodeType==-1){
-        return;
-    }
-    double start_sec=m_ackEpisodeStartUs/1000000.0;
-    double end_sec=end_us/1000000.0;
-    double duration_ms=(end_us-m_ackEpisodeStartUs)/1000.0;
-    double pacing_rate_mean=0.0;
-    if(m_ackEpisodePacingRateCount>0){
-        pacing_rate_mean=m_ackEpisodePacingRateSumKbps/m_ackEpisodePacingRateCount;
-    }
-    if(!m_traceAckEpisodeCb.IsNull()){
-        AckEpisodeRecord record;
-        record.type=m_ackEpisodeType;
-        record.start_sec=start_sec;
-        record.end_sec=end_sec;
-        record.duration_ms=duration_ms;
-        record.ack_events=m_ackEpisodeEvents;
-        record.acked_bytes=m_ackEpisodeBytes;
-        record.iat_min_ms=m_ackEpisodeIatMinMs;
-        record.iat_max_ms=m_ackEpisodeIatMaxMs;
-        record.ack_rate_peak_kbps=m_ackEpisodeAckRatePeakKbps;
-        record.pacing_rate_mean_kbps=pacing_rate_mean;
-        record.bias_peak=m_ackEpisodeBiasPeak;
-        m_traceAckEpisodeCb(record);
     }
 }
 void DqcSender::Bind(uint16_t port){
@@ -465,6 +268,11 @@ void DqcSender::Bind(uint16_t port){
                 m_traceFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, receiver_peak_freq_hz, avg_rate_kbps);
             }
         });
+        freqccv3->SetRttFreqAnalysisTraceCallback([this](double start_time, double adopted_window_ms, double sender_peak_freq_hz, double rtt_peak_freq_hz, double avg_smoothed_rtt_ms){
+            if(!m_traceRttFreqAnalysisCb.IsNull()){
+                m_traceRttFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, rtt_peak_freq_hz, avg_smoothed_rtt_ms);
+            }
+        });
     } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
@@ -474,6 +282,7 @@ void DqcSender::Bind(uint16_t port){
         });
     } else if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
                        algo->GetCongestionControlType() == kBBRv2Ecn ||
+                       algo->GetCongestionControlType() == kBBRv2NoProbeRtt ||
                        algo->GetCongestionControlType() == kBBRv2Plus ||
                        algo->GetCongestionControlType() == kBBRv2PlusEcn)){
         Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
@@ -537,11 +346,6 @@ void DqcSender::StopApplication(){
 	m_processTimer.Cancel();
 	m_engineTimer.Cancel();
     FlushLossWindows(true);
-    if(m_ackEpisodeType!=-1){
-        int64_t end_us=static_cast<int64_t>(Simulator::Now().GetSeconds()*1000000.0);
-        EmitAckEpisode(end_us);
-        m_ackEpisodeType=-1;
-    }
     m_sinks.clear();
 }
 void DqcSender::RecvPacket(Ptr<Socket> socket){
@@ -755,8 +559,6 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
         for(auto it=m_sinks.begin();it!=m_sinks.end();it++){
             (*it)->OnOneWayDelaySample(m_id,seq,owd);
         }
-        // Trace recv rate if callback is set
-        // Column 1: instant receive rate (bandwidth_latest from bandwidth sampler)
         if(!m_traceRecvRateCb.IsNull()){
             SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
             SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
@@ -792,6 +594,15 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
         }
     }
 }
+void DqcSender::SetFreqCCIntervalWindowMultiplier(double multiplier){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv3){
+        FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
+        freqccv3->SetIntervalWindowMultiplier(multiplier);
+    }
+}
+
 void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps, const std::string& osc_mode){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();

@@ -36,7 +36,19 @@
 using namespace ns3;
 using namespace dqc;
 using namespace std;
-NS_LOG_COMPONENT_DEFINE ("32-bbrv2");
+#ifndef DQC_SCENARIO_LOG_COMPONENT
+#define DQC_SCENARIO_LOG_COMPONENT "32-bbrv2"
+#endif
+#ifndef DQC_SCENARIO_INSTANCE
+#define DQC_SCENARIO_INSTANCE "32_bbrv2"
+#endif
+#ifndef DQC_DEFAULT_CC
+#define DQC_DEFAULT_CC "bbrv2"
+#endif
+#ifndef DQC_SCENARIO_TITLE
+#define DQC_SCENARIO_TITLE "32 BBRv2-Style Flows"
+#endif
+NS_LOG_COMPONENT_DEFINE (DQC_SCENARIO_LOG_COMPONENT);
 
 const int NUM_FLOWS = 32;
 
@@ -135,14 +147,12 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetInflightTraceFuc(MakeCallback(&DqcTrace::OnInflight,trace));
         sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
         sendApp->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate,trace));
-        sendApp->SetAckEventTraceFuc(MakeCallback(&DqcTrace::OnAckEvent,trace));
-        sendApp->SetAckEpisodeTraceFuc(MakeCallback(&DqcTrace::OnAckEpisode,trace));
     }
     return sendApp;
 }
 
 void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
-    std::string instance="32_bbrv2";  // Use script filename instead of instance number
+    std::string instance=DQC_SCENARIO_INSTANCE;  // Use script filename instead of instance number
     uint64_t linkBw   = p4p[32].bps;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
@@ -241,6 +251,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
         cc = kBBRv2Plus;
     } else if (algo == "bbrv2plus_ecn") {
         cc = kBBRv2PlusEcn;
+    } else if (algo == "bbrv2_noprobe_rtt") {
+        cc = kBBRv2NoProbeRtt;
     }
 
     uint32_t max_bps=0;
@@ -262,7 +274,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
             stat->RegisterCongestionType(test_pair);
         }
         trace->Log(log,DqcTraceEnable::E_DQC_GOODPUT|DqcTraceEnable::E_DQC_RTT|DqcTraceEnable::E_DQC_BW|DqcTraceEnable::E_DQC_OWD
-|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_ACK_EVENT|DqcTraceEnable::E_DQC_ACK_EPISODE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
+|DqcTraceEnable::E_DQC_STAT|DqcTraceEnable::E_DQC_SEND_RATE|DqcTraceEnable::E_DQC_RECV_RATE|DqcTraceEnable::E_DQC_INFLIGHT|DqcTraceEnable::E_DQC_BBR_MODE|DqcTraceEnable::E_DQC_LOSS_RATE|DqcTraceEnable::E_DQC_QUEUE_DELAY);
 
         float flow_start_time = 0.001 * (i + 1);
         Ptr<DqcSender> sender = InstallDqc(cc, c.Get(i), c.Get(34 + i),
@@ -292,11 +304,11 @@ int main (int argc, char *argv[]){
     InitializeLinks();
 
     // Command line arguments
-    std::string cc_name="bbrv2";
+    std::string cc_name=DQC_DEFAULT_CC;
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2plus, bbrv2plus_ecn", cc_name);
+    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt, bbrv2plus, bbrv2plus_ecn", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
@@ -307,7 +319,7 @@ int main (int argc, char *argv[]){
     SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
-    std::cout << "=== 32 BBRv2-Style Flows Configuration ===" << std::endl;
+    std::cout << "=== " << DQC_SCENARIO_TITLE << " Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
     std::cout << "Congestion control: " << cc_name << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;

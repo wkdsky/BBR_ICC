@@ -28,6 +28,11 @@ struct FreqSignalSample {
   QuicBandwidth rate;
 };
 
+struct RttSignalSample {
+  QuicTime time;
+  double rtt_ms;
+};
+
 // Amplitude mode for the oscillation (same as FreqCCv2)
 enum class FreqCCv3AmplitudeMode {
   kFixed,      // Fixed amplitude in bps
@@ -65,6 +70,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Configuration methods for oscillation parameters
   void SetOscillationFrequency(double freq_hz);  // Frequency in Hz
   void SetOscillationAmplitude(FreqCCv3AmplitudeMode mode, uint64_t fixed_bps = 0);
+  void SetIntervalWindowMultiplier(double multiplier);
 
   // Override to return FreqCCv3 type
   CongestionControlType GetCongestionControlType() const override {
@@ -106,6 +112,11 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   typedef std::function<void(double, double, double, double, int32_t)> FreqAnalysisTraceCallback;
   void SetFreqAnalysisTraceCallback(FreqAnalysisTraceCallback cb) { freq_analysis_trace_cb_ = cb; }
 
+  // Callback for RTT Freq Analysis Trace
+  // Parameters: (start_time_s, duration_s, sender_peak_freq_hz, rtt_peak_freq_hz, avg_smoothed_rtt_ms)
+  typedef std::function<void(double, double, double, double, double)> RttFreqAnalysisTraceCallback;
+  void SetRttFreqAnalysisTraceCallback(RttFreqAnalysisTraceCallback cb) { rtt_freq_analysis_trace_cb_ = cb; }
+
   // FreqCCv3-specific parameters for NEW_REFILL
   static constexpr float kNewRefillHighThreshold = 0.75f;   // Upper threshold for BDP
   static constexpr float kNewRefillLowThreshold = 0.72f;    // Lower threshold for BDP
@@ -123,7 +134,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   static constexpr double kFreqDeviationTolerance = 0.30;  // ±30% deviation allowed
 
   // CONSTRAINT 3: ACK Signal Smoothing - temporal smoothing window
-  static constexpr double kSmoothingWindowMs = 10.0;  // 10ms moving average for receiver rate
+  static constexpr double kSmoothingWindowFraction = 0.10;  // smooth over 10% of STFT window
 
   // CONSTRAINT 4: Minimum Peak Duration - reject transient peaks
   static constexpr double kMinPeakDurationCycles = 0.75;  // Peak must span at least 0.75 cycles (relaxed)
@@ -172,6 +183,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // NEW_REFILL state
   NewRefillState new_refill_state_;         // Current state within NEW_REFILL
   bool in_new_refill_;                      // True when in NEW_REFILL phase
+  double interval_window_multiplier_;       // Interval-phase STFT window = multiplier * min_rtt
 
   // Adaptive frequency state
   int up_phase_count_;                      // Count of UP phases completed
@@ -204,6 +216,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Freq analysis trace callback
   FreqAnalysisTraceCallback freq_analysis_trace_cb_;
 
+  // RTT freq analysis trace callback
+  RttFreqAnalysisTraceCallback rtt_freq_analysis_trace_cb_;
+
   // Bandwidth estimate before entering UP phase (for early exit handling)
   QuicBandwidth bandwidth_before_up_;
 
@@ -212,6 +227,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // Perform STFT analysis on a segment of the signal
   void PerformFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz = 0.0, double expected_freq_hz = 0.0);
+
+  // Perform STFT analysis on smoothed_rtt sampled on ACK events.
+  void PerformRttFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz = 0.0, double expected_freq_hz = 0.0);
 
   // Helper to run DFT and find peak frequency with physical constraints
   struct AnalysisResult {
@@ -223,17 +241,30 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
                                TimeDelta window_duration,
                                double expected_freq_hz) const;
 
+  struct RttAnalysisResult {
+      double peak_freq_hz;
+      double avg_rtt_ms;
+      bool valid;
+  };
+  RttAnalysisResult AnalyzeRttWindow(const std::vector<RttSignalSample>& samples,
+                                     TimeDelta window_duration,
+                                     double expected_freq_hz) const;
+
   // CONSTRAINT 3: ACK signal preprocessing - smooth receiver rate signal
   std::vector<FreqSignalSample> SmoothSignal(const std::vector<FreqSignalSample>& raw_samples,
                                              double smoothing_window_ms) const;
   
   // STFT Analysis State
-  std::deque<FreqSignalSample> signal_history_;          // Receiver rate signal (ACK-based)
+  std::deque<FreqSignalSample> signal_history_;          // BandwidthLatest() sampled on ACK events
   std::deque<FreqSignalSample> sender_rate_history_;     // Sender rate signal (packet-send-based)
+  std::deque<RttSignalSample> rtt_signal_history_;       // smoothed_rtt sampled on ACK events
+  QuicTime last_down_phase_end_time_;       // End time of the last DOWN phase; interval analysis starts here
   QuicTime last_up_phase_end_time_;         // End time of the last UP phase
   QuicTime last_up_phase_start_time_;       // Start time of the last UP phase
   double last_up_phase_peak_freq_;          // Peak freq found in last UP phase
+  double last_up_rtt_peak_freq_;            // Peak freq found in smoothed_rtt during last UP phase
   TimeDelta last_up_window_size_;           // Window size used for last UP phase
+  TimeDelta last_up_rtt_window_size_;       // Window size used for RTT analysis in last UP phase
   bool last_up_phase_valid_;                // Whether last UP phase had >= kMinCyclesPerUp
   double sender_max_peak_freq_hz_;          // Max peak freq from sender rate in current UP phase
   QuicTime last_packet_sent_time_;          // Time of last packet sent for sender rate calc
@@ -241,6 +272,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Simple window size calculation for STFT based on target frequency and RTT
   // Returns window size in seconds
   double CalculateSTFTWindowSize(double target_freq_hz) const;
+  double CalculateRttSTFTWindowSize(double target_freq_hz) const;
 };
 
 }  // namespace dqc

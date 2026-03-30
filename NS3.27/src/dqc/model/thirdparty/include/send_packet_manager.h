@@ -12,7 +12,6 @@ namespace dqc{
 using TraceLossPacketDelay=std::function<void(PacketNumber,uint32_t,PacketLength,ProtoTime)>;
 using TracePacketSent=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
 using TracePacketAcked=std::function<void(PacketNumber,PacketLength,ProtoTime)>;
-using TraceAckEvent=std::function<void(ProtoTime,uint64_t,uint32_t,PacketNumber,uint32_t,uint32_t)>;
 using TraceRtt=std::function<void(PacketNumber,uint32_t,uint32_t)>;
 class SendPacketManager{
 public:
@@ -71,6 +70,12 @@ public:
     bool has_in_flight(){
     	return unacked_packets_.bytes_in_flight()>0;
     }
+    ByteCount GetBytesInFlight() const { return unacked_packets_.bytes_in_flight(); }
+    ByteCount GetCongestionWindow() const {
+        return send_algorithm_ ? send_algorithm_->GetCongestionWindow() : 0;
+    }
+    size_t GetPendingRetransmissionCount() const { return pendings_.size(); }
+    size_t GetConsecutiveRtoCount() const { return consecutive_rto_count_; }
     void Test();
     void Test2();
     const TimeDelta GetRetransmissionDelay() const{
@@ -80,7 +85,6 @@ public:
     void SetTraceLossPacketDelay(TraceLossPacketDelay cb){trace_lost_=std::move(cb);}
     void SetTracePacketSent(TracePacketSent cb){trace_sent_=std::move(cb);}
     void SetTracePacketAcked(TracePacketAcked cb){trace_acked_=std::move(cb);}
-    void SetTraceAckEvent(TraceAckEvent cb){trace_ack_event_=std::move(cb);}
     void SetTraceRtt(TraceRtt cb){trace_rtt_=std::move(cb);}
     std::pair<PacketNumber,TimeDelta> GetOneWayDelayInfo() { return one_way_delay_;}
     void SetCongestionId(uint32_t cid);
@@ -121,7 +125,6 @@ private:
     TraceLossPacketDelay trace_lost_;
     TracePacketSent trace_sent_;
     TracePacketAcked trace_acked_;
-    TraceAckEvent trace_ack_event_;
     TraceRtt trace_rtt_;
     TimeDelta last_ack_delay_{TimeDelta::Zero()};
     ProtoTime sent_time_{ProtoTime::Zero()};

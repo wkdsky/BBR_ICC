@@ -62,13 +62,15 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
   } else if (cycle_.phase == CyclePhase::PROBE_DOWN) {
     UpdateProbeDown(prior_in_flight, congestion_event);
     // Maybe transition to PROBE_RTT at the end of this cycle.
-    if (cycle_.phase != CyclePhase::PROBE_DOWN &&
+    if (sender_->IsProbeRttEnabled() &&
+        cycle_.phase != CyclePhase::PROBE_DOWN &&
         model_->MaybeExpireMinRtt(congestion_event)) {
       switch_to_probe_rtt = true;
     }
   } else if (cycle_.phase == CyclePhase::PROBE_DOWN_SLIGHTLY) {
     UpdateProbeDownSlightly(prior_in_flight, congestion_event);
-    if (cycle_.phase != CyclePhase::PROBE_DOWN_SLIGHTLY &&
+    if (sender_->IsProbeRttEnabled() &&
+        cycle_.phase != CyclePhase::PROBE_DOWN_SLIGHTLY &&
         model_->MaybeExpireMinRtt(congestion_event)) {
       switch_to_probe_rtt = true;
     }

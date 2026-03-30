@@ -12,6 +12,7 @@
 #   --bottle-delay <ms>         Bottleneck delay (default: 28 ms)
 #   --queue-bdp <factor>        Queue size in BDP units (default: 1)
 #   --sim-time <seconds>        Simulation duration (default: 30 s)
+#   --probe-rtt <on|off>        Enable ProbeRTT (default: on)
 #   --instance <id>             Instance number (default: 1)
 #   --rebuild                   Force rebuild even if no changes
 #   --help                       Show this help message
@@ -43,6 +44,7 @@ SENDER_BW=10
 BOTTLE_DELAY=28
 QUEUE_BDP=1
 SIM_TIME=30
+PROBE_RTT="on"
 INSTANCE=1
 REBUILD=false
 CUSTOM_BOTTLE_BW=""
@@ -59,6 +61,7 @@ DEFAULT_BOTTLE_BW[32]=64
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NS3_DIR="$SCRIPT_DIR"
 SCRATCH_DIR="$NS3_DIR/scratch"
+WAF_HEADER_DIR="$NS3_DIR/build/ns3"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -87,6 +90,10 @@ while [[ $# -gt 0 ]]; do
             SIM_TIME="$2"
             shift 2
             ;;
+        --probe-rtt)
+            PROBE_RTT="$2"
+            shift 2
+            ;;
         --instance)
             INSTANCE="$2"
             shift 2
@@ -106,6 +113,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "${PROBE_RTT,,}" in
+    on|true|1|yes|enable|enabled)
+        PROBE_RTT="on"
+        CC_NAME="bbrv2"
+        PROBE_TAG="probeRTTon"
+        ;;
+    off|false|0|no|disable|disabled)
+        PROBE_RTT="off"
+        CC_NAME="bbrv2_noprobe_rtt"
+        PROBE_TAG="probeRTToff"
+        ;;
+    *)
+        echo -e "${RED}Invalid --probe-rtt value: ${PROBE_RTT}. Use on/off.${NC}"
+        exit 1
+        ;;
+esac
+
 # Function to print section header
 print_header() {
     echo ""
@@ -113,6 +137,26 @@ print_header() {
     echo -e "${BLUE}║${NC} $1"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
+}
+
+sync_waf_exported_headers() {
+    mkdir -p "$WAF_HEADER_DIR"
+
+    local headers=(
+        "src/dqc/model/thirdparty/include/proto_types.h"
+        "src/dqc/model/thirdparty/congestion/quic_bbr2_sender.h"
+    )
+
+    for rel_path in "${headers[@]}"; do
+        local src_file="$NS3_DIR/$rel_path"
+        local dst_file="$WAF_HEADER_DIR/$(basename "$rel_path")"
+        if [ ! -f "$dst_file" ] || ! cmp -s "$src_file" "$dst_file"; then
+            if [ -f "$dst_file" ]; then
+                chmod u+w "$dst_file" 2>/dev/null || true
+            fi
+            cp "$src_file" "$dst_file"
+        fi
+    done
 }
 
 # Function to update C++ constants in a script
@@ -169,7 +213,7 @@ run_test() {
     local script_file="$SCRATCH_DIR/${script}.cc"
     local sender_bw_tag="${sender_bw//./p}"
     local bottle_bw_tag="${bottle_bw//./p}"
-    local scenario_dir="${TRACE_ROOT}/${num_flows}f_sender${sender_bw_tag}M_bottle${bottle_bw_tag}M_delay${bottle_delay}ms_q${queue_bdp}bdp_time${sim_time}s"
+    local scenario_dir="${TRACE_ROOT}/${num_flows}f_sender${sender_bw_tag}M_bottle${bottle_bw_tag}M_delay${bottle_delay}ms_q${queue_bdp}bdp_time${sim_time}s_${PROBE_TAG}"
     local trace_path="${scenario_dir}/"
     local run_log="${scenario_dir}/run.log"
     local bin_path="build/scratch/${script}"
@@ -180,7 +224,7 @@ run_test() {
         return 1
     fi
 
-    print_header "Running $num_flows flows: SENDER_BW=${sender_bw}Mbps, BOTTLE_BW=${bottle_bw}Mbps, DELAY=${bottle_delay}ms, QUEUE=${queue_bdp}BDP, SIM_TIME=${sim_time}s"
+    print_header "Running $num_flows flows: SENDER_BW=${sender_bw}Mbps, BOTTLE_BW=${bottle_bw}Mbps, DELAY=${bottle_delay}ms, QUEUE=${queue_bdp}BDP, SIM_TIME=${sim_time}s, ProbeRTT=${PROBE_RTT}"
 
     mkdir -p "$scenario_dir"
 
@@ -190,6 +234,7 @@ run_test() {
     # Build if needed
     echo -e "${BLUE}Building...${NC}"
     cd "$NS3_DIR"
+    sync_waf_exported_headers
     if $REBUILD || [ ! -f "$bin_path" ] || [ "$script_file" -nt "$bin_path" ]; then
         if ! ./waf build --targets=${script} > /dev/null 2>&1; then
             echo -e "${RED}✗ Build failed for ${script}${NC}"
@@ -204,7 +249,7 @@ run_test() {
     echo -e "${BLUE}Running simulation...${NC}"
     start_time=$(date +%s)
 
-    if ! ./waf --run "${script} --sim_time=${sim_time} --trace_path=${trace_path}" 2>&1 | tee "$run_log"; then
+    if ! ./waf --run "${script} --sim_time=${sim_time} --trace_path=${trace_path} --cc=${CC_NAME}" 2>&1 | tee "$run_log"; then
         if [ -f "$script_file.bak" ]; then
             mv "$script_file.bak" "$script_file"
         fi
@@ -235,6 +280,7 @@ echo "  Sender BW: $SENDER_BW Mbps"
 echo "  Bottleneck Delay: $BOTTLE_DELAY ms"
 echo "  Queue: $QUEUE_BDP BDP"
 echo "  Simulation Time: $SIM_TIME seconds"
+echo "  ProbeRTT: $PROBE_RTT (${CC_NAME})"
 echo "  Instance: $INSTANCE"
 echo "  Trace Root: $TRACE_ROOT"
 echo ""

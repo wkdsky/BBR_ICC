@@ -1,3 +1,6 @@
+#ifndef DQC_PROTO_TYPES_H_
+#define DQC_PROTO_TYPES_H_
+
 #pragma once
 #include <stdint.h>
 #include <cstddef>
@@ -117,7 +120,7 @@ kNmccBytes,kOlia,kWvegas,kMpVeno,
 kDwcBytes,kCoupleBBR,kBBR_DELAY, 
 kBBR,kBBRD,kBBRPlus,kOBBR,
 kBBRRand,kTsunami,kHighSpeedRail,
-kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,kFreqCCv4,
+kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,kFreqCCv4,
 kCopa,kPCC,kVivace,
 kWebRTCVivace,kVegas,
 kLedbat,kLpTcp,kLpBBR,kLpBBRNo,
@@ -129,3 +132,5 @@ ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);
 }//namespace dqc;
+
+#endif  // DQC_PROTO_TYPES_H_
