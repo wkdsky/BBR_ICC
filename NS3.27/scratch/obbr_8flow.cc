@@ -51,16 +51,16 @@ using namespace ns3;
 using namespace dqc;
 using namespace std;
 #ifndef DQC_SCENARIO_LOG_COMPONENT
-#define DQC_SCENARIO_LOG_COMPONENT "8-bbrv2"
+#define DQC_SCENARIO_LOG_COMPONENT "obbr-8flow"
 #endif
 #ifndef DQC_SCENARIO_INSTANCE
-#define DQC_SCENARIO_INSTANCE "8_bbrv2"
+#define DQC_SCENARIO_INSTANCE "obbr_8flow"
 #endif
 #ifndef DQC_DEFAULT_CC
-#define DQC_DEFAULT_CC "bbrv2"
+#define DQC_DEFAULT_CC "obbr"
 #endif
 #ifndef DQC_SCENARIO_TITLE
-#define DQC_SCENARIO_TITLE "8 BBRv2-Style Flows"
+#define DQC_SCENARIO_TITLE "8 oBBR Flows"
 #endif
 NS_LOG_COMPONENT_DEFINE (DQC_SCENARIO_LOG_COMPONENT);
 
@@ -354,6 +354,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
         cc = kBBRv2PlusEcn;
     } else if (algo == "bbrv2_noprobe_rtt") {
         cc = kBBRv2NoProbeRtt;
+    } else if (algo == "obbr") {
+        cc = kOBBR;
     }
 
     uint32_t max_bps=0;
@@ -500,13 +502,11 @@ int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
     std::string trace_path="";
-    std::string cc_name=DQC_DEFAULT_CC;
 
     // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt, bbrv2plus, bbrv2plus_ecn", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
@@ -519,13 +519,13 @@ int main (int argc, char *argv[]){
     // Print configuration
     std::cout << "=== " << DQC_SCENARIO_TITLE << " Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
-    std::cout << "Congestion control: " << cc_name << std::endl;
+    std::cout << "Congestion control: oBBR" << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;
     std::cout << "====================================" << std::endl;
 
-    std::vector<std::string> algos{cc_name};
+    std::vector<std::string> algos{"obbr"};
     for (size_t c = 0; c < algos.size(); ++c){
         std::string cong=algos[c];
         std::string name=cong;

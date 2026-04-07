@@ -11,7 +11,6 @@
 #include "ns3/freqcc_sender.h"
 #include "ns3/freqccv2_sender.h"
 #include "ns3/freqccv3_sender.h"
-#include "ns3/freqccv4_sender.h"
 #include "ns3/obbr_sender.h"
 #include "proto_bbr_sender.h"
 #include "ns3/quic_bbr2_sender.h"
@@ -47,7 +46,7 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
-           type == kFreqCCv3 || type == kFreqCCv4;
+           type == kFreqCCv3;
 }
 
 }  // namespace
@@ -273,13 +272,6 @@ void DqcSender::Bind(uint16_t port){
                 m_traceRttFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, rtt_peak_freq_hz, avg_smoothed_rtt_ms);
             }
         });
-    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetUpPhaseTraceCallback([this](double start_time, double duration_ms, double freq_hz, bool exit_due_to_queueing, int cycles, float pacing_gain, int32_t bw_kbps){
-            if(!m_traceUpPhaseCb.IsNull()){
-                m_traceUpPhaseCb(start_time, duration_ms, freq_hz, exit_due_to_queueing, cycles, pacing_gain, bw_kbps);
-            }
-        });
     } else if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
                        algo->GetCongestionControlType() == kBBRv2Ecn ||
                        algo->GetCongestionControlType() == kBBRv2NoProbeRtt ||
@@ -433,10 +425,6 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
             FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
             int32_t mode_index = freqccv3->GetCurrentBbrModeIndex();
             m_traceBbrModeCb(mode_index);
-        } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
-            FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-            int32_t mode_index = freqccv4->GetCurrentBbrModeIndex();
-            m_traceBbrModeCb(mode_index);
 	        } else if(algo && IsBbr2StyleAlgorithm(algo->GetCongestionControlType())){
 	            Bbr2Sender* bbrv2 = static_cast<Bbr2Sender*>(algo);
 	            m_traceBbrModeCb(bbrv2->GetCurrentBbrModeIndex());
@@ -579,9 +567,6 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 } else if(algo->GetCongestionControlType() == kFreqCCv3){
                     FreqCCv3Sender* freqccv3 = static_cast<FreqCCv3Sender*>(algo);
                     instant_kbps = (int32_t)freqccv3->BandwidthLatest().ToKBitsPerSecond();
-                } else if(algo->GetCongestionControlType() == kFreqCCv4){
-                    FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-                    instant_kbps = (int32_t)freqccv4->BandwidthLatest().ToKBitsPerSecond();
                 } else if(algo->GetCongestionControlType() == kOBBR){
                     ObbrSender* obbr = static_cast<ObbrSender*>(algo);
                     instant_kbps = (int32_t)obbr->BandwidthLatest().ToKBitsPerSecond();
@@ -750,44 +735,6 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
         }
         freqccv3->SetOscillationAmplitude(amp_mode, fixed_bps);
         // Note: FreqCCv3 only oscillates during PROBE_UP, no oscillation mode setting needed
-    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-
-        // Set frequency (initial base frequency)
-        freqccv4->SetOscillationFrequency(freq_hz);
-
-        // Set amplitude mode
-        FreqCCv4AmplitudeMode amp_mode = FreqCCv4AmplitudeMode::kFixed;
-        uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
-
-        if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu2;
-        } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu3;
-        } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu4;
-        } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu8;
-        } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR2;
-        } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR3;
-        } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR4;
-        } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR8;
-        } else {
-            amp_mode = FreqCCv4AmplitudeMode::kFixed;
-            if(amplitude_mode != "0" && !amplitude_mode.empty()) {
-                try {
-                    double val = std::stod(amplitude_mode);
-                    if(val > 0) {
-                        fixed_bps = static_cast<uint64_t>(val * 1000000);
-                    }
-                } catch(...) {}
-            }
-        }
-        freqccv4->SetOscillationAmplitude(amp_mode, fixed_bps);
     }
 }
 }  // namespace ns3

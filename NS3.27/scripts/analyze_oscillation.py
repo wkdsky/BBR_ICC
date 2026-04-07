@@ -211,7 +211,7 @@ def main():
 
     # Analyze flow 1
     flow_id = 1
-    prefix = f'1_freqccv3_{flow_id}'
+    prefix = f'freqccv3_4flow_{flow_id}'
 
     bbrmode_file = os.path.join(trace_dir, f'{prefix}_bbrmode.txt')
     sendrate_file = os.path.join(trace_dir, f'{prefix}_sendrate.txt')

@@ -209,7 +209,7 @@ run_test() {
     local queue_bdp=$5
     local sim_time=$6
 
-    local script="${num_flows}_bbrv2"
+    local script="bbrv2_${num_flows}flow"
     local script_file="$SCRATCH_DIR/${script}.cc"
     local sender_bw_tag="${sender_bw//./p}"
     local bottle_bw_tag="${bottle_bw//./p}"

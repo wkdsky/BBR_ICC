@@ -6,7 +6,7 @@
 # Usage: ./run_freqccv3_batch.sh [OPTIONS]
 #
 # Options:
-#   --flows 4,8                 Comma-separated list of flow counts to run
+#   --flows 4,8,16,32           Comma-separated list of flow counts to run
 #   --sender-bw <Mbps>          Edge link bandwidth (flow-specific defaults if not set)
 #   --bottle-bw <Mbps>          Bottleneck bandwidth (flow-specific defaults if not set)
 #   --bottle-delay <ms>         Bottleneck delay (default: flow-specific)
@@ -15,9 +15,10 @@
 #   --freqall <Hz>              Apply one frequency to all active flows
 #   --ampall <mode>             Apply one amplitude mode to all active flows
 #   --fixedall <Mbps>           Apply one fixed amplitude to all active flows
-#   --freqN <Hz>                Flow N oscillation frequency, N=1..8
-#   --ampN <mode>               Flow N amplitude mode, N=1..8
-#   --fixedN <Mbps>             Flow N fixed amplitude, N=1..8
+#   --freqN <Hz>                Flow N oscillation frequency, N=1..32
+#   --ampN <mode>               Flow N amplitude mode, N=1..32
+#   --fixedN <Mbps>             Flow N fixed amplitude, N=1..32
+#   --interval-win-rtt-mult <x> Interval-phase STFT window multiplier on min_rtt
 #   --instance <id>             Instance number (default: 1)
 #   --rebuild                   Force rebuild even if no changes
 #   --help                      Show this help message
@@ -27,6 +28,7 @@
 #   ./run_freqccv3_batch.sh --flows 8 --sender-bw 10 --bottle-bw 16 --sim-time 60
 #   ./run_freqccv3_batch.sh --flows 4,8 --bottle-delay 40 --queue-bdp 2
 #   ./run_freqccv3_batch.sh --flows 8 --freqall 60 --ampall miu2 --fixedall 0
+#   ./run_freqccv3_batch.sh --flows 16 --freqall 60 --ampall miu2 --interval-win-rtt-mult 1.5
 #   ./run_freqccv3_batch.sh --flows 4 --freq1 80 --amp1 miu2 --fixed1 2.5
 
 #  cd /home/wkd/BBR_ICC/NS3.27
@@ -41,7 +43,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-FLOWS="4,8"
+FLOWS="4,8,16,32"
 SIM_TIME=30
 INSTANCE=1
 REBUILD=false
@@ -53,17 +55,25 @@ RUN_TAG="$(date +%Y%m%d_%H%M%S)"
 TRACE_ROOT=""
 ACTIVE_SCRIPT_FILE=""
 
+INTERVAL_WIN_RTT_MULT=""
+
 declare -A DEFAULT_SENDER_BW
 DEFAULT_SENDER_BW[4]=8
 DEFAULT_SENDER_BW[8]=10
+DEFAULT_SENDER_BW[16]=10
+DEFAULT_SENDER_BW[32]=10
 
 declare -A DEFAULT_BOTTLE_BW
 DEFAULT_BOTTLE_BW[4]=20
 DEFAULT_BOTTLE_BW[8]=16
+DEFAULT_BOTTLE_BW[16]=32
+DEFAULT_BOTTLE_BW[32]=64
 
 declare -A DEFAULT_BOTTLE_DELAY
 DEFAULT_BOTTLE_DELAY[4]=18
 DEFAULT_BOTTLE_DELAY[8]=28
+DEFAULT_BOTTLE_DELAY[16]=18
+DEFAULT_BOTTLE_DELAY[32]=28
 
 declare -A FLOW_FREQ_OVERRIDE
 declare -A FLOW_AMP_OVERRIDE
@@ -114,16 +124,8 @@ while [[ $# -gt 0 ]]; do
             FLOW_FIXED_ALL="$2"
             shift 2
             ;;
-        --freq[1-8])
-            FLOW_FREQ_OVERRIDE["${1#--freq}"]="$2"
-            shift 2
-            ;;
-        --amp[1-8])
-            FLOW_AMP_OVERRIDE["${1#--amp}"]="$2"
-            shift 2
-            ;;
-        --fixed[1-8])
-            FLOW_FIXED_OVERRIDE["${1#--fixed}"]="$2"
+        --interval-win-rtt-mult)
+            INTERVAL_WIN_RTT_MULT="$2"
             shift 2
             ;;
         --instance)
@@ -135,12 +137,33 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help)
-            sed -n '3,23p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
-            echo -e "${RED}Unknown option: $1${NC}"
-            exit 1
+            if [[ "$1" =~ ^--(freq|amp|fixed)([0-9]+)$ ]]; then
+                kind="${BASH_REMATCH[1]}"
+                idx="${BASH_REMATCH[2]}"
+                if (( idx < 1 || idx > 32 )); then
+                    echo -e "${RED}Error: ${kind}${idx} is out of supported range 1..32${NC}"
+                    exit 1
+                fi
+                case "$kind" in
+                    freq)
+                        FLOW_FREQ_OVERRIDE["$idx"]="$2"
+                        ;;
+                    amp)
+                        FLOW_AMP_OVERRIDE["$idx"]="$2"
+                        ;;
+                    fixed)
+                        FLOW_FIXED_OVERRIDE["$idx"]="$2"
+                        ;;
+                esac
+                shift 2
+            else
+                echo -e "${RED}Unknown option: $1${NC}"
+                exit 1
+            fi
             ;;
     esac
 done
@@ -279,7 +302,7 @@ run_test() {
     local queue_bdp=$5
     local sim_time=$6
 
-    local script="${num_flows}_freqccv3"
+    local script="freqccv3_${num_flows}flow"
     local script_file="$SCRATCH_DIR/${script}.cc"
     local sender_bw_tag="${sender_bw//./p}"
     local bottle_bw_tag="${bottle_bw//./p}"
@@ -302,6 +325,9 @@ run_test() {
     for arg in "${FLOW_ARGS[@]}"; do
         run_extra_args+=" ${arg}"
     done
+    if [[ -n "$INTERVAL_WIN_RTT_MULT" ]]; then
+        run_extra_args+=" --interval_win_rtt_mult=${INTERVAL_WIN_RTT_MULT}"
+    fi
 
     print_header "Running $num_flows flows: SENDER_BW=${sender_bw}Mbps, BOTTLE_BW=${bottle_bw}Mbps, DELAY=${bottle_delay}ms, QUEUE=${queue_bdp}BDP, SIM_TIME=${sim_time}s"
     print_flow_overrides "$num_flows"
@@ -358,6 +384,7 @@ echo "  Queue: $QUEUE_BDP BDP"
 echo "  Simulation Time: $SIM_TIME seconds"
 echo "  Instance: $INSTANCE"
 echo "  Trace Root: $TRACE_ROOT"
+echo "  Interval Window RTT Multiplier: ${INTERVAL_WIN_RTT_MULT:-default}"
 if [[ -n "$FLOW_FREQ_ALL" || -n "$FLOW_AMP_ALL" || -n "$FLOW_FIXED_ALL" || ${#FLOW_FREQ_OVERRIDE[@]} -gt 0 || ${#FLOW_AMP_OVERRIDE[@]} -gt 0 || ${#FLOW_FIXED_OVERRIDE[@]} -gt 0 ]]; then
     echo "  Per-flow overrides: enabled"
 fi

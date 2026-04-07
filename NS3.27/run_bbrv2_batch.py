@@ -70,7 +70,7 @@ class BBRv2BatchRunner:
 
     def update_script_params(self, num_flows, sender_bw, bottle_bw, bottle_delay):
         """Update C++ constants in the script file"""
-        script_file = self.scratch_dir / f"{num_flows}_bbrv2.cc"
+        script_file = self.scratch_dir / f"bbrv2_{num_flows}flow.cc"
 
         if not script_file.exists():
             self.print_error(f"Script not found: {script_file}")
@@ -112,7 +112,7 @@ class BBRv2BatchRunner:
         with open(script_file.with_suffix('.cc'), 'w') as f:
             f.write(content)
 
-        self.print_success(f"Updated {num_flows}_bbrv2.cc")
+        self.print_success(f"Updated bbrv2_{num_flows}flow.cc")
         self.print_info(f"  TOPO_SENDER_BW={sender_bw} Mbps")
         self.print_info(f"  TOPO_BOTTLE_BW={bottle_bw} Mbps")
         self.print_info(f"  TOPO_BOTTLE_PDELAY={bottle_delay} ms")
@@ -136,7 +136,7 @@ class BBRv2BatchRunner:
 
     def build_script(self, num_flows, force=False):
         """Build a specific script"""
-        script_name = f"{num_flows}_bbrv2"
+        script_name = f"bbrv2_{num_flows}flow"
         executable = self.build_dir / "scratch" / script_name
 
         if executable.exists() and not force:
@@ -187,7 +187,7 @@ class BBRv2BatchRunner:
             start_time = datetime.now()
 
             result = subprocess.run(
-                ["./waf", "--run", f"{num_flows}_bbrv2 --sim_time={sim_time} --cc={cc_name}"],
+                ["./waf", "--run", f"bbrv2_{num_flows}flow --sim_time={sim_time} --cc={cc_name}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=600,

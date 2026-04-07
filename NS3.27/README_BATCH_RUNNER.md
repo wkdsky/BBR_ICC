@@ -12,10 +12,10 @@
 ├── bbrv2_config_examples.json      # 配置文件示例
 ├── README.md                       # 本文件
 └── scratch/
-    ├── 4_bbrv2.cc                  # 4 条流脚本
-    ├── 8_bbrv2.cc                  # 8 条流脚本
-    ├── 16_bbrv2.cc                 # 16 条流脚本
-    └── 32_bbrv2.cc                 # 32 条流脚本
+    ├── bbrv2_4flow.cc              # 4 条流脚本
+    ├── bbrv2_8flow.cc              # 8 条流脚本
+    ├── bbrv2_16flow.cc             # 16 条流脚本
+    └── bbrv2_32flow.cc             # 32 条流脚本
 ```
 
 ## 🚀 快速开始
@@ -239,7 +239,7 @@ Python 脚本仅使用标准库，无需额外安装。
 
 ## 📚 相关文件
 
-- **源脚本**: `scratch/4_bbrv2.cc`, `scratch/8_bbrv2.cc`, 等
+- **源脚本**: `scratch/bbrv2_4flow.cc`, `scratch/bbrv2_8flow.cc`, 等
 - **配置示例**: `bbrv2_config_examples.json`
 - **文档**: 本文件
 
@@ -276,5 +276,3 @@ echo "=== Example 3: Custom bandwidth ==="
 # Example 4: Quick test (only 4 flows, 10 seconds)
 echo "=== Example 4: Quick test ==="
 ./run_bbrv2_batch.sh --flows 4 --sim-time 10
-
-

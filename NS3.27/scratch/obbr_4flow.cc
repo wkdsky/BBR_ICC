@@ -13,7 +13,7 @@
  *                 |                    |
  * n3----L3--------|                    |------L8-------n8
  *
- * 4 BBRv2 flows, 8Mbps bottleneck, 60ms RTT, buffer = 1xBDP
+ * 4 oBBR flows, 8Mbps bottleneck, 60ms RTT, buffer = 1xBDP
  */
 
 #include "ns3/core-module.h"
@@ -39,16 +39,13 @@ using namespace ns3;
 using namespace dqc;
 using namespace std;
 #ifndef DQC_SCENARIO_LOG_COMPONENT
-#define DQC_SCENARIO_LOG_COMPONENT "4-bbrv2"
+#define DQC_SCENARIO_LOG_COMPONENT "obbr-4flow"
 #endif
 #ifndef DQC_SCENARIO_INSTANCE
-#define DQC_SCENARIO_INSTANCE "4_bbrv2"
-#endif
-#ifndef DQC_DEFAULT_CC
-#define DQC_DEFAULT_CC "bbrv2"
+#define DQC_SCENARIO_INSTANCE "obbr_4flow"
 #endif
 #ifndef DQC_SCENARIO_TITLE
-#define DQC_SCENARIO_TITLE "4 BBRv2-Style Flows"
+#define DQC_SCENARIO_TITLE "4 oBBR Flows"
 #endif
 NS_LOG_COMPONENT_DEFINE (DQC_SCENARIO_LOG_COMPONENT);
 
@@ -100,11 +97,11 @@ uint32_t msQdelay;
 
 // Link configurations: L0-L3 (sender side), L4 (bottleneck), L5-L8 (receiver side)
 
-const uint64_t TOPO_SENDER_BW       =   50000000;    // in bps
+const uint64_t TOPO_SENDER_BW       =   16000000;    // in bps
 const uint64_t TOPO_SENDER_PDELAY   =   1;    // in ms
 const uint64_t TOPO_BOTTLE_BW       =   20000000;    // in bps
 const uint64_t TOPO_BOTTLE_PDELAY   =   18;    // in ms
-const uint64_t TOPO_DEFAULT_QDELAY  =   160;    // in ms
+const uint64_t TOPO_DEFAULT_QDELAY  =   400;    // in ms
 
 link_config_t p4p[]={
 [0]={TOPO_SENDER_BW,TOPO_SENDER_PDELAY,TOPO_DEFAULT_QDELAY},   // L0: n0-n4
@@ -164,8 +161,8 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
     return sendApp;
 }
 
-void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
-    std::string instance=DQC_SCENARIO_INSTANCE;  // Use script filename instead of instance number
+void ns3_obbr(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
+    std::string instance=DQC_SCENARIO_INSTANCE;
     uint64_t linkBw   = TOPO_BOTTLE_BW;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
@@ -202,7 +199,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     TrafficControlHelper tch;
     std::vector<std::shared_ptr<QueueOccupancyTracer>> queue_tracers;
 
-    //L0-L3 and L5-L8: Edge links (10Mbps)
+    //L0-L3 and L5-L8: Edge links
     bufSize =TOPO_SENDER_BW * TOPO_DEFAULT_QDELAY / 8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
@@ -222,8 +219,8 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     NetDeviceContainer devn5n8 = p2p.Install (n5n8);
     NetDeviceContainer devn5n9 = p2p.Install (n5n9);
 
-    //L4: Bottleneck link (8Mbps)
-    bufSize =TOPO_BOTTLE_BW * TOPO_DEFAULT_QDELAY / 8000;//与msQdelay相关，这里代表1个BDP
+    //L4: Bottleneck link
+    bufSize =TOPO_BOTTLE_BW * TOPO_DEFAULT_QDELAY / 8000;
     p2p.SetQueue ("ns3::DropTailQueue",
                 "Mode", StringValue ("QUEUE_MODE_BYTES"),
                 "MaxBytes", UintegerValue (bufSize));
@@ -270,14 +267,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     // Set up the routing
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
-    dqc::CongestionControlType cc = kBBRv2;
-    if (algo == "bbrv2plus") {
-        cc = kBBRv2Plus;
-    } else if (algo == "bbrv2plus_ecn") {
-        cc = kBBRv2PlusEcn;
-    } else if (algo == "bbrv2_noprobe_rtt") {
-        cc = kBBRv2NoProbeRtt;
-    }
+    dqc::CongestionControlType cc = kOBBR;
 
     uint32_t max_bps=0;
     int test_pair=1;
@@ -287,7 +277,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     std::vector<Ptr<DqcSender>> senders;
     std::string log;
     std::string delimiter="_";
-    std::string prefix=instance+delimiter;  // instance already includes script name and algorithm
+    std::string prefix=instance+delimiter;
     log=prefix+std::to_string(test_pair);
     std::unique_ptr<DqcTrace> trace;
 
@@ -363,13 +353,10 @@ int main (int argc, char *argv[]){
     int sim_time=30;
     int ins[]={1};
     std::string trace_path="";
-    std::string cc_name=DQC_DEFAULT_CC;
 
-    // Command line arguments
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt, bbrv2plus, bbrv2plus_ecn", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
@@ -379,24 +366,23 @@ int main (int argc, char *argv[]){
     }
     SetQueueOccupancyTraceFolder(trace_path);
 
-    // Print configuration
     std::cout << "=== " << DQC_SCENARIO_TITLE << " Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
-    std::cout << "Congestion control: " << cc_name << std::endl;
+    std::cout << "Congestion control: oBBR" << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;
-    std::cout << "====================================" << std::endl;
+    std::cout << "==================================" << std::endl;
 
-    std::vector<std::string> algos{cc_name};
-    for (size_t c = 0; c < algos.size(); ++c){
-        std::string cong=algos[c];
+    const char *algos[]={"obbr"};
+    for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
+        std::string cong=std::string(algos[c]);
         std::string name=cong;
         std::unique_ptr<DqcTraceState> stat;
         stat.reset(new DqcTraceState(name));
         auto inner_start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < sizeof(ins) / sizeof(ins[0]); ++i){
-            ns3_bbrv2(ins[i],cong,stat.get(),sim_time);
+            ns3_obbr(ins[i],cong,stat.get(),sim_time);
         }
         auto inner_end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> tm = inner_end - inner_start;

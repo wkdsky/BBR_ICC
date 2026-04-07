@@ -39,16 +39,16 @@ using namespace ns3;
 using namespace dqc;
 using namespace std;
 #ifndef DQC_SCENARIO_LOG_COMPONENT
-#define DQC_SCENARIO_LOG_COMPONENT "4-bbrv2"
+#define DQC_SCENARIO_LOG_COMPONENT "bbrv2-4flow"
 #endif
 #ifndef DQC_SCENARIO_INSTANCE
-#define DQC_SCENARIO_INSTANCE "4_bbrv2"
+#define DQC_SCENARIO_INSTANCE "bbrv2_4flow"
 #endif
 #ifndef DQC_DEFAULT_CC
 #define DQC_DEFAULT_CC "bbrv2"
 #endif
 #ifndef DQC_SCENARIO_TITLE
-#define DQC_SCENARIO_TITLE "4 BBRv2-Style Flows"
+#define DQC_SCENARIO_TITLE "4 BBRv2 Flows"
 #endif
 NS_LOG_COMPONENT_DEFINE (DQC_SCENARIO_LOG_COMPONENT);
 
@@ -165,7 +165,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
 }
 
 void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
-    std::string instance=DQC_SCENARIO_INSTANCE;  // Use script filename instead of instance number
+    std::string instance=algo + "_4flow";
     uint64_t linkBw   = TOPO_BOTTLE_BW;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
@@ -271,11 +271,7 @@ void ns3_bbrv2(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
     dqc::CongestionControlType cc = kBBRv2;
-    if (algo == "bbrv2plus") {
-        cc = kBBRv2Plus;
-    } else if (algo == "bbrv2plus_ecn") {
-        cc = kBBRv2PlusEcn;
-    } else if (algo == "bbrv2_noprobe_rtt") {
+    if (algo == "bbrv2_noprobe_rtt") {
         cc = kBBRv2NoProbeRtt;
     }
 
@@ -369,7 +365,7 @@ int main (int argc, char *argv[]){
     CommandLine cmd;
     cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt, bbrv2plus, bbrv2plus_ecn", cc_name);
+    cmd.AddValue("cc", "Congestion control: bbrv2, bbrv2_noprobe_rtt", cc_name);
     cmd.Parse(argc, argv);
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){

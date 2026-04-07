@@ -196,11 +196,7 @@ void DqcTrace::OpenUpPhaseFile(){
     }
     m_upPhase.open(path.c_str(), std::fstream::out);
     if(m_upPhase.is_open()){
-        if (m_ccType == dqc::kFreqCCv4) {
-            m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\t1.25BDP_exit\tcycles\tbw_estimate(kbps)"<<std::endl;
-        } else {
-            m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\t1.25BDP_exit\tcycles\tpacing_gain\tbw_estimate(kbps)"<<std::endl;
-        }
+        m_upPhase<<"#start_time(s)\tduration(ms)\tfreq(Hz)\t1.25BDP_exit\tcycles\tpacing_gain\tbw_estimate(kbps)"<<std::endl;
     }
 }
 void DqcTrace::OpenStatsFile(){
@@ -328,11 +324,7 @@ void DqcTrace::OnLossRate(double time_sec,float loss_rate,float cumulative_loss_
 void DqcTrace::OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps){
     OpenUpPhaseFile();  // Lazy open
     if(m_upPhase.is_open()){
-        if (m_ccType == dqc::kFreqCCv4) {
-            m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<(exit_due_to_queueing?"true":"false")<<"\t"<<cycles<<"\t"<<bw_estimate_kbps<<std::endl;
-        } else {
-            m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<(exit_due_to_queueing?"true":"false")<<"\t"<<cycles<<"\t"<<pacing_gain<<"\t"<<bw_estimate_kbps<<std::endl;
-        }
+        m_upPhase<<start_time<<"\t"<<duration_ms<<"\t"<<freq_hz<<"\t"<<(exit_due_to_queueing?"true":"false")<<"\t"<<cycles<<"\t"<<pacing_gain<<"\t"<<bw_estimate_kbps<<std::endl;
     }
 }
 void DqcTrace::OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps){
