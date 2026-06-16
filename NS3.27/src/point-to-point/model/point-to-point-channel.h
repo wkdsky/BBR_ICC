@@ -73,6 +73,7 @@ public:
   void Attach (Ptr<PointToPointNetDevice> device);
   void ScheduleDelayChange (void);
   void ScheduleDelayChange_tw (void);
+  void SetPropagationDelay (Time delay);
   void setRandomDelay (Ptr<UniformRandomVariable> pra1);
   uint32_t poissonGenerator (double lambda);
 

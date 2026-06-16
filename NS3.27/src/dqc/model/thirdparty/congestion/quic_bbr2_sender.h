@@ -89,10 +89,20 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
     return model_.BandwidthEstimate();
   }
 
+  QuicBandwidth DeliveryRateLatest() const {
+    return model_.delivery_rate_latest();
+  }
+
   // Get the latest bandwidth sample (instant receive rate)
   QuicBandwidth BandwidthLatest() const {
     return model_.bandwidth_latest();
   }
+
+  float PacingGain() const { return model_.pacing_gain(); }
+  QuicByteCount TotalBytesSent() const { return model_.total_bytes_sent(); }
+  QuicByteCount TotalBytesAcked() const { return model_.total_bytes_acked(); }
+  QuicByteCount TotalBytesLost() const { return model_.total_bytes_lost(); }
+  QuicTime LastAckEventTime() const { return last_ack_event_time_; }
 
   QuicByteCount GetCongestionWindow() const override;
 
@@ -155,6 +165,16 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // 4: PROBE_BW_REFILL, 5: PROBE_BW_UP, 6: PROBE_RTT
   virtual int32_t GetCurrentBbrModeIndex() const;
 
+  // Experimental hook used by experiments/bbrv2_probe_order. It forces one
+  // PROBE_UP entry at the first PROBE_BW ACK event on or after the target time.
+  void SetExperimentalForcedProbeUp(QuicTime probe_up_time,
+                                    TimeDelta min_probe_up_duration);
+  bool ShouldForceProbeUp(QuicTime now) const;
+  void MarkExperimentalForcedProbeUpStarted(QuicTime now);
+  bool ExperimentalForcedProbeUpExitAllowed(QuicTime now) const;
+  void SetExperimentalMaxCongestionWindowPackets(
+      QuicPacketCount max_cwnd_in_packets);
+
   using QueueDelayTraceCallback =
       std::function<void(uint32_t queue_delay_ms,
                          uint32_t latest_rtt_ms,
@@ -193,6 +213,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   virtual void OnMaxBandwidthFilterAdvanced(Bbr2ProbeBwMode::CyclePhase phase);
   virtual bool ShouldEnterProbeUpFromGuard() const;
   virtual bool ShouldProbeAgainFromPostUp() const;
+  virtual bool ShouldDelayProbeUpExit(QuicTime now) const;
   virtual float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
                                      float pacing_gain) const;
   virtual void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
@@ -241,6 +262,12 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // Debug only.
   bool last_sample_is_app_limited_;
   QueueDelayTraceCallback queue_delay_trace_cb_;
+  QuicTime last_ack_event_time_ = QuicTime::Zero();
+  bool experimental_forced_probe_up_enabled_ = false;
+  bool experimental_forced_probe_up_started_ = false;
+  QuicTime experimental_forced_probe_up_time_ = QuicTime::Zero();
+  QuicTime experimental_forced_probe_up_start_time_ = QuicTime::Zero();
+  TimeDelta experimental_forced_probe_up_min_duration_ = TimeDelta::Zero();
   
   QuicByteCount ecn_ce_count_{0};
   QuicByteCount alpha_last_delivered_{0};

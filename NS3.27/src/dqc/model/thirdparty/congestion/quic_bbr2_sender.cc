@@ -146,6 +146,9 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
 
   model_.OnCongestionEventStart(event_time, acked_packets, lost_packets,
                                 &congestion_event);
+  if (!acked_packets.empty()) {
+    last_ack_event_time_ = event_time;
+  }
   if (congestion_event.end_of_round_trip&&params_.enable_ecn){
       UpdateRoundTripAlpha();
   }
@@ -338,6 +341,48 @@ void Bbr2Sender::OnUpdateEcnBytes(uint64_t ecn_ce_count){
         model_.OnEcnUpdate();
     }
 }
+
+void Bbr2Sender::SetExperimentalForcedProbeUp(
+    QuicTime probe_up_time,
+    TimeDelta min_probe_up_duration) {
+  experimental_forced_probe_up_enabled_ = true;
+  experimental_forced_probe_up_started_ = false;
+  experimental_forced_probe_up_time_ = probe_up_time;
+  experimental_forced_probe_up_start_time_ = QuicTime::Zero();
+  experimental_forced_probe_up_min_duration_ = min_probe_up_duration;
+}
+
+bool Bbr2Sender::ShouldForceProbeUp(QuicTime now) const {
+  return experimental_forced_probe_up_enabled_ &&
+         !experimental_forced_probe_up_started_ &&
+         now >= experimental_forced_probe_up_time_;
+}
+
+void Bbr2Sender::MarkExperimentalForcedProbeUpStarted(QuicTime now) {
+  experimental_forced_probe_up_started_ = true;
+  experimental_forced_probe_up_start_time_ = now;
+}
+
+bool Bbr2Sender::ExperimentalForcedProbeUpExitAllowed(QuicTime now) const {
+  if (!experimental_forced_probe_up_enabled_ ||
+      experimental_forced_probe_up_min_duration_.IsZero() ||
+      experimental_forced_probe_up_start_time_ == QuicTime::Zero()) {
+    return true;
+  }
+  return now - experimental_forced_probe_up_start_time_ >=
+         experimental_forced_probe_up_min_duration_;
+}
+
+void Bbr2Sender::SetExperimentalMaxCongestionWindowPackets(
+    QuicPacketCount max_cwnd_in_packets) {
+  if (max_cwnd_in_packets == 0) {
+    return;
+  }
+  params_.cwnd_limits =
+      QuicLimits<QuicByteCount>(params_.cwnd_limits.Min(),
+                                max_cwnd_in_packets * kDefaultTCPMSS);
+}
+
 QuicByteCount Bbr2Sender::GetTargetBytesInflight() const {
   QuicByteCount bdp = model_.BDP(model_.BandwidthEstimate());
   return std::min(bdp, GetCongestionWindow());
@@ -524,6 +569,10 @@ bool Bbr2Sender::ShouldEnterProbeUpFromGuard() const {
 }
 
 bool Bbr2Sender::ShouldProbeAgainFromPostUp() const {
+  return false;
+}
+
+bool Bbr2Sender::ShouldDelayProbeUpExit(QuicTime /*now*/) const {
   return false;
 }
 

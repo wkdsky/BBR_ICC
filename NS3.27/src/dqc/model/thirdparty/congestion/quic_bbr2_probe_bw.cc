@@ -49,6 +49,16 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
     }
   }
 
+  if (sender_->ShouldForceProbeUp(event_time)) {
+    if (cycle_.phase != CyclePhase::PROBE_UP) {
+      ForceEnterProbeUp(event_time);
+      model_->set_pacing_gain(PacingGainForPhase(cycle_.phase));
+      model_->set_cwnd_gain(Params().probe_bw_cwnd_gain);
+      return Bbr2Mode::PROBE_BW;
+    }
+    sender_->MarkExperimentalForcedProbeUpStarted(event_time);
+  }
+
   bool switch_to_probe_rtt = false;
 
   if (cycle_.phase == CyclePhase::PROBE_UP) {
@@ -463,6 +473,10 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
     const Bbr2CongestionEvent& congestion_event) {
   DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_UP);
   if (MaybeAdaptUpperBounds(congestion_event) == ADAPTED_PROBED_TOO_HIGH) {
+    if (!sender_->ExperimentalForcedProbeUpExitAllowed(
+            congestion_event.event_time)) {
+      return;
+    }
     EnterProbeDown(/*probed_too_high=*/true, /*stopped_risky_probe=*/false,
                    congestion_event.event_time);
     return;
@@ -502,6 +516,17 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
   }
 
   if (is_risky || is_queuing) {
+    if (!sender_->ExperimentalForcedProbeUpExitAllowed(
+            congestion_event.event_time)) {
+      return;
+    }
+    if (!is_risky && is_queuing &&
+        sender_->ShouldDelayProbeUpExit(congestion_event.event_time)) {
+      QUIC_DVLOG(3) << sender_
+                    << " Delaying PROBE_UP exit due to sender-specific minimum"
+                    << " UP duration gate.";
+      return;
+    }
     if (!is_risky && is_queuing && sender_->EnablePlusProbeBwPhases()) {
       EnterProbePostUp(congestion_event.event_time);
       return;
@@ -647,6 +672,28 @@ void Bbr2ProbeBwMode::EnterProbeUp(QuicTime now) {
   RaiseInflightHighSlope();
 
   model_->RestartRound();
+  sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
+}
+
+void Bbr2ProbeBwMode::ForceEnterProbeUp(QuicTime now) {
+  // Minimal experimental hook for controlled probe-order experiments. It
+  // reuses normal PROBE_UP state initialization without waiting for REFILL.
+  QUIC_DVLOG(2) << sender_ << " Forced phase change: " << cycle_.phase
+                << " ==> " << CyclePhase::PROBE_UP << " after "
+                << now - cycle_.phase_start_time << ", or "
+                << cycle_.rounds_in_phase << " rounds.  @ " << now;
+  cycle_.phase = CyclePhase::PROBE_UP;
+  cycle_.rounds_in_phase = 0;
+  cycle_.phase_start_time = now;
+  cycle_.is_sample_from_probing = true;
+  cycle_.probe_up_rounds = 0;
+  cycle_.probe_up_acked = 0;
+  RaiseInflightHighSlope();
+
+  model_->clear_bandwidth_lo();
+  model_->clear_inflight_lo();
+  model_->RestartRound();
+  sender_->MarkExperimentalForcedProbeUpStarted(now);
   sender_->OnProbeBwPhaseEntered(cycle_.phase, now);
 }
 

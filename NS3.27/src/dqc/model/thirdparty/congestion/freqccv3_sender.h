@@ -4,7 +4,7 @@
 //   - Adds periodic oscillation only during PROBE_UP phase (like freqccv2)
 //   - NEW_REFILL logic:
 //     * If inflight > 0.75*BDP + 2*MSS + MaxAckHeight: pacing_gain=0.75 until inflight <= threshold
-//     * If inflight <= 0.70*BDP + 2*MSS + MaxAckHeight: pacing_gain=1.0 (original refill) until inflight >= 0.75*BDP threshold
+//     * If inflight <= 0.72*BDP + 2*MSS + MaxAckHeight: pacing_gain=1.0 (original refill) until inflight >= 0.72*BDP threshold
 //     * Otherwise: update parameters and exit immediately
 
 #ifndef FREQCCV3_SENDER_H_
@@ -50,7 +50,7 @@ enum class FreqCCv3AmplitudeMode {
 enum class NewRefillState {
   kNotInNewRefill,    // Not in NEW_REFILL phase
   kDraining,          // Draining: inflight > 0.75*BDP threshold, pacing_gain=0.75
-  kFilling,           // Filling: inflight <= 0.70*BDP threshold, pacing_gain=1.0
+  kFilling,           // Filling: inflight <= 0.72*BDP threshold, pacing_gain=1.0
   kDone,              // Done: neither condition met, exit immediately
 };
 
@@ -71,6 +71,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   void SetOscillationFrequency(double freq_hz);  // Frequency in Hz
   void SetOscillationAmplitude(FreqCCv3AmplitudeMode mode, uint64_t fixed_bps = 0);
   void SetIntervalWindowMultiplier(double multiplier);
+  void SetMinProbeUpDurationRttMultiplier(double multiplier);
+  void SetRecvSignalMode(bool use_delivery_rate_latest);
 
   // Override to return FreqCCv3 type
   CongestionControlType GetCongestionControlType() const override {
@@ -84,7 +86,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
                     QuicByteCount bytes,
                     HasRetransmittableData is_retransmittable) override;
 
-  // Override PacingRate to apply oscillation during PROBE_UP
+  // Override PacingRate to apply oscillation during the configured phase
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
 
   // Override OnCongestionEvent to implement NEW_REFILL logic
@@ -133,6 +135,14 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // CONSTRAINT 2: Expected Frequency Gate - reject out-of-range frequencies
   static constexpr double kFreqDeviationTolerance = 0.30;  // ±30% deviation allowed
 
+  // ICC-style band matching uses a gated band and compares normalized
+  // sender/response spectral shapes inside that band.
+  static constexpr double kBandLowRatio = 0.70;
+  static constexpr double kBandHighRatio = 1.30;
+  static constexpr int kBandShapeBins = 16;
+  static constexpr int kFftZeroPadMultiplier = 4;
+  static constexpr double kSpectrumShapeTolerance = 0.40;
+
   // CONSTRAINT 3: ACK Signal Smoothing - temporal smoothing window
   static constexpr double kSmoothingWindowFraction = 0.10;  // smooth over 10% of STFT window
 
@@ -143,7 +153,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   // Calculate oscillation offset based on current time and parameters
   int64_t CalculateOscillationOffset(QuicTime now) const;
 
-  // Check if oscillation should be active (only during PROBE_UP)
+  // Check if oscillation should be active during the configured phase.
   bool ShouldOscillate() const;
 
   // Get the amplitude in bps based on current mode and network state
@@ -164,8 +174,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
 
   // Check if we should exit NEW_REFILL and enter PROBE_UP
   bool ShouldExitNewRefill(QuicByteCount bytes_in_flight) const;
+  bool ShouldDelayProbeUpExit(QuicTime now) const override;
 
-  // Oscillation parameters (only used during PROBE_UP)
+  // Oscillation parameters
   double oscillation_freq_hz_;              // Frequency in Hz
   double current_oscillation_freq_hz_;      // Frequency used in the current/last UP phase (for tracing)
   double initial_freq_hz_;                  // Initial frequency (for first UP phase)
@@ -184,6 +195,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   NewRefillState new_refill_state_;         // Current state within NEW_REFILL
   bool in_new_refill_;                      // True when in NEW_REFILL phase
   double interval_window_multiplier_;       // Interval-phase STFT window = multiplier * min_rtt
+  double min_probe_up_duration_rtt_multiplier_;  // Experimental minimum UP duration in RTT units
 
   // Adaptive frequency state
   int up_phase_count_;                      // Count of UP phases completed
@@ -235,6 +247,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   struct AnalysisResult {
       double peak_freq_hz;
       int32_t avg_rate_kbps;
+      double shape_distance;
       bool valid;  // CONSTRAINT: Whether this result passes physical validity checks
   };
   AnalysisResult AnalyzeWindow(const std::vector<FreqSignalSample>& samples,
@@ -244,20 +257,38 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   struct RttAnalysisResult {
       double peak_freq_hz;
       double avg_rtt_ms;
+      double shape_distance;
       bool valid;
   };
   RttAnalysisResult AnalyzeRttWindow(const std::vector<RttSignalSample>& samples,
                                      TimeDelta window_duration,
                                      double expected_freq_hz) const;
 
+  struct SpectrumProfile {
+      double peak_freq_hz;
+      double band_peak_rel;
+      double band_energy_ratio;
+      std::vector<double> band_shape;
+      bool valid;
+  };
+  SpectrumProfile BuildSpectrumProfile(const std::vector<double>& values,
+                                       double sample_step_s,
+                                       double ref_freq_hz) const;
+  double ComputeSpectrumShapeDistance(const std::vector<double>& lhs,
+                                      const std::vector<double>& rhs) const;
+  bool CaptureSenderSpectrumTemplate(const std::vector<FreqSignalSample>& samples,
+                                     TimeDelta window_duration,
+                                     double ref_freq_hz);
+
   // CONSTRAINT 3: ACK signal preprocessing - smooth receiver rate signal
   std::vector<FreqSignalSample> SmoothSignal(const std::vector<FreqSignalSample>& raw_samples,
                                              double smoothing_window_ms) const;
   
   // STFT Analysis State
-  std::deque<FreqSignalSample> signal_history_;          // BandwidthLatest() sampled on ACK events
+  std::deque<FreqSignalSample> signal_history_;          // Configurable ACK-driven receive-rate signal
   std::deque<FreqSignalSample> sender_rate_history_;     // Sender rate signal (packet-send-based)
   std::deque<RttSignalSample> rtt_signal_history_;       // smoothed_rtt sampled on ACK events
+  bool use_delivery_rate_latest_for_signal_history_;
   QuicTime last_down_phase_end_time_;       // End time of the last DOWN phase; interval analysis starts here
   QuicTime last_up_phase_end_time_;         // End time of the last UP phase
   QuicTime last_up_phase_start_time_;       // Start time of the last UP phase
@@ -267,6 +298,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender final : public Bbr2Sender {
   TimeDelta last_up_rtt_window_size_;       // Window size used for RTT analysis in last UP phase
   bool last_up_phase_valid_;                // Whether last UP phase had >= kMinCyclesPerUp
   double sender_max_peak_freq_hz_;          // Max peak freq from sender rate in current UP phase
+  double last_up_sender_template_freq_hz_;  // Reference frequency of the stored sender template
+  bool last_up_sender_template_valid_;      // Whether sender template is available
+  std::vector<double> last_up_sender_band_template_;  // Normalized sender band spectrum
   QuicTime last_packet_sent_time_;          // Time of last packet sent for sender rate calc
 
   // Simple window size calculation for STFT based on target frequency and RTT

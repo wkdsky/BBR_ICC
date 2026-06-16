@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <vector>
 #include <fftw3.h>
@@ -50,9 +51,11 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       last_mode_(Bbr2Mode::STARTUP),
       last_probe_bw_phase_(Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED),
       current_time_(now),
+      last_ack_time_(QuicTime::Zero()),
       new_refill_state_(NewRefillState::kNotInNewRefill),
       in_new_refill_(false),
       interval_window_multiplier_(1.0),
+      min_probe_up_duration_rtt_multiplier_(0.0),
       // Initialize adaptive frequency state
       up_phase_count_(0),
       up_phase_start_time_(QuicTime::Zero()),
@@ -63,6 +66,7 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       // Initialize bandwidth tracking for early exit handling
       bandwidth_before_up_(QuicBandwidth::Zero()),
       up_phase_exited_early_(false),
+      use_delivery_rate_latest_for_signal_history_(false),
       last_down_phase_end_time_(QuicTime::Zero()),
       last_up_phase_end_time_(QuicTime::Zero()),
       last_up_phase_start_time_(QuicTime::Zero()),
@@ -72,7 +76,8 @@ FreqCCv3Sender::FreqCCv3Sender(QuicTime now,
       last_up_rtt_window_size_(TimeDelta::Zero()),
       last_up_phase_valid_(false),
       sender_max_peak_freq_hz_(0.0),
-      last_ack_time_(QuicTime::Zero()),
+      last_up_sender_template_freq_hz_(0.0),
+      last_up_sender_template_valid_(false),
       last_packet_sent_time_(QuicTime::Zero()) {
   QUIC_DVLOG(2) << this << " Initializing FreqCCv3Sender @ " << now;
 }
@@ -91,6 +96,18 @@ void FreqCCv3Sender::SetIntervalWindowMultiplier(double multiplier) {
   if (multiplier > 0.0) {
     interval_window_multiplier_ = multiplier;
   }
+}
+
+void FreqCCv3Sender::SetMinProbeUpDurationRttMultiplier(double multiplier) {
+  if (multiplier > 0.0) {
+    min_probe_up_duration_rtt_multiplier_ = multiplier;
+  } else {
+    min_probe_up_duration_rtt_multiplier_ = 0.0;
+  }
+}
+
+void FreqCCv3Sender::SetRecvSignalMode(bool use_delivery_rate_latest) {
+  use_delivery_rate_latest_for_signal_history_ = use_delivery_rate_latest;
 }
 
 uint64_t FreqCCv3Sender::GetCurrentAmplitudeBps() const {
@@ -130,12 +147,11 @@ Bbr2ProbeBwMode::CyclePhase FreqCCv3Sender::GetCurrentProbeBwPhase() const {
 }
 
 bool FreqCCv3Sender::ShouldOscillate() const {
-  // Only oscillate during PROBE_UP phase
   if (GetCurrentAmplitudeBps() == 0) {
     return false;
   }
 
-  // Must be in PROBE_BW mode and PROBE_UP phase
+  // FreqCCv3 only injects oscillation during PROBE_UP.
   if (!drain_completed_ || mode_ != Bbr2Mode::PROBE_BW) {
     return false;
   }
@@ -203,7 +219,7 @@ void FreqCCv3Sender::UpdateNewRefillState(QuicByteCount bytes_in_flight) {
     new_refill_state_ = NewRefillState::kDraining;
     QUIC_DVLOG(3) << "FreqCCv3: Entering kDraining state, pacing_gain=0.75";
   } else if (bytes_in_flight < low_threshold) {
-    // Inflight < 0.70*BDP + 2*MSS + MaxAckHeight: need to fill
+    // Inflight < 0.72*BDP + 2*MSS + MaxAckHeight: need to fill
     new_refill_state_ = NewRefillState::kFilling;
     QUIC_DVLOG(3) << "FreqCCv3: Entering kFilling state, pacing_gain=1.0";
   } else {
@@ -224,6 +240,7 @@ bool FreqCCv3Sender::ShouldExitNewRefill(QuicByteCount bytes_in_flight) const {
   }
 
   QuicByteCount high_threshold = CalculateInflightThreshold(kNewRefillHighThreshold);
+  QuicByteCount low_threshold = CalculateInflightThreshold(kNewRefillLowThreshold);
 
   switch (new_refill_state_) {
     case NewRefillState::kDraining:
@@ -231,8 +248,8 @@ bool FreqCCv3Sender::ShouldExitNewRefill(QuicByteCount bytes_in_flight) const {
       return bytes_in_flight <= high_threshold;
 
     case NewRefillState::kFilling:
-      // Exit when inflight >= 0.75*BDP + 2*MSS + MaxAckHeight
-      return bytes_in_flight >= high_threshold;
+      // Exit when inflight >= 0.72*BDP + 2*MSS + MaxAckHeight
+      return bytes_in_flight >= low_threshold;
 
     case NewRefillState::kDone:
       // Exit immediately
@@ -242,6 +259,23 @@ bool FreqCCv3Sender::ShouldExitNewRefill(QuicByteCount bytes_in_flight) const {
     default:
       return true;
   }
+}
+
+bool FreqCCv3Sender::ShouldDelayProbeUpExit(QuicTime now) const {
+  if (min_probe_up_duration_rtt_multiplier_ <= 0.0 ||
+      up_phase_start_time_ == QuicTime::Zero()) {
+    return false;
+  }
+
+  TimeDelta min_rtt = model_.MinRtt();
+  if (min_rtt.IsZero()) {
+    return false;
+  }
+
+  TimeDelta elapsed = now - up_phase_start_time_;
+  double required_us = min_probe_up_duration_rtt_multiplier_ *
+                       static_cast<double>(min_rtt.ToMicroseconds());
+  return static_cast<double>(elapsed.ToMicroseconds()) < required_us;
 }
 
 void FreqCCv3Sender::OnPacketSent(QuicTime sent_time,
@@ -290,12 +324,15 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
   Bbr2Sender::OnCongestionEvent(rtt_updated, prior_in_flight, event_time,
                                 acked_packets, lost_packets);
 
-  // STFT: Sample the ACK-driven BandwidthLatest() series after parent update.
-  // This aligns the internal frequency-analysis signal with the trace column
-  // `bandwidth_latest_recv_rate(kbps)` rather than the raw ack_bytes/delta rate.
+  // STFT: Sample the ACK-driven receive-rate series after parent update.
+  // Preserve the legacy BandwidthLatest() path by default, and allow an
+  // alternate raw-delivery path for controlled A/B experiments.
   if (last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_ &&
       acked_bytes > 0) {
-      signal_history_.push_back({event_time, BandwidthLatest()});
+      QuicBandwidth recv_signal = use_delivery_rate_latest_for_signal_history_
+                                      ? DeliveryRateLatest()
+                                      : BandwidthLatest();
+      signal_history_.push_back({event_time, recv_signal});
       if (rtt_stats_ != nullptr) {
           TimeDelta smoothed_rtt = rtt_stats_->smoothed_rtt();
           if (smoothed_rtt.IsZero()) {
@@ -381,12 +418,31 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
       // Analyze Previous Interval (from last DOWN end to now), i.e. CRUISE + REFILL.
       if (last_up_phase_valid_ && last_down_phase_end_time_ != QuicTime::Zero() &&
           last_down_phase_end_time_ < event_time) {
-          // Analyze Interval with threshold
-          // IMPORTANT: Use sender_max_peak_freq_hz_ from the previous UP phase before resetting it!
+          // Analyze the interval against the previous UP sender template when available.
+          double interval_ref_freq_hz = 0.0;
+          double interval_threshold_hz = 0.0;
+          if (last_up_sender_template_valid_ && last_up_sender_template_freq_hz_ > 0.0) {
+              interval_ref_freq_hz = last_up_sender_template_freq_hz_;
+          } else if (last_up_phase_peak_freq_ > 0.0) {
+              interval_ref_freq_hz = last_up_phase_peak_freq_;
+              interval_threshold_hz = last_up_phase_peak_freq_ * 2.0 / 3.0;
+          }
+
           PerformFreqAnalysis(last_down_phase_end_time_, event_time,
-                              last_up_phase_peak_freq_ * 2.0 / 3.0, 0.0);
+                              interval_threshold_hz, interval_ref_freq_hz);
+
+          double interval_rtt_ref_freq_hz = 0.0;
+          double interval_rtt_threshold_hz = 0.0;
+          if (last_up_sender_template_valid_ && last_up_sender_template_freq_hz_ > 0.0) {
+              interval_rtt_ref_freq_hz = last_up_sender_template_freq_hz_;
+          } else if (last_up_rtt_peak_freq_ > 0.0) {
+              interval_rtt_ref_freq_hz = last_up_rtt_peak_freq_;
+              interval_rtt_threshold_hz = last_up_rtt_peak_freq_ * 2.0 / 3.0;
+          }
+
           PerformRttFreqAnalysis(last_down_phase_end_time_, event_time,
-                                 last_up_rtt_peak_freq_ * 2.0 / 3.0, 0.0);
+                                 interval_rtt_threshold_hz,
+                                 interval_rtt_ref_freq_hz);
 
           // Clear history older than event_time (Start of this UP)
           while (!signal_history_.empty() && signal_history_.front().time < event_time) {
@@ -418,12 +474,15 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
       last_up_rtt_peak_freq_ = 0.0;
       last_up_phase_valid_ = false;
       sender_max_peak_freq_hz_ = 0.0;  // NOW reset sender max peak freq AFTER Interval analysis
+      last_up_sender_template_freq_hz_ = 0.0;
+      last_up_sender_template_valid_ = false;
+      last_up_sender_band_template_.clear();
 
       // Save bandwidth estimate before entering UP phase (for early exit handling)
       bandwidth_before_up_ = model_.MaxBandwidth();
       up_phase_exited_early_ = false;
 
-      QUIC_DVLOG(2) << "FreqCCv3: Entering PROBE_UP, starting oscillation @ " << event_time
+      QUIC_DVLOG(2) << "FreqCCv3: Entering PROBE_UP @ " << event_time
                     << ", freq=" << oscillation_freq_hz_ << "Hz, up_phase_count=" << up_phase_count_
                     << ", up_pacing_gain=" << up_pacing_gain_
                     << ", amplitude_bps=" << GetCurrentAmplitudeBps()
@@ -445,7 +504,7 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
     // We leave PROBE_UP when we were in it last event but not now
     // Also reset if we're not in PROBE_UP and oscillation_start_time_ is set (cleanup)
     bool leaving_probe_up = !in_probe_up && was_in_probe_up_before;
-    bool need_cleanup = !in_probe_up && (oscillation_start_time_ != QuicTime::Zero());
+    bool need_cleanup = !in_probe_up && (up_phase_start_time_ != QuicTime::Zero());
 
     if (leaving_probe_up || need_cleanup) {
       // Check if UP phase exited early due to loss/ECN
@@ -543,16 +602,37 @@ void FreqCCv3Sender::OnCongestionEvent(bool rtt_updated,
                 } else {
                     sender_max_peak_freq_hz_ = 0.0;
                 }
+
+                double sender_ref_freq_hz =
+                    (sender_max_peak_freq_hz_ > 0.0) ? sender_max_peak_freq_hz_
+                                                     : current_oscillation_freq_hz_;
+                CaptureSenderSpectrumTemplate(sender_samples, sender_duration,
+                                              sender_ref_freq_hz);
+                if (last_up_sender_template_valid_ &&
+                    last_up_sender_template_freq_hz_ > 0.0) {
+                    sender_ref_freq_hz = last_up_sender_template_freq_hz_;
+                    if (sender_max_peak_freq_hz_ <= 0.0) {
+                        sender_max_peak_freq_hz_ = sender_ref_freq_hz;
+                    }
+                }
+
+                // During the current UP itself, keep the detector band-gated but do not
+                // require ICC-style template similarity yet. The stored sender template is
+                // intended for the following INT = CRUISE + REFILL interval.
+                bool saved_template_valid = last_up_sender_template_valid_;
+                last_up_sender_template_valid_ = false;
+                PerformFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_,
+                                    0.0, sender_ref_freq_hz);
+                PerformRttFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_,
+                                       0.0, sender_ref_freq_hz);
+                last_up_sender_template_valid_ = saved_template_valid;
             } else {
                 sender_max_peak_freq_hz_ = 0.0;
+                PerformFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_,
+                                    0.0, current_oscillation_freq_hz_);
+                PerformRttFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_,
+                                       0.0, current_oscillation_freq_hz_);
             }
-
-            // ===== RECEIVER RATE STFT ANALYSIS =====
-            // Analyze THIS UP Phase (receiver rate)
-            // From last_up_phase_start_time_ to last_up_phase_end_time_
-            PerformFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_, 0.0, current_oscillation_freq_hz_);
-            PerformRttFreqAnalysis(last_up_phase_start_time_, last_up_phase_end_time_, 0.0,
-                                   current_oscillation_freq_hz_);
 
             // Clear sender rate history after STFT analysis
             while (!sender_rate_history_.empty() && sender_rate_history_.front().time < event_time) {
@@ -928,184 +1008,171 @@ double FreqCCv3Sender::CalculateRttSTFTWindowSize(double target_freq_hz) const {
     return win_sec;
 }
 
-// Helper to perform DFT with PHYSICAL CONSTRAINTS
-// Returns (Peak Frequency Hz, Avg Rate kbps, Validity Flag)
-FreqCCv3Sender::AnalysisResult FreqCCv3Sender::AnalyzeWindow(
-    const std::vector<FreqSignalSample>& samples,
-    TimeDelta window_duration,
-    double expected_freq_hz) const {
-
-    if (samples.empty()) return {0.0, 0, false};
-
-    // 1. Calculate Average Rate
-    double sum_rate = 0;
-    for (const auto& s : samples) {
-        sum_rate += s.rate.ToKBitsPerSecond();
-    }
-    int32_t avg_rate = static_cast<int32_t>(sum_rate / samples.size());
-
-    // 2. Resample to uniform grid for FFT
-    double step_s = 0.001;  // 1kHz sampling for finer interpolation
-    double duration_s = static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
-    int N = static_cast<int>(duration_s / step_s);
-
-    if (N < 8) {
-        return {0.0, avg_rate, false}; // Too small for meaningful analysis
+FreqCCv3Sender::SpectrumProfile FreqCCv3Sender::BuildSpectrumProfile(
+    const std::vector<double>& values,
+    double sample_step_s,
+    double ref_freq_hz) const {
+    SpectrumProfile profile{0.0, 0.0, 0.0, {}, false};
+    if (values.size() < 8 || sample_step_s <= 0.0 || ref_freq_hz <= 0.0) {
+        return profile;
     }
 
-    // Allocate buffers for FFTW
-    double *in = (double*) fftw_malloc(sizeof(double) * N);
-    fftw_complex *out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (N/2 + 1));
+    const int signal_len = static_cast<int>(values.size());
+    const int nfft = std::max(signal_len, signal_len * kFftZeroPadMultiplier);
+    double* in = (double*)fftw_malloc(sizeof(double) * nfft);
+    fftw_complex* out =
+        (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * (nfft / 2 + 1));
 
-    // Linear interpolation to uniform grid
-    double t_start = (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
-    size_t sample_idx = 0;
-
-    for (int i = 0; i < N; ++i) {
-        double t_target = t_start + i * step_s;
-
-        while (sample_idx < samples.size() - 1) {
-            double t_next = (samples[sample_idx+1].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
-            if (t_next >= t_target) break;
-            sample_idx++;
-        }
-
-        double val;
-        if (sample_idx >= samples.size() - 1) {
-            val = static_cast<double>(samples.back().rate.ToKBitsPerSecond());
-        } else {
-            double t1 = (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
-            double t2 = (samples[sample_idx+1].time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
-            double r1 = static_cast<double>(samples[sample_idx].rate.ToKBitsPerSecond());
-            double r2 = static_cast<double>(samples[sample_idx+1].rate.ToKBitsPerSecond());
-
-            if (std::abs(t2 - t1) < 1e-6) {
-                val = r1;
-            } else {
-                double fraction = (t_target - t1) / (t2 - t1);
-                val = r1 + fraction * (r2 - r1);
-            }
-        }
-        in[i] = val;
-    }
-
-    // 3. Normalize signal: subtract mean
     double mean = 0.0;
-    for (int i = 0; i < N; ++i) {
-        mean += in[i];
+    for (double value : values) {
+        mean += value;
     }
-    mean /= N;
-    for (int i = 0; i < N; ++i) {
-        in[i] -= mean;
+    mean /= signal_len;
+
+    for (int i = 0; i < signal_len; ++i) {
+        double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (signal_len - 1)));
+        in[i] = (values[i] - mean) * hann;
+    }
+    for (int i = signal_len; i < nfft; ++i) {
+        in[i] = 0.0;
     }
 
-    // 4. Apply Hann window
-    for (int i = 0; i < N; ++i) {
-        double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (N - 1)));
-        in[i] *= hann;
-    }
+    fftw_plan plan = fftw_plan_dft_r2c_1d(nfft, in, out, FFTW_ESTIMATE);
+    fftw_execute(plan);
 
-    // 5. FFT
-    fftw_plan p = fftw_plan_dft_r2c_1d(N, in, out, FFTW_ESTIMATE);
-    fftw_execute(p);
+    const double fs = 1.0 / sample_step_s;
+    const double freq_step = fs / nfft;
+    const int k_min = 1;
+    const int k_max = nfft / 2;
 
-    // ===== CONSTRAINT 1: Energy Threshold =====
-    // Calculate total spectral energy
+    std::vector<double> magnitudes(k_max + 1, 0.0);
     double total_energy = 0.0;
-    int k_min = 1;  // Ignore DC
-    int k_max = N / 2;
-
-    for (int k = k_min; k < k_max; ++k) {
-        double mag = std::sqrt(out[k][0]*out[k][0] + out[k][1]*out[k][1]);
+    for (int k = k_min; k <= k_max; ++k) {
+        double mag = std::sqrt(out[k][0] * out[k][0] + out[k][1] * out[k][1]);
+        magnitudes[k] = mag;
         total_energy += mag;
     }
 
-    // 6. Peak Detection
-    double Fs = 1.0 / step_s;
-    double max_mag = -1.0;
-    double peak_freq = 0.0;
-    int peak_k = 0;
+    const double band_low_hz = kBandLowRatio * ref_freq_hz;
+    const double band_high_hz = kBandHighRatio * ref_freq_hz;
+    int band_k_low = std::max(k_min, static_cast<int>(std::ceil(band_low_hz / freq_step)));
+    int band_k_high = std::min(k_max, static_cast<int>(std::floor(band_high_hz / freq_step)));
 
-    for (int k = k_min; k < k_max; ++k) {
-        double mag = std::sqrt(out[k][0]*out[k][0] + out[k][1]*out[k][1]);
-        if (mag > max_mag) {
-            max_mag = mag;
+    if (band_k_low > band_k_high || total_energy <= 0.0) {
+        fftw_destroy_plan(plan);
+        fftw_free(in);
+        fftw_free(out);
+        return profile;
+    }
+
+    double band_energy = 0.0;
+    double max_mag = -1.0;
+    int peak_k = band_k_low;
+    for (int k = band_k_low; k <= band_k_high; ++k) {
+        band_energy += magnitudes[k];
+        if (magnitudes[k] > max_mag) {
+            max_mag = magnitudes[k];
             peak_k = k;
         }
     }
 
-    peak_freq = peak_k * Fs / N;
-    if (peak_k > k_min && peak_k < k_max - 1) {
-        double left_mag = std::sqrt(out[peak_k - 1][0]*out[peak_k - 1][0] +
-                                    out[peak_k - 1][1]*out[peak_k - 1][1]);
-        double center_mag = max_mag;
-        double right_mag = std::sqrt(out[peak_k + 1][0]*out[peak_k + 1][0] +
-                                     out[peak_k + 1][1]*out[peak_k + 1][1]);
+    profile.peak_freq_hz = peak_k * freq_step;
+    if (peak_k > k_min && peak_k < k_max) {
+        double left_mag = magnitudes[peak_k - 1];
+        double center_mag = magnitudes[peak_k];
+        double right_mag = magnitudes[peak_k + 1];
         double denom = left_mag - 2.0 * center_mag + right_mag;
         if (std::abs(denom) > 1e-12) {
             double offset = 0.5 * (left_mag - right_mag) / denom;
             if (offset > 1.0) offset = 1.0;
             if (offset < -1.0) offset = -1.0;
-            peak_freq = (peak_k + offset) * Fs / N;
+            profile.peak_freq_hz = (peak_k + offset) * freq_step;
         }
     }
 
-    fftw_destroy_plan(p);
-    fftw_free(in);
-    fftw_free(out);
+    profile.band_energy_ratio = band_energy / total_energy;
+    profile.band_peak_rel = max_mag / total_energy;
 
-    // ===== APPLY PHYSICAL CONSTRAINTS =====
-    bool valid = true;
+    profile.band_shape.assign(kBandShapeBins, 0.0);
+    if (kBandShapeBins == 1) {
+        profile.band_shape[0] = max_mag;
+    } else {
+        for (int i = 0; i < kBandShapeBins; ++i) {
+            double target_freq =
+                band_low_hz +
+                (band_high_hz - band_low_hz) * static_cast<double>(i) /
+                    static_cast<double>(kBandShapeBins - 1);
+            double raw_index = target_freq / freq_step;
+            int left_k = static_cast<int>(std::floor(raw_index));
+            left_k = std::max(k_min, std::min(k_max, left_k));
+            int right_k = std::max(k_min, std::min(k_max, left_k + 1));
+            double frac = raw_index - left_k;
+            if (right_k == left_k) {
+                frac = 0.0;
+            }
+            profile.band_shape[i] =
+                magnitudes[left_k] * (1.0 - frac) + magnitudes[right_k] * frac;
+        }
+    }
 
-    // CONSTRAINT 1: Energy Threshold Check
-    if (total_energy > 0.0) {
-        double energy_ratio = max_mag / total_energy;
-        if (energy_ratio < kEnergyThresholdRatio) {
-            valid = false;  // Reject: peak is too weak (noise window)
+    double shape_sum = std::accumulate(profile.band_shape.begin(),
+                                       profile.band_shape.end(), 0.0);
+    if (shape_sum > 0.0) {
+        for (double& value : profile.band_shape) {
+            value /= shape_sum;
         }
     } else {
-        valid = false;
+        profile.band_shape.clear();
     }
 
-    // CONSTRAINT 2: Expected Frequency Gate
-    if (valid && expected_freq_hz > 0.0) {
-        double freq_deviation = std::abs(peak_freq - expected_freq_hz) / expected_freq_hz;
-        if (freq_deviation > kFreqDeviationTolerance) {
-            valid = false;  // Reject: frequency out of ±30% range
-        }
-    }
+    profile.valid = profile.band_peak_rel >= kEnergyThresholdRatio &&
+                    !profile.band_shape.empty();
 
-    return {peak_freq, avg_rate, valid};
+    fftw_destroy_plan(plan);
+    fftw_free(in);
+    fftw_free(out);
+    return profile;
 }
 
-FreqCCv3Sender::RttAnalysisResult FreqCCv3Sender::AnalyzeRttWindow(
-    const std::vector<RttSignalSample>& samples,
+double FreqCCv3Sender::ComputeSpectrumShapeDistance(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs) const {
+    if (lhs.empty() || rhs.empty() || lhs.size() != rhs.size()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    double distance = 0.0;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        distance += std::abs(lhs[i] - rhs[i]);
+    }
+    return distance;
+}
+
+bool FreqCCv3Sender::CaptureSenderSpectrumTemplate(
+    const std::vector<FreqSignalSample>& samples,
     TimeDelta window_duration,
-    double expected_freq_hz) const {
+    double ref_freq_hz) {
+    last_up_sender_template_valid_ = false;
+    last_up_sender_template_freq_hz_ = 0.0;
+    last_up_sender_band_template_.clear();
 
-    if (samples.empty()) return {0.0, 0.0, false};
-
-    double sum_rtt = 0.0;
-    for (const auto& s : samples) {
-        sum_rtt += s.rtt_ms;
-    }
-    double avg_rtt_ms = sum_rtt / samples.size();
-
-    double step_s = 0.001;
-    double duration_s = static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
-    int N = static_cast<int>(duration_s / step_s);
-    if (N < 8) {
-        return {0.0, avg_rtt_ms, false};
+    if (samples.empty() || ref_freq_hz <= 0.0) {
+        return false;
     }
 
-    double *in = (double*) fftw_malloc(sizeof(double) * N);
-    fftw_complex *out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (N/2 + 1));
+    double duration_s =
+        static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
+    int sample_count = static_cast<int>(duration_s / 0.001);
+    if (sample_count < 8) {
+        return false;
+    }
 
-    double t_start = (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+    std::vector<double> uniform_values(sample_count, 0.0);
+    double t_start =
+        (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
     size_t sample_idx = 0;
-    for (int i = 0; i < N; ++i) {
-        double t_target = t_start + i * step_s;
-
+    for (int i = 0; i < sample_count; ++i) {
+        double t_target = t_start + i * 0.001;
         while (sample_idx < samples.size() - 1) {
             double t_next =
                 (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
@@ -1114,101 +1181,206 @@ FreqCCv3Sender::RttAnalysisResult FreqCCv3Sender::AnalyzeRttWindow(
             sample_idx++;
         }
 
-        double val;
+        double value;
         if (sample_idx >= samples.size() - 1) {
-            val = samples.back().rtt_ms;
+            value = static_cast<double>(samples.back().rate.ToKBitsPerSecond());
         } else {
-            double t1 = (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() /
-                        1000000.0;
+            double t1 =
+                (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            double t2 =
+                (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            double v1 = static_cast<double>(samples[sample_idx].rate.ToKBitsPerSecond());
+            double v2 =
+                static_cast<double>(samples[sample_idx + 1].rate.ToKBitsPerSecond());
+            if (std::abs(t2 - t1) < 1e-6) {
+                value = v1;
+            } else {
+                double fraction = (t_target - t1) / (t2 - t1);
+                value = v1 + fraction * (v2 - v1);
+            }
+        }
+        uniform_values[i] = value;
+    }
+
+    SpectrumProfile profile = BuildSpectrumProfile(uniform_values, 0.001, ref_freq_hz);
+    if (!profile.valid) {
+        return false;
+    }
+
+    last_up_sender_template_freq_hz_ =
+        (profile.peak_freq_hz > 0.0) ? profile.peak_freq_hz : ref_freq_hz;
+    last_up_sender_band_template_ = profile.band_shape;
+    last_up_sender_template_valid_ = !last_up_sender_band_template_.empty();
+    return last_up_sender_template_valid_;
+}
+
+// Helper to perform DFT with PHYSICAL CONSTRAINTS
+// Returns (Peak Frequency Hz, Avg Rate kbps, Validity Flag)
+FreqCCv3Sender::AnalysisResult FreqCCv3Sender::AnalyzeWindow(
+    const std::vector<FreqSignalSample>& samples,
+    TimeDelta window_duration,
+    double expected_freq_hz) const {
+    if (samples.empty()) return {0.0, 0, std::numeric_limits<double>::infinity(), false};
+
+    double sum_rate = 0.0;
+    for (const auto& s : samples) {
+        sum_rate += s.rate.ToKBitsPerSecond();
+    }
+    int32_t avg_rate = static_cast<int32_t>(sum_rate / samples.size());
+
+    double ref_freq_hz = expected_freq_hz;
+    if (ref_freq_hz <= 0.0 && last_up_sender_template_valid_) {
+        ref_freq_hz = last_up_sender_template_freq_hz_;
+    }
+    if (ref_freq_hz <= 0.0) {
+        return {0.0, avg_rate, std::numeric_limits<double>::infinity(), false};
+    }
+
+    double duration_s = static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
+    int sample_count = static_cast<int>(duration_s / 0.001);
+    if (sample_count < 8) {
+        return {0.0, avg_rate, std::numeric_limits<double>::infinity(), false};
+    }
+
+    std::vector<double> uniform_values(sample_count, 0.0);
+    double t_start =
+        (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+    size_t sample_idx = 0;
+    for (int i = 0; i < sample_count; ++i) {
+        double t_target = t_start + i * 0.001;
+        while (sample_idx < samples.size() - 1) {
+            double t_next =
+                (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            if (t_next >= t_target) break;
+            sample_idx++;
+        }
+
+        double value;
+        if (sample_idx >= samples.size() - 1) {
+            value = static_cast<double>(samples.back().rate.ToKBitsPerSecond());
+        } else {
+            double t1 =
+                (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            double t2 =
+                (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            double v1 = static_cast<double>(samples[sample_idx].rate.ToKBitsPerSecond());
+            double v2 =
+                static_cast<double>(samples[sample_idx + 1].rate.ToKBitsPerSecond());
+            if (std::abs(t2 - t1) < 1e-6) {
+                value = v1;
+            } else {
+                double fraction = (t_target - t1) / (t2 - t1);
+                value = v1 + fraction * (v2 - v1);
+            }
+        }
+        uniform_values[i] = value;
+    }
+
+    SpectrumProfile profile = BuildSpectrumProfile(uniform_values, 0.001, ref_freq_hz);
+    if (!profile.valid) {
+        return {0.0, avg_rate, std::numeric_limits<double>::infinity(), false};
+    }
+
+    double shape_distance = 0.0;
+    bool valid = true;
+    if (last_up_sender_template_valid_ && !last_up_sender_band_template_.empty()) {
+        shape_distance =
+            ComputeSpectrumShapeDistance(profile.band_shape, last_up_sender_band_template_);
+        if (!std::isfinite(shape_distance) ||
+            shape_distance > kSpectrumShapeTolerance) {
+            valid = false;
+        }
+    }
+
+    return {profile.peak_freq_hz, avg_rate, shape_distance, valid};
+}
+
+FreqCCv3Sender::RttAnalysisResult FreqCCv3Sender::AnalyzeRttWindow(
+    const std::vector<RttSignalSample>& samples,
+    TimeDelta window_duration,
+    double expected_freq_hz) const {
+    if (samples.empty()) {
+        return {0.0, 0.0, std::numeric_limits<double>::infinity(), false};
+    }
+
+    double sum_rtt = 0.0;
+    for (const auto& s : samples) {
+        sum_rtt += s.rtt_ms;
+    }
+    double avg_rtt_ms = sum_rtt / samples.size();
+
+    double ref_freq_hz = expected_freq_hz;
+    if (ref_freq_hz <= 0.0 && last_up_sender_template_valid_) {
+        ref_freq_hz = last_up_sender_template_freq_hz_;
+    }
+    if (ref_freq_hz <= 0.0) {
+        return {0.0, avg_rtt_ms, std::numeric_limits<double>::infinity(), false};
+    }
+
+    double duration_s = static_cast<double>(window_duration.ToMicroseconds()) / 1000000.0;
+    int sample_count = static_cast<int>(duration_s / 0.001);
+    if (sample_count < 8) {
+        return {0.0, avg_rtt_ms, std::numeric_limits<double>::infinity(), false};
+    }
+
+    std::vector<double> uniform_values(sample_count, 0.0);
+    double t_start =
+        (samples.front().time - QuicTime::Zero()).ToMicroseconds() / 1000000.0;
+    size_t sample_idx = 0;
+    for (int i = 0; i < sample_count; ++i) {
+        double t_target = t_start + i * 0.001;
+        while (sample_idx < samples.size() - 1) {
+            double t_next =
+                (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
+            if (t_next >= t_target) break;
+            sample_idx++;
+        }
+
+        double value;
+        if (sample_idx >= samples.size() - 1) {
+            value = samples.back().rtt_ms;
+        } else {
+            double t1 =
+                (samples[sample_idx].time - QuicTime::Zero()).ToMicroseconds() /
+                1000000.0;
             double t2 =
                 (samples[sample_idx + 1].time - QuicTime::Zero()).ToMicroseconds() /
                 1000000.0;
             double v1 = samples[sample_idx].rtt_ms;
             double v2 = samples[sample_idx + 1].rtt_ms;
             if (std::abs(t2 - t1) < 1e-6) {
-                val = v1;
+                value = v1;
             } else {
                 double fraction = (t_target - t1) / (t2 - t1);
-                val = v1 + fraction * (v2 - v1);
+                value = v1 + fraction * (v2 - v1);
             }
         }
-        in[i] = val;
+        uniform_values[i] = value;
     }
 
-    double mean = 0.0;
-    for (int i = 0; i < N; ++i) {
-        mean += in[i];
-    }
-    mean /= N;
-    for (int i = 0; i < N; ++i) {
-        in[i] -= mean;
+    SpectrumProfile profile = BuildSpectrumProfile(uniform_values, 0.001, ref_freq_hz);
+    if (!profile.valid) {
+        return {0.0, avg_rtt_ms, std::numeric_limits<double>::infinity(), false};
     }
 
-    for (int i = 0; i < N; ++i) {
-        double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * i / (N - 1)));
-        in[i] *= hann;
-    }
-
-    fftw_plan p = fftw_plan_dft_r2c_1d(N, in, out, FFTW_ESTIMATE);
-    fftw_execute(p);
-
-    double total_energy = 0.0;
-    int k_min = 1;
-    int k_max = N / 2;
-    for (int k = k_min; k < k_max; ++k) {
-        double mag = std::sqrt(out[k][0]*out[k][0] + out[k][1]*out[k][1]);
-        total_energy += mag;
-    }
-
-    double Fs = 1.0 / step_s;
-    double max_mag = -1.0;
-    int peak_k = 0;
-    for (int k = k_min; k < k_max; ++k) {
-        double mag = std::sqrt(out[k][0]*out[k][0] + out[k][1]*out[k][1]);
-        if (mag > max_mag) {
-            max_mag = mag;
-            peak_k = k;
-        }
-    }
-
-    double peak_freq = peak_k * Fs / N;
-    if (peak_k > k_min && peak_k < k_max - 1) {
-        double left_mag = std::sqrt(out[peak_k - 1][0]*out[peak_k - 1][0] +
-                                    out[peak_k - 1][1]*out[peak_k - 1][1]);
-        double center_mag = max_mag;
-        double right_mag = std::sqrt(out[peak_k + 1][0]*out[peak_k + 1][0] +
-                                     out[peak_k + 1][1]*out[peak_k + 1][1]);
-        double denom = left_mag - 2.0 * center_mag + right_mag;
-        if (std::abs(denom) > 1e-12) {
-            double offset = 0.5 * (left_mag - right_mag) / denom;
-            if (offset > 1.0) offset = 1.0;
-            if (offset < -1.0) offset = -1.0;
-            peak_freq = (peak_k + offset) * Fs / N;
-        }
-    }
-
-    fftw_destroy_plan(p);
-    fftw_free(in);
-    fftw_free(out);
-
+    double shape_distance = 0.0;
     bool valid = true;
-    if (total_energy > 0.0) {
-        double energy_ratio = max_mag / total_energy;
-        if (energy_ratio < kEnergyThresholdRatio) {
-            valid = false;
-        }
-    } else {
-        valid = false;
-    }
-
-    if (valid && expected_freq_hz > 0.0) {
-        double freq_deviation = std::abs(peak_freq - expected_freq_hz) / expected_freq_hz;
-        if (freq_deviation > kFreqDeviationTolerance) {
+    if (last_up_sender_template_valid_ && !last_up_sender_band_template_.empty()) {
+        shape_distance =
+            ComputeSpectrumShapeDistance(profile.band_shape, last_up_sender_band_template_);
+        if (!std::isfinite(shape_distance) ||
+            shape_distance > kSpectrumShapeTolerance) {
             valid = false;
         }
     }
 
-    return {peak_freq, avg_rtt_ms, valid};
+    return {profile.peak_freq_hz, avg_rtt_ms, shape_distance, valid};
 }
 
 void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time, double threshold_freq_hz, double expected_freq_hz) {
@@ -1308,6 +1480,8 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
     // Extract Single Peaks (similar to Python logic)
     // Only output peaks with duration > 0 (at least 2 consecutive windows)
     if (freq_analysis_trace_cb_ && !time_freq_pairs.empty()) {
+        double window_size_s =
+            static_cast<double>(window_size.ToMicroseconds()) / 1000000.0;
         size_t start_idx = 0;
         for (size_t i = 1; i < time_freq_pairs.size(); ++i) {
             double freq_diff = std::abs(time_freq_pairs[i].second - time_freq_pairs[i-1].second);
@@ -1315,9 +1489,9 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
             // If frequency jump exceeds tolerance, this is a new peak
             if (freq_diff > kPeakFreqTolerance) {
                 // Output the previous peak only if it passes duration check
-                if (i - start_idx >= 2) {
+                if (i - start_idx >= 1) {
                     double peak_start_time = time_freq_pairs[start_idx].first;
-                    double peak_end_time = time_freq_pairs[i-1].first;
+                    double peak_end_time = time_freq_pairs[i-1].first + window_size_s;
                     double peak_duration = peak_end_time - peak_start_time;
 
                     // Find max frequency in this peak segment
@@ -1352,9 +1526,9 @@ void FreqCCv3Sender::PerformFreqAnalysis(QuicTime start_time, QuicTime end_time,
 
         // Output the last peak only if it passes duration check
         size_t last_peak_size = time_freq_pairs.size() - start_idx;
-        if (last_peak_size >= 2) {
+        if (last_peak_size >= 1) {
             double peak_start_time = time_freq_pairs[start_idx].first;
-            double peak_end_time = time_freq_pairs.back().first;
+            double peak_end_time = time_freq_pairs.back().first + window_size_s;
             double peak_duration = peak_end_time - peak_start_time;
 
             double max_freq = time_freq_pairs[start_idx].second;
@@ -1477,14 +1651,16 @@ void FreqCCv3Sender::PerformRttFreqAnalysis(QuicTime start_time, QuicTime end_ti
     }
 
     if (rtt_freq_analysis_trace_cb_ && !time_freq_pairs.empty()) {
+        double window_size_s =
+            static_cast<double>(window_size.ToMicroseconds()) / 1000000.0;
         size_t start_idx = 0;
         for (size_t i = 1; i < time_freq_pairs.size(); ++i) {
             double freq_diff =
                 std::abs(time_freq_pairs[i].second - time_freq_pairs[i - 1].second);
             if (freq_diff > kPeakFreqTolerance) {
-                if (i - start_idx >= 2) {
+                if (i - start_idx >= 1) {
                     double peak_start_time = time_freq_pairs[start_idx].first;
-                    double peak_end_time = time_freq_pairs[i - 1].first;
+                    double peak_end_time = time_freq_pairs[i - 1].first + window_size_s;
                     double peak_duration = peak_end_time - peak_start_time;
 
                     double max_freq = time_freq_pairs[start_idx].second;
@@ -1511,9 +1687,9 @@ void FreqCCv3Sender::PerformRttFreqAnalysis(QuicTime start_time, QuicTime end_ti
         }
 
         size_t last_peak_size = time_freq_pairs.size() - start_idx;
-        if (last_peak_size >= 2) {
+        if (last_peak_size >= 1) {
             double peak_start_time = time_freq_pairs[start_idx].first;
-            double peak_end_time = time_freq_pairs.back().first;
+            double peak_end_time = time_freq_pairs.back().first + window_size_s;
             double peak_duration = peak_end_time - peak_start_time;
 
             double max_freq = time_freq_pairs[start_idx].second;

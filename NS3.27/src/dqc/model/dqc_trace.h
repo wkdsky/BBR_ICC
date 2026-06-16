@@ -5,7 +5,7 @@
 #include <set>
 #include "ns3/callback.h"
 namespace ns3{
-enum DqcTraceEnable:uint16_t{
+enum DqcTraceEnable:uint32_t{
     E_DQC_OWD=0x01,
     E_DQC_RTT=0x02,
     E_DQC_BW=0x04,
@@ -19,6 +19,8 @@ enum DqcTraceEnable:uint16_t{
     E_DQC_INFLIGHT=0x400,
     E_DQC_LOSS_RATE=0x800,
     E_DQC_QUEUE_DELAY=0x4000,
+    E_DQC_RECV_RATE_RAW=0x8000,
+    E_DQC_FREQCCV4_LOAD=0x10000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -31,13 +33,14 @@ public:
         m_traceStatsCb=cb;
     }
     void SetCongestionControlType(uint32_t type);
-    void Log(std::string name,uint16_t enable);
+    void Log(std::string name,uint32_t enable);
     void OnOwd(uint32_t seq,uint32_t owd,uint32_t size);
     void OnRtt(uint32_t seq,uint32_t rtt,uint32_t smoothed_rtt);
     void OnBw(int32_t kbps);
     void OnGoodput(uint32_t kbps);
     void OnSendRate(int32_t kbps);
     void OnRecvRate(int32_t bandwidth_latest_kbps);
+    void OnRecvRateRaw(int32_t delivery_rate_kbps);
     void OnQueueDelay(uint32_t queue_delay_ms,uint32_t latest_rtt_ms,uint32_t min_rtt_ms);
     void OnInflight(int32_t inflight_bytes,int32_t cwnd_bytes);
     void OnBbrMode(int32_t mode);
@@ -45,6 +48,11 @@ public:
     void OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
     void OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps);
     void OnRttFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double rtt_peak_freq_hz, double avg_smoothed_rtt_ms);
+    void OnFreqCCv4Load(double window_start_s, double window_end_s,
+                        double p_underload, double p_full_load,
+                        double p_overload, double confidence,
+                        std::string label, bool low_confidence,
+                        std::string diagnostics);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -56,6 +64,7 @@ private:
     void OpenGoodputFile();
     void OpenSendRateFile();
     void OpenRecvRateFile();
+    void OpenRecvRateRawFile();
     void OpenQueueDelayFile();
     void OpenInflightFile();
     void OpenBbrModeFile();
@@ -63,6 +72,8 @@ private:
     void OpenUpPhaseFile();
     void OpenFreqAnalysisFile();
     void OpenRttFreqAnalysisFile();
+    void OpenFreqCCv4LoadFile();
+    void OpenFreqCCv4CruiseSummaryFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -70,6 +81,7 @@ private:
     void CloseGoodputFile();
     void CloseSendRateFile();
     void CloseRecvRateFile();
+    void CloseRecvRateRawFile();
     void CloseQueueDelayFile();
     void CloseInflightFile();
     void CloseBbrModeFile();
@@ -77,10 +89,12 @@ private:
     void CloseUpPhaseFile();
     void CloseFreqAnalysisFile();
     void CloseRttFreqAnalysisFile();
+    void CloseFreqCCv4LoadFile();
+    void CloseFreqCCv4CruiseSummaryFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
-    uint16_t m_enable=0;      // Store the enable flags
+    uint32_t m_enable=0;      // Store the enable flags
     uint32_t m_ccType=0;
     TraceStats m_traceStatsCb;
     std::fstream m_owd;
@@ -89,6 +103,7 @@ private:
     std::fstream m_googput;
     std::fstream m_sendRate;
     std::fstream m_recvRate;
+    std::fstream m_recvRateRaw;
     std::fstream m_queueDelay;
     std::fstream m_inflight;
     std::fstream m_bbrMode;
@@ -96,6 +111,8 @@ private:
     std::fstream m_upPhase;
     std::fstream m_freqAnalysis;
     std::fstream m_rttFreqAnalysis;
+    std::fstream m_freqccv4Load;
+    std::fstream m_freqccv4CruiseSummary;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
     int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates

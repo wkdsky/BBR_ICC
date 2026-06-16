@@ -96,6 +96,7 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeBwMode final : public Bbr2ModeBase {
   void EnterProbePreUp(QuicTime now);
   void EnterProbeGuard(QuicTime now);
   void EnterProbeUp(QuicTime now);
+  void ForceEnterProbeUp(QuicTime now);
   void EnterProbePostUp(QuicTime now);
   void EnterProbeDownSlightly(QuicTime now);
 

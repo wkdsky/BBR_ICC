@@ -104,6 +104,7 @@ void Bbr2NetworkModel::OnCongestionEventStart(
       bandwidth_sampler_.OnCongestionEvent(event_time, acked_packets,
                                            lost_packets, MaxBandwidth(),
                                            bandwidth_lo(), RoundTripCount());
+  delivery_rate_latest_ = sample.sample_max_bandwidth;
 
   if (sample.last_packet_send_state.is_valid) {
     congestion_event->last_packet_send_state = sample.last_packet_send_state;

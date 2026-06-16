@@ -18,7 +18,7 @@ DqcTrace::~DqcTrace(){
 void DqcTrace::SetCongestionControlType(uint32_t type){
     m_ccType=type;
 }
-void DqcTrace::Log(std::string name,uint16_t enable){
+void DqcTrace::Log(std::string name,uint32_t enable){
     // Just store the name and enable flags, files will be opened lazily on first write
     m_name = name;
     m_enable = enable;
@@ -117,6 +117,22 @@ void DqcTrace::OpenRecvRateFile(){
     m_recvRate.open(path.c_str(), std::fstream::out);
     if(m_recvRate.is_open()){
         m_recvRate<<"#time(s)\tbandwidth_latest_recv_rate(kbps)"<<std::endl;
+    }
+}
+void DqcTrace::OpenRecvRateRawFile(){
+    if(!(m_enable & E_DQC_RECV_RATE_RAW) || m_recvRateRaw.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_recvrate_raw.txt";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_recvrate_raw.txt";
+    }
+    m_recvRateRaw.open(path.c_str(), std::fstream::out);
+    if(m_recvRateRaw.is_open()){
+        m_recvRateRaw<<"#time(s)\tdelivery_rate_sample(kbps)"<<std::endl;
     }
 }
 void DqcTrace::OpenQueueDelayFile(){
@@ -264,6 +280,13 @@ void DqcTrace::OnRecvRate(int32_t bandwidth_latest_kbps){
         m_recvRate<<now<<"\t"<<bandwidth_latest_kbps<<std::endl;
     }
 }
+void DqcTrace::OnRecvRateRaw(int32_t delivery_rate_kbps){
+    OpenRecvRateRawFile();  // Lazy open
+    if(m_recvRateRaw.is_open()){
+        float now=Simulator::Now().GetSeconds();
+        m_recvRateRaw<<now<<"\t"<<delivery_rate_kbps<<std::endl;
+    }
+}
 void DqcTrace::OnQueueDelay(uint32_t queue_delay_ms,uint32_t latest_rtt_ms,uint32_t min_rtt_ms){
     OpenQueueDelayFile();
     if(m_queueDelay.is_open()){
@@ -339,6 +362,30 @@ void DqcTrace::OnRttFreqAnalysis(double start_time, double duration_sec, double 
         m_rttFreqAnalysis<<start_time<<"\t"<<duration_sec<<"\t"<<sender_peak_freq_hz<<"\t"<<rtt_peak_freq_hz<<"\t"<<avg_smoothed_rtt_ms<<std::endl;
     }
 }
+void DqcTrace::OnFreqCCv4Load(double window_start_s, double window_end_s,
+                              double p_underload, double p_full_load,
+                              double p_overload, double confidence,
+                              std::string label, bool low_confidence,
+                              std::string diagnostics){
+    (void)window_start_s;
+    (void)window_end_s;
+    (void)p_underload;
+    (void)p_full_load;
+    (void)p_overload;
+    (void)confidence;
+    (void)low_confidence;
+    if(label == "CRUISE_SUMMARY"){
+        OpenFreqCCv4CruiseSummaryFile();
+        if(m_freqccv4CruiseSummary.is_open()){
+            m_freqccv4CruiseSummary<<diagnostics<<std::endl;
+        }
+    }else{
+        OpenFreqCCv4LoadFile();
+        if(m_freqccv4Load.is_open()){
+            m_freqccv4Load<<diagnostics<<std::endl;
+        }
+    }
+}
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
                         uint64_t recv_bytes,uint64_t duration,
                        float avg_owd){
@@ -360,9 +407,10 @@ void DqcTrace::Close(){
     CloseOwdFile();
     CloseRttFile();
     CloseBandwidthFile();
-	CloseGoodputFile();
+    CloseGoodputFile();
     CloseSendRateFile();
     CloseRecvRateFile();
+    CloseRecvRateRawFile();
     CloseQueueDelayFile();
     CloseInflightFile();
     CloseBbrModeFile();
@@ -370,6 +418,8 @@ void DqcTrace::Close(){
     CloseUpPhaseFile();
     CloseFreqAnalysisFile();
     CloseRttFreqAnalysisFile();
+    CloseFreqCCv4LoadFile();
+    CloseFreqCCv4CruiseSummaryFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -403,6 +453,12 @@ void DqcTrace::CloseRecvRateFile(){
     if(m_recvRate.is_open()){
         m_recvRate.flush();
         m_recvRate.close();
+    }
+}
+void DqcTrace::CloseRecvRateRawFile(){
+    if(m_recvRateRaw.is_open()){
+        m_recvRateRaw.flush();
+        m_recvRateRaw.close();
     }
 }
 void DqcTrace::CloseQueueDelayFile(){
@@ -447,6 +503,18 @@ void DqcTrace::CloseRttFreqAnalysisFile(){
         m_rttFreqAnalysis.close();
     }
 }
+void DqcTrace::CloseFreqCCv4LoadFile(){
+    if(m_freqccv4Load.is_open()){
+        m_freqccv4Load.flush();
+        m_freqccv4Load.close();
+    }
+}
+void DqcTrace::CloseFreqCCv4CruiseSummaryFile(){
+    if(m_freqccv4CruiseSummary.is_open()){
+        m_freqccv4CruiseSummary.flush();
+        m_freqccv4CruiseSummary.close();
+    }
+}
 void DqcTrace::CloseStatsFile(){
     if(m_stats.is_open()){
         m_stats.close();
@@ -482,6 +550,53 @@ void DqcTrace::OpenRttFreqAnalysisFile(){
     m_rttFreqAnalysis.open(path.c_str(), std::fstream::out);
     if(m_rttFreqAnalysis.is_open()){
         m_rttFreqAnalysis<<"#start_time(s)\tduration(s)\tsender_peak_freq(Hz)\trtt_peak_freq(Hz)\tavg_smoothed_rtt(ms)"<<std::endl;
+    }
+}
+void DqcTrace::OpenFreqCCv4LoadFile(){
+    if(!(m_enable & E_DQC_FREQCCV4_LOAD) || m_freqccv4Load.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_cruise_full_load_quality.csv";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_cruise_full_load_quality.csv";
+    }
+    m_freqccv4Load.open(path.c_str(), std::fstream::out);
+    if(m_freqccv4Load.is_open()){
+        m_freqccv4Load<<"cruise_id,window_start_time,window_end_time,configured_modulation_freq_hz"
+                       <<",srate_peak_freq_hz,drate_peak_freq_hz,srtt_peak_freq_hz"
+                       <<",drate_freq_score,srtt_freq_score,freq_quality"
+                       <<",drate_target_amp,srate_target_amp,drate_gain,drate_amplitude_score"
+                       <<",srtt_target_amp,srtt_noise_floor,srtt_snr,srtt_amplitude_score"
+                       <<",drate_waveform_quality,srtt_waveform_quality,waveform_quality"
+                       <<",cycle_frequency_stability,cycle_phase_stability,consistency_quality"
+                       <<",srtt_top_clip_ratio,srtt_bottom_clip_ratio,srtt_distortion_score"
+                       <<",is_full_load_candidate,full_load_quality,full_load_rank_in_cruise"
+                       <<",is_best_full_load_window,low_confidence,label"<<std::endl;
+    }
+}
+void DqcTrace::OpenFreqCCv4CruiseSummaryFile(){
+    if(!(m_enable & E_DQC_FREQCCV4_LOAD) || m_freqccv4CruiseSummary.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/"
+            +m_name+"_cruise_best_full_load_window.csv";
+    }else{
+        path=std::string(kDqcTracePath)+m_name+"_cruise_best_full_load_window.csv";
+    }
+    m_freqccv4CruiseSummary.open(path.c_str(), std::fstream::out);
+    if(m_freqccv4CruiseSummary.is_open()){
+        m_freqccv4CruiseSummary<<"cruise_id,cruise_start_time,cruise_end_time,candidate_count"
+                                <<",best_full_load_window_exists,best_window_start_time,best_window_end_time"
+                                <<",best_full_load_quality,best_drate_freq_score,best_srtt_freq_score"
+                                <<",best_srtt_waveform_quality,best_drate_amplitude_score,best_srtt_amplitude_score"
+                                <<",best_drate_mean_kbps"
+                                <<",cruise_end_max_bandwidth_kbps,fair_share_bandwidth_kbps"
+                                <<std::endl;
     }
 }
 DqcTraceState::DqcTraceState(std::string name){

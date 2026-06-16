@@ -434,6 +434,7 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
     return bandwidth_sampler_.end_of_app_limited_phase();
   }
 
+  QuicBandwidth delivery_rate_latest() const { return delivery_rate_latest_; }
   QuicBandwidth bandwidth_latest() const { return bandwidth_latest_; }
   QuicBandwidth bandwidth_lo() const { return bandwidth_lo_; }
   static QuicBandwidth bandwidth_lo_default() {
@@ -486,6 +487,8 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   // Number of loss marking events in the current round.
   int64_t loss_events_in_round_ = 0;
 
+  // Max bandwidth in the current round. Updated once per congestion event.
+  QuicBandwidth delivery_rate_latest_ = QuicBandwidth::Zero();
   // Max bandwidth in the current round. Updated once per congestion event.
   QuicBandwidth bandwidth_latest_ = QuicBandwidth::Zero();
   // Max bandwidth of recent rounds. Updated once per round.

@@ -117,6 +117,12 @@ PointToPointChannel::Attach (Ptr<PointToPointNetDevice> device)
     }
 }
 
+void
+PointToPointChannel::SetPropagationDelay (Time delay)
+{
+  m_delay = delay;
+}
+
 bool
 PointToPointChannel::TransmitStart (
   Ptr<const Packet> p,

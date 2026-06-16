@@ -2,6 +2,7 @@
 #include <memory>
 #include <map>
 #include <vector>
+#include <string>
 #include "ns3/event-id.h"
 #include "ns3/callback.h"
 #include "ns3/application.h"
@@ -60,6 +61,8 @@ public:
     void SetSendRateTraceFuc(TraceSendRate cb);
     typedef Callback<void,int32_t> TraceRecvRate;
     void SetRecvRateTraceFuc(TraceRecvRate cb);
+    typedef Callback<void,int32_t> TraceRecvRateRaw;
+    void SetRecvRateRawTraceFuc(TraceRecvRateRaw cb);
     typedef Callback<void,int32_t,int32_t> TraceInflight;
     void SetInflightTraceFuc(TraceInflight cb);
     typedef Callback<void,int32_t> TraceBbrMode;
@@ -70,11 +73,13 @@ public:
     void SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb);
     typedef Callback<void,double,double,double,double,double> TraceRttFreqAnalysis;
     void SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb);
+    typedef Callback<void,double,double,double,double,double,double,std::string,bool,std::string> TraceFreqCCv4Load;
+    void SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
     void OnCanWrite() override{
-        DataGenerator(2);
+        DataGenerator(m_dataGeneratorBatch);
     }
     void SendToNetwork(Ptr<Packet> p);
     void OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) override;
@@ -85,8 +90,34 @@ public:
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
     // FreqCC configuration methods
-    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain");
+    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="bandwidth_latest");
     void SetFreqCCIntervalWindowMultiplier(double multiplier);
+    void SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier);
+    void SetFreqCCFairShareBandwidth(uint64_t fair_share_bps);
+    struct Bbr2ExperimentSnapshot {
+        int32_t bbr_state{0};
+        std::string probe_phase;
+        double pacing_gain{0.0};
+        uint64_t pacing_rate_bps{0};
+        uint64_t delivery_rate_bps{0};
+        uint64_t cwnd_bytes{0};
+        uint64_t inflight_bytes{0};
+        uint64_t srtt_us{0};
+        uint64_t min_rtt_us{0};
+        uint64_t delivered_bytes{0};
+        uint64_t sent_bytes{0};
+        uint64_t acked_bytes{0};
+        uint64_t lost_bytes{0};
+        uint64_t ecn_bytes_in_round{0};
+        double last_ack_time_s{0.0};
+        double probe_phase_start_time_s{0.0};
+    };
+    bool GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) const;
+    void SetBbr2ForcedProbeUp(double probe_up_time_s,
+                              double min_probe_up_duration_s);
+    void SetBbr2MaxCongestionWindowPackets(uint32_t packets);
+    void SetStreamSendBufferBytes(uint32_t bytes);
+    void SetDataGeneratorBatch(uint32_t packets_per_fill);
 private:
 	void DataGenerator(int times);
 	virtual void StartApplication() override;
@@ -126,6 +157,7 @@ private:
     int m_packetGenerated{0};
 	bool m_pakcetLimit{false};
     int m_packetAllowed{50000};
+    uint32_t m_dataGeneratorBatch{2};
     std::vector<OneWayDelaySink*> m_sinks;
 	TraceBandwidth m_traceBwCb;
 	int64_t m_lastSentTs{0};
@@ -137,11 +169,13 @@ private:
     TraceQueueDelay m_traceQueueDelayCb;
     TraceSendRate m_traceSendRateCb;
     TraceRecvRate m_traceRecvRateCb;
+    TraceRecvRateRaw m_traceRecvRateRawCb;
     TraceInflight m_traceInflightCb;
     TraceBbrMode m_traceBbrModeCb;
     TraceUpPhase m_traceUpPhaseCb;
     TraceFreqAnalysis m_traceFreqAnalysisCb;
     TraceRttFreqAnalysis m_traceRttFreqAnalysisCb;
+    TraceFreqCCv4Load m_traceFreqCCv4LoadCb;
     TraceLossRate m_traceLossRateCb;
     bool m_lossTraceHooked{false};
     bool m_rttTraceHooked{false};
