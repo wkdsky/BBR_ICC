@@ -75,8 +75,8 @@ Bbr2Sender::Bbr2Sender(QuicTime now,
       model_(&params_,
              rtt_stats->SmoothedOrInitialRtt(),
              rtt_stats->last_update_time(),
-             /*cwnd_gain=*/1.0,
-             /*pacing_gain=*/kInitialPacingGain,
+             /*cwnd_gain=*/params_.startup_cwnd_gain,
+             /*pacing_gain=*/params_.startup_pacing_gain,
              old_sender ? &old_sender->sampler_ : nullptr),
       initial_cwnd_(
           cwnd_limits().ApplyLimits(initial_cwnd_in_packets * kDefaultTCPMSS)),
@@ -119,7 +119,29 @@ const QuicLimits<QuicByteCount>& Bbr2Sender::cwnd_limits() const {
 void Bbr2Sender::AdjustNetworkParameters(QuicBandwidth bandwidth,
                                TimeDelta rtt,
                                bool allow_cwnd_to_decrease) {
+  model_.UpdateNetworkParameters(bandwidth, rtt);
 
+  if (mode_ != Bbr2Mode::STARTUP) {
+    return;
+  }
+
+  const QuicByteCount prior_cwnd = cwnd_;
+  QuicBandwidth effective_bandwidth =
+      std::max(bandwidth, model_.BandwidthEstimate());
+  connection_stats_->cwnd_bootstrapping_rtt_us =
+      model_.MinRtt().ToMicroseconds();
+
+  cwnd_ = cwnd_limits().ApplyLimits(
+      std::min(max_cwnd_when_network_parameters_adjusted_,
+               model_.BDP(effective_bandwidth)));
+
+  if (!allow_cwnd_to_decrease) {
+    cwnd_ = std::max(cwnd_, prior_cwnd);
+  }
+
+  pacing_rate_ = std::max(pacing_rate_,
+                          QuicBandwidth::FromBytesAndTimeDelta(
+                              cwnd_, model_.MinRtt()));
 }
 
 void Bbr2Sender::SetInitialCongestionWindowInPackets(
@@ -146,6 +168,17 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
 
   model_.OnCongestionEventStart(event_time, acked_packets, lost_packets,
                                 &congestion_event);
+
+  if (InSlowStart()) {
+    if (!lost_packets.empty()) {
+      connection_stats_->slowstart_packets_lost += lost_packets.size();
+      connection_stats_->slowstart_bytes_lost += congestion_event.bytes_lost;
+    }
+    if (congestion_event.end_of_round_trip) {
+      ++connection_stats_->slowstart_num_rtts;
+    }
+  }
+
   if (!acked_packets.empty()) {
     last_ack_event_time_ = event_time;
   }
@@ -187,7 +220,13 @@ void Bbr2Sender::OnCongestionEvent(bool /*rtt_updated*/,
   if (congestion_event.end_of_round_trip) {
     bytes_ecn_in_round_=0;
   }
-  last_sample_is_app_limited_ = congestion_event.last_sample_is_app_limited;
+  last_sample_is_app_limited_ =
+      congestion_event.last_packet_send_state.is_valid
+          ? congestion_event.last_packet_send_state.is_app_limited
+          : congestion_event.last_sample_is_app_limited;
+  if (!last_sample_is_app_limited_) {
+    has_non_app_limited_sample_ = true;
+  }
   if (congestion_event.bytes_in_flight == 0 &&
       Params().avoid_unnecessary_probe_rtt) {
     OnEnterQuiescence(event_time);
@@ -240,7 +279,17 @@ void Bbr2Sender::UpdatePacingRate(QuicByteCount bytes_acked) {
   }
 
   QuicBandwidth target_rate = model_.pacing_gain() * model_.BandwidthEstimate();
-  if (startup_.FullBandwidthReached()) {
+  if (model_.full_bandwidth_reached()) {
+    pacing_rate_ = target_rate;
+    return;
+  }
+  if (params_.decrease_startup_pacing_at_end_of_round &&
+      model_.pacing_gain() < Params().startup_pacing_gain) {
+    pacing_rate_ = target_rate;
+    return;
+  }
+  if (params_.bw_lo_mode_ != Bbr2Params::DEFAULT &&
+      model_.loss_events_in_round() > 0) {
     pacing_rate_ = target_rate;
     return;
   }
@@ -254,7 +303,7 @@ void Bbr2Sender::UpdateCongestionWindow(QuicByteCount bytes_acked) {
   QuicByteCount target_cwnd = GetTargetCongestionWindow(model_.cwnd_gain());
 
   const QuicByteCount prior_cwnd = cwnd_;
-  if (startup_.FullBandwidthReached()) {
+  if (model_.full_bandwidth_reached() || Params().startup_include_extra_acked) {
     target_cwnd += model_.MaxAckHeight();
     cwnd_ = std::min(prior_cwnd + bytes_acked, target_cwnd);
   } else if (prior_cwnd < target_cwnd || prior_cwnd < 2 * initial_cwnd_) {
@@ -269,7 +318,7 @@ void Bbr2Sender::UpdateCongestionWindow(QuicByteCount bytes_acked) {
 
   QUIC_DVLOG(3) << this << " Updating CWND. target_cwnd:" << target_cwnd
                 << ", max_ack_height:" << model_.MaxAckHeight()
-                << ", full_bw:" << startup_.FullBandwidthReached()
+                << ", full_bw:" << model_.full_bandwidth_reached()
                 << ", bytes_acked:" << bytes_acked
                 << ", inflight_lo:" << model_.inflight_lo()
                 << ", inflight_hi:" << model_.inflight_hi() << ". (prior_cwnd) "
@@ -295,6 +344,10 @@ void Bbr2Sender::OnPacketSent(QuicTime sent_time,
                 << ", total_acked:" << model_.total_bytes_acked()
                 << ", total_lost:" << model_.total_bytes_lost() << "  @ "
                 << sent_time;
+  if (InSlowStart()) {
+    ++connection_stats_->slowstart_packets_sent;
+    connection_stats_->slowstart_bytes_sent += bytes;
+  }
   if (bytes_in_flight == 0 && Params().avoid_unnecessary_probe_rtt) {
     OnExitQuiescence(sent_time);
   }

@@ -45,7 +45,7 @@ class QUIC_EXPORT_PRIVATE Bbr2StartupMode final : public Bbr2ModeBase {
     return Bbr2Mode::STARTUP;
   }
   void CheckEcnTooHigh(uint32_t ce_ratio);
-  bool FullBandwidthReached() const { return full_bandwidth_reached_; }
+  bool FullBandwidthReached() const { return model_->full_bandwidth_reached(); }
 
   struct QUIC_EXPORT_PRIVATE DebugState {
     bool full_bandwidth_reached;
@@ -58,13 +58,10 @@ class QUIC_EXPORT_PRIVATE Bbr2StartupMode final : public Bbr2ModeBase {
  private:
   const Bbr2Params& Params() const;
 
-  void CheckFullBandwidthReached(const Bbr2CongestionEvent& congestion_event);
-
   void CheckExcessiveLosses(const Bbr2CongestionEvent& congestion_event);
 
-  bool full_bandwidth_reached_;
-  QuicBandwidth full_bandwidth_baseline_;
-  QuicRoundTripCount rounds_without_bandwidth_growth_;
+  // Used when the pacing gain can decrease in STARTUP.
+  QuicBandwidth max_bw_at_round_beginning_ = QuicBandwidth::Zero();
   QuicRoundTripCount rounds_ecn_{0};
 };
 

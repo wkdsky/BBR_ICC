@@ -13,6 +13,10 @@ MainEngine::~MainEngine(){
 void MainEngine::HeartBeat(ProtoTime time){
     TimeDelta wall_time=time-ProtoTime::Zero();
     int64_t now=wall_time.ToMilliseconds();
+    const bool was_in_heartbeat = in_heartbeat_;
+    const int64_t previous_heartbeat_now_ms = heartbeat_now_ms_;
+    in_heartbeat_ = true;
+    heartbeat_now_ms_ = now;
     std::vector<std::pair<AlarmCb*,int64_t>> registers;
     while(!cbs_.empty()){
         auto it=cbs_.begin();
@@ -32,6 +36,8 @@ void MainEngine::HeartBeat(ProtoTime time){
             RegisterAlarm(it->second,it->first);
         }
     }
+    in_heartbeat_ = was_in_heartbeat;
+    heartbeat_now_ms_ = previous_heartbeat_now_ms;
 }
 void MainEngine::ExecuteCallback(ProtoTime time){
 	HeartBeat(time);
@@ -49,6 +55,9 @@ void MainEngine::RegisterAlarm(int64_t &time_out,AlarmCb* alarm){
     if(stop_){
         return ;
     }
+    if(in_heartbeat_ && time_out<=heartbeat_now_ms_){
+        time_out=heartbeat_now_ms_+1;
+    }
     MainEngine::iterator ret=cbs_.insert(std::make_pair(time_out,alarm));
     alarm->OnRegistered(ret,this);
 }
@@ -65,6 +74,9 @@ MainEngine::iterator MainEngine::RegisterAlarm(MainEngine::iterator token,int64_
         }
     }
     DCHECK(found);
+    if(in_heartbeat_ && time_out<=heartbeat_now_ms_){
+        time_out=heartbeat_now_ms_+1;
+    }
     cbs_.erase(beg);
     auto ret=cbs_.insert(std::make_pair(time_out,cb));
     return ret;

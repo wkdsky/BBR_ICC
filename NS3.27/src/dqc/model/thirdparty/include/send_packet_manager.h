@@ -17,6 +17,7 @@ class SendPacketManager{
 public:
     SendPacketManager(ProtoClock *clock,QuicConnectionStats* stats,StreamAckedObserver *acked_observer);
     ~SendPacketManager();
+    static void SetDeterministicRandomSeed(uint32_t seed, uint32_t run);
   // Sets the send algorithm to the given congestion control type and points the
   // pacing sender at |send_algorithm_|. Can be called any number of times.
     void SetSendAlgorithm(CongestionControlType congestion_control_type);

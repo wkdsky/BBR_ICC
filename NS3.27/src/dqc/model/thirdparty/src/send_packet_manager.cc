@@ -1,8 +1,8 @@
 #include "send_packet_manager.h"
 #include "proto_constants.h"
 #include "logging.h"
-#include <ctime>
 #include <algorithm>
+#include <cstdint>
 namespace dqc{
 namespace{
 static const int64_t kDefaultRetransmissionTimeMs = 500;
@@ -14,11 +14,28 @@ static const size_t kMaxRetransmissionsOnTimeout = 2;
 // The path degrading delay is the sum of this number of consecutive RTO delays.
 const size_t kNumRetransmissionDelaysForPathDegradingDelay = 2;
 const int32_t kMaxFastRetransNum=2;
-static int kRandSeedOffset=9301; 
-static int kRandomCount=0;
+static const uint32_t kRandSeedOffset=9301;
+static uint32_t kRandomCount=0;
+static uint32_t kDeterministicSeedBase=0x5eed1234u;
+
+uint32_t Mix32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x == 0 ? 1u : x;
+}
 }
 //only retransmitable frame can be marked as inflight;
 //hence, only stream has such quality.
+void SendPacketManager::SetDeterministicRandomSeed(uint32_t seed, uint32_t run)
+{
+    kDeterministicSeedBase = Mix32(seed ^ 0x9e3779b9u ^ Mix32(run + 0x85ebca6bu));
+    kRandomCount = 0;
+}
+
 SendPacketManager::SendPacketManager(ProtoClock *clock,QuicConnectionStats* stats,StreamAckedObserver *acked_observer)
 :clock_(clock)
 ,stats_(stats)
@@ -26,8 +43,7 @@ SendPacketManager::SendPacketManager(ProtoClock *clock,QuicConnectionStats* stat
 ,min_rto_timeout_(TimeDelta::FromMilliseconds(kMinRetransmissionTimeMs))
 ,one_way_delay_(PacketNumber(0),TimeDelta::Zero()){
     DCHECK(clock_);
-	int seed=std::time(nullptr);
-    rand_.seed(seed+kRandSeedOffset*kRandomCount);
+    rand_.seed(Mix32(kDeterministicSeedBase + kRandSeedOffset * kRandomCount));
 	kRandomCount+=2;
 }
 SendPacketManager::~SendPacketManager(){

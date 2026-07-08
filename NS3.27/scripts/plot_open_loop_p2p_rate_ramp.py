@@ -23,6 +23,9 @@ from matplotlib.patches import Rectangle
 BOUNDARY_COLOR = "#212529"
 OPTIMAL_AREA_COLOR = "#f08c00"
 OPTIMAL_AREA_TEXT_COLOR = "#7a3f00"
+SEND_RATE_COLOR = "#0b7285"
+DRATE_COLOR = "#d9480f"
+SRTT_COLOR = "#5f3dc4"
 OPTIMAL_AREA_START_S = 2.2
 OPTIMAL_AREA_END_S = 2.4
 OPTIMAL_AREA_LABEL_X_OFFSET_S = 0.16
@@ -37,6 +40,7 @@ LEGEND_FS = 20
 SMALL_LEGEND_FS = 16
 
 DATA_LW = 3.8
+RATE_SERIES_LW = 5.0
 SERVICE_LW = 3.4
 BOUNDARY_LW = 4.2
 GRID_LW = 1.05
@@ -449,17 +453,17 @@ def plot_phase_spectrum(
     ax.plot(
         rx_freqs[rx_mask],
         np.maximum(rx_energy[rx_mask], energy_floor),
-        color="#2b8a3e",
+        color=DRATE_COLOR,
         linewidth=DATA_LW,
-        label=r"$D\!Rate_{ts}$ spectrum",
+        label="DRate spectrum",
     )
 
     ax.plot(
         rtt_freqs[rtt_mask],
         np.maximum(rtt_energy[rtt_mask], energy_floor),
-        color="#5f3dc4",
+        color=SRTT_COLOR,
         linewidth=DATA_LW,
-        label=r"$SRTT_{ts}$ spectrum",
+        label="SRTT spectrum",
     )
 
     ax.set_ylim(energy_floor, 1.05)
@@ -648,17 +652,19 @@ def main() -> None:
     axes[0].plot(
         t,
         target,
-        color="#0b7285",
-        linewidth=DATA_LW,
+        color=SEND_RATE_COLOR,
+        linewidth=RATE_SERIES_LW,
         label="Send rate",
+        zorder=3,
     )
 
     axes[0].plot(
         t[t > 0],
         rx[t > 0],
-        color="#2b8a3e",
-        linewidth=DATA_LW,
-        label="Receive rate",
+        color=DRATE_COLOR,
+        linewidth=RATE_SERIES_LW,
+        label="DRate",
+        zorder=4,
     )
 
     axes[0].axhline(
@@ -697,7 +703,7 @@ def main() -> None:
     axes[1].plot(
         t,
         estimated_rtt_ms,
-        color="#5f3dc4",
+        color=SRTT_COLOR,
         linewidth=DATA_LW,
         label="SRTT",
     )
@@ -817,16 +823,16 @@ def main() -> None:
             axes[0],
             rx_freqs,
             rx_energy,
-            "Receive rate spectrum",
-            "#2b8a3e",
-            "Receive rate",
+            "DRate spectrum",
+            DRATE_COLOR,
+            "DRate",
         ),
         (
             axes[1],
             rtt_freqs,
             rtt_energy,
             "Estimated SRTT spectrum",
-            "#5f3dc4",
+            SRTT_COLOR,
             "SRTT",
         ),
     ]:

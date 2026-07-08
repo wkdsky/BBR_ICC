@@ -21,6 +21,7 @@ enum DqcTraceEnable:uint32_t{
     E_DQC_QUEUE_DELAY=0x4000,
     E_DQC_RECV_RATE_RAW=0x8000,
     E_DQC_FREQCCV4_LOAD=0x10000,
+    E_DQC_FREQCCV4_GATE=0x20000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -74,6 +75,7 @@ private:
     void OpenRttFreqAnalysisFile();
     void OpenFreqCCv4LoadFile();
     void OpenFreqCCv4CruiseSummaryFile();
+    void OpenFreqCCv4GateFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -91,6 +93,7 @@ private:
     void CloseRttFreqAnalysisFile();
     void CloseFreqCCv4LoadFile();
     void CloseFreqCCv4CruiseSummaryFile();
+    void CloseFreqCCv4GateFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
@@ -113,6 +116,7 @@ private:
     std::fstream m_rttFreqAnalysis;
     std::fstream m_freqccv4Load;
     std::fstream m_freqccv4CruiseSummary;
+    std::fstream m_freqccv4Gate;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
     int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates
@@ -123,7 +127,7 @@ public:
     ~DqcTraceState();
     void OnStats(uint32_t id,uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,float avg_owd);
-    void Flush(uint32_t capacity,uint32_t simulation_time);
+    void Flush(uint32_t capacity,double simulation_time);
     void RecordRuningTime(float millis,float mimutes);
     void ReisterAvgDelayId(uint32_t id);
     //compare inter-protocol fairness and rtt unfairness

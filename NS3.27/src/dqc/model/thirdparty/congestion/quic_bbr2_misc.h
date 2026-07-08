@@ -9,6 +9,7 @@
 #include <limits>
 
 #include "quic_bandwidth_sampler.h"
+#include "proto_constants.h"
 #include "proto_windowed_filter.h"
 #include "proto_bandwidth.h"
 #include "proto_time.h"
@@ -73,26 +74,36 @@ struct QUIC_EXPORT_PRIVATE Bbr2Params {
    * STARTUP parameters.
    */
 
-  // The gain for both CWND and PacingRate at startup.
-  // TODO(wub): Maybe change to the newly derived value of 2.773 (4 * ln(2)).
-  float startup_cwnd_gain = 2.885;
+  // The gain for CWND in startup.
+  float startup_cwnd_gain = 2.0;
   float startup_pacing_gain = 2.885;
 
-  // Full bandwidth is declared if the total bandwidth growth is less than
-  // |startup_full_bw_threshold| times in the last |startup_full_bw_rounds|
-  // round trips.
+  // STARTUP or PROBE_UP are exited if the total bandwidth growth is less than
+  // |full_bw_threshold| in the last |startup_full_bw_rounds| round trips.
+  float full_bw_threshold = 1.25;
+  // Legacy local name kept for code that has not yet been migrated.
   float startup_full_bw_threshold = 1.25;
 
   QuicRoundTripCount startup_full_bw_rounds = 3;
+
+  // Number of rounds to stay in STARTUP when there is a persistent queue.
+  // 0 disables this queue-based STARTUP exit.
+  QuicRoundTripCount max_startup_queue_rounds = 0;
 
   // The minimum number of loss marking events to exit STARTUP.
   int64_t startup_full_loss_count =8;
       //GetQuicFlag(FLAGS_quic_bbr2_default_startup_full_loss_count);
 
+  // If true, always exit STARTUP on loss, even if bandwidth is still growing.
+  bool always_exit_startup_on_excess_loss = false;
+
+  // If true, include extra acked during STARTUP.
+  bool startup_include_extra_acked = false;
+
   /*
    * DRAIN parameters.
    */
-  float drain_cwnd_gain = 2.885;
+  float drain_cwnd_gain = 2.0;
   float drain_pacing_gain = 1.0 / 2.885;
 
   /*
@@ -122,15 +133,27 @@ struct QUIC_EXPORT_PRIVATE Bbr2Params {
   int64_t probe_bw_full_loss_count =2;
       //GetQuicFlag(FLAGS_quic_bbr2_default_probe_bw_full_loss_count);
 
-  // Multiplier to get target inflight (as multiple of BDP) for PROBE_UP phase.
+  // Legacy local parameter. Upstream now uses |full_bw_threshold| for PROBE_UP
+  // queue detection; keep this only for local experiments.
   float probe_bw_probe_inflight_gain = 1.25;
 
   // Pacing gains.
   float probe_bw_probe_up_pacing_gain = 1.25;
-  float probe_bw_probe_down_pacing_gain = 0.75;
+  float probe_bw_probe_down_pacing_gain = 0.91;
   float probe_bw_default_pacing_gain = 1.0;
 
   float probe_bw_cwnd_gain = 2.0;
+  float probe_up_cwnd_gain = 2.25;
+
+  /*
+   * PROBE_UP parameters.
+   */
+  bool probe_up_ignore_inflight_hi = true;
+  bool probe_up_simplify_inflight_hi = false;
+
+  // Number of rounds to stay in PROBE_UP when there is a persistent queue.
+  // 0 disables this queue-based PROBE_UP exit.
+  QuicRoundTripCount max_probe_up_queue_rounds = 0;
 
   /*
    * PROBE_RTT parameters.
@@ -183,6 +206,33 @@ struct QUIC_EXPORT_PRIVATE Bbr2Params {
 
   // Can be enabled by connection optoin 'B2HI'.
   bool limit_inflight_hi_by_cwnd = false;
+
+  // Can be enabled by connection option 'B2H2'.
+  bool limit_inflight_hi_by_max_delivered = false;
+
+  // Can be disabled by connection option 'B2SL'.
+  bool startup_loss_exit_use_max_delivered_for_inflight_hi = true;
+
+  // Can be enabled by connection option 'B2DL'.
+  bool use_bytes_delivered_for_inflight_hi = false;
+
+  // Can be disabled by connection option 'B2RC'.
+  bool enable_reno_coexistence = true;
+
+  // For experimentation to improve fast convergence upon loss.
+  enum QuicBandwidthLoMode : uint8_t {
+    DEFAULT = 0,
+    MIN_RTT_REDUCTION = 1,
+    INFLIGHT_REDUCTION = 2,
+    CWND_REDUCTION = 3,
+  };
+
+  // Different modes change bandwidth_lo_ differently upon loss.
+  QuicBandwidthLoMode bw_lo_mode_ = QuicBandwidthLoMode::DEFAULT;
+
+  // Set the pacing gain based on recent bandwidth increase in STARTUP.
+  bool decrease_startup_pacing_at_end_of_round = false;
+
   bool enable_ecn{false};
   uint32_t full_ecn_count{2};
   uint32_t ecn_alpha_gain{BBR_UNIT * 1 / 16};//
@@ -292,6 +342,14 @@ struct QUIC_EXPORT_PRIVATE Bbr2CongestionEvent {
   // false if acked_packets is empty.
   bool last_sample_is_app_limited = false;
 
+  // Whether |sample_max_bandwidth| below is a valid sampler output.
+  bool sample_valid = false;
+
+  // Whether |sample_max_bandwidth| below is from an app-limited sample.
+  // This is the sampler-level flag for the max delivery-rate sample in this
+  // event, not the last packet's app-limited state.
+  bool sample_is_app_limited = false;
+
   // When the event happened, whether the sender is probing for bandwidth.
   bool is_probing_for_bandwidth = false;
 
@@ -344,7 +402,8 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   void AdaptLowerBounds(const Bbr2CongestionEvent& congestion_event);
 
   // Restart the current round trip as if it is starting now.
-  void RestartRound();
+  void RestartRoundEarly();
+  void RestartRound() { RestartRoundEarly(); }
 
   void AdvanceMaxBandwidthFilter() { max_bandwidth_filter_.Advance(); }
 
@@ -354,6 +413,12 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
 
   void OnApplicationLimited() { bandwidth_sampler_.OnAppLimited(); }
   void OnEcnUpdate();
+
+  // Calculates BDP using the current MaxBandwidth.
+  QuicByteCount BDP() const {
+    return BDP(MaxBandwidth());
+  }
+
   QuicByteCount BDP(QuicBandwidth bandwidth) const {
     return bandwidth * MinRtt();
   }
@@ -376,6 +441,15 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
 
   QuicByteCount MaxAckHeight() const {
     return bandwidth_sampler_.max_ack_height();
+  }
+
+  // 2 packets. Used to indicate the typical number of bytes ACKed at once.
+  QuicByteCount QueueingThresholdExtraBytes() const {
+    return 2 * kDefaultTCPMSS;
+  }
+
+  bool cwnd_limited_before_aggregation_epoch() const {
+    return cwnd_limited_before_aggregation_epoch_;
   }
 
   void EnableOverestimateAvoidance() {
@@ -407,10 +481,24 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   bool IsCongestionWindowLimited(
       const Bbr2CongestionEvent& congestion_event) const;
 
-  // TODO(wub): Replace this by a new version which takes two thresholds, one
-  // is the number of loss events, the other is the percentage of bytes lost.
   bool IsInflightTooHigh(const Bbr2CongestionEvent& congestion_event,
-                         QuicByteCount delivered_ce) const;
+                         int64_t max_loss_events) const;
+
+  bool IsInflightTooHighWithEcn(
+      const Bbr2CongestionEvent& congestion_event,
+      int64_t max_loss_events,
+      QuicByteCount delivered_ce) const;
+
+  // Check bandwidth growth in the past round. Must be called at the end of a
+  // round. Returns true if there was sufficient bandwidth growth and false
+  // otherwise. If it has been too many rounds without growth, also sets
+  // |full_bandwidth_reached_| to true.
+  bool HasBandwidthGrowth(const Bbr2CongestionEvent& congestion_event);
+
+  // Increments rounds_with_queueing_ if the minimum bytes in flight during the
+  // round is greater than the BDP * |target_gain|.
+  void CheckPersistentQueue(const Bbr2CongestionEvent& congestion_event,
+                            float target_gain);
 
   QuicPacketNumber last_sent_packet() const {
     return round_trip_counter_.last_sent_packet();
@@ -429,6 +517,18 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   }
 
   int64_t loss_events_in_round() const { return loss_events_in_round_; }
+
+  QuicByteCount max_bytes_delivered_in_round() const {
+    return max_bytes_delivered_in_round_;
+  }
+
+  QuicByteCount min_bytes_in_flight_in_round() const {
+    return min_bytes_in_flight_in_round_;
+  }
+
+  bool inflight_hi_limited_in_round() const {
+    return inflight_hi_limited_in_round_;
+  }
 
   QuicPacketNumber end_of_app_limited_phase() const {
     return bandwidth_sampler_.end_of_app_limited_phase();
@@ -469,7 +569,22 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
     return improve_adjust_network_parameters_;
   }
 
+  bool full_bandwidth_reached() const { return full_bandwidth_reached_; }
+  void set_full_bandwidth_reached() { full_bandwidth_reached_ = true; }
+  QuicBandwidth full_bandwidth_baseline() const {
+    return full_bandwidth_baseline_;
+  }
+  QuicRoundTripCount rounds_without_bandwidth_growth() const {
+    return rounds_without_bandwidth_growth_;
+  }
+  QuicRoundTripCount rounds_with_queueing() const {
+    return rounds_with_queueing_;
+  }
+
  private:
+  // Called when a new round trip starts.
+  void OnNewRound();
+
   const Bbr2Params& Params() const { return *params_; }
   const Bbr2Params* const params_;
   RoundTripCounter round_trip_counter_;
@@ -487,6 +602,16 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   // Number of loss marking events in the current round.
   int64_t loss_events_in_round_ = 0;
 
+  // A max of bytes delivered among all congestion events in the current round.
+  QuicByteCount max_bytes_delivered_in_round_ = 0;
+
+  // The minimum bytes in flight during this round.
+  QuicByteCount min_bytes_in_flight_in_round_ =
+      std::numeric_limits<QuicByteCount>::max();
+
+  // True if sending was limited by inflight_hi anytime in the current round.
+  bool inflight_hi_limited_in_round_ = false;
+
   // Max bandwidth in the current round. Updated once per congestion event.
   QuicBandwidth delivery_rate_latest_ = QuicBandwidth::Zero();
   // Max bandwidth in the current round. Updated once per congestion event.
@@ -502,6 +627,23 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
 
   float cwnd_gain_;
   float pacing_gain_;
+
+  // Whether we are cwnd limited prior to the start of the current aggregation
+  // epoch.
+  bool cwnd_limited_before_aggregation_epoch_ = false;
+
+  // bandwidth_lo_ at the beginning of a round with loss. Only used when the
+  // non-default bandwidth_lo modes are enabled.
+  QuicBandwidth prior_bandwidth_lo_ = QuicBandwidth::Zero();
+
+  // STARTUP-centric fields, also used by PROBE_UP queue experiments.
+  bool full_bandwidth_reached_ = false;
+  QuicBandwidth full_bandwidth_baseline_ = QuicBandwidth::Zero();
+  QuicRoundTripCount rounds_without_bandwidth_growth_ = 0;
+
+  // Used by STARTUP and PROBE_UP to decide when to exit.
+  QuicRoundTripCount rounds_with_queueing_ = 0;
+
   uint32_t ecn_in_round_=0;
   const bool improve_adjust_network_parameters_ =false;
      // GetQuicReloadableFlag(quic_bbr2_improve_adjust_network_parameters);

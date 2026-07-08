@@ -27,13 +27,19 @@
 #include "ns3/dqc-module.h"
 #include "ns3/log.h"
 #include<stdio.h>
+#include <algorithm>
+#include <cctype>
+#include <fstream>
 #include<iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <unistd.h>
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "ns3/freqccv4_sender.h"
+#include "ns3/send_packet_manager.h"
 #include "queue_occupancy_trace_helper.h"
 using namespace ns3;
 using namespace dqc;
@@ -61,6 +67,7 @@ double sink_start_time;
 double sink_stop_time;
 double client_start_time;
 double client_stop_time;
+std::string g_trace_output_dir;
 
 // Node containers for sender side (n0-n3 to n4)
 NodeContainer n0n4;
@@ -117,11 +124,379 @@ link_config_t p4p[]={
 
 
 // FreqCCv4 oscillation parameters for each flow
-double g_freq_hz[NUM_FLOWS] = {10.0, 10.0, 10.0, 10.0};           // Oscillation frequency in Hz
-std::string g_amp_mode[NUM_FLOWS] = {"sr8", "sr8", "sr8", "sr8"};  // Amplitude mode
-double g_fixed_mbps[NUM_FLOWS] = {0.0, 0.0, 0.0, 0.0};        // Fixed amplitude in Mbps
+double g_freq_hz[NUM_FLOWS] = {5.0, 5.0, 5.0, 5.0};           // Oscillation frequency in Hz
+std::string g_amp_mode[NUM_FLOWS] = {"fixed_mbps", "fixed_mbps", "fixed_mbps", "fixed_mbps"};  // Amplitude mode
+double g_fixed_mbps[NUM_FLOWS] = {50.0, 50.0, 50.0, 50.0};        // Fixed amplitude in Mbps
 double g_interval_window_rtt_mult = 1.0;                     // Interval STFT window = mult * min_rtt
 bool g_dynamic_delay_enable = true;
+bool g_enable_convergence_gate_trace = false;
+bool g_enable_convergence_gate_control = false;
+bool g_enable_freq_ref_pacing_control = false;
+bool g_enable_cruise_window_trace = true;
+std::string g_flow_start_mode = "same_start";
+uint64_t g_flow_size_bytes = 15ULL * 1000ULL * 1000ULL;
+int64_t g_process_interval_us = 100;
+bool g_smoke_mode = false;
+bool g_enable_heavy_trace = false;
+bool g_gate_state_machine_self_test = false;
+bool g_effective_bw_selection_self_test = false;
+bool g_effective_bw_phase_application_self_test = false;
+bool g_use_engine_timer = true;
+std::string g_gate_trace_mode = "round_only";
+uint64_t g_gate_trace_sample_interval_us = 10000;
+std::string g_freq_ref_scale_mode = "asymmetric";
+double g_freq_ref_high_conf_threshold = 0.8;
+double g_freq_ref_up_beta = 0.25;
+bool g_enable_equivalence_audit_trace = false;
+std::string g_freq_bbr_config_path =
+    "/home/wkd/BBR_ICC/NS3.27/examples/CCconfig/freqbbr_default.conf";
+FreqBbrConfig g_freq_bbr_config;
+
+std::string Trim(const std::string& in)
+{
+    size_t begin = 0;
+    while(begin < in.size() &&
+          std::isspace(static_cast<unsigned char>(in[begin]))){
+        ++begin;
+    }
+    size_t end = in.size();
+    while(end > begin &&
+          std::isspace(static_cast<unsigned char>(in[end - 1]))){
+        --end;
+    }
+    return in.substr(begin, end - begin);
+}
+
+bool ParseBoolValue(const std::string& value, bool* out)
+{
+    std::string lower;
+    lower.reserve(value.size());
+    for(char c : value){
+        lower.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c))));
+    }
+    if(lower == "true" || lower == "1" || lower == "yes" || lower == "on"){
+        *out = true;
+        return true;
+    }
+    if(lower == "false" || lower == "0" || lower == "no" || lower == "off"){
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+bool ParseDoubleValue(const std::string& value, double* out)
+{
+    try {
+        size_t used = 0;
+        const double parsed = std::stod(value, &used);
+        if(Trim(value.substr(used)).empty()){
+            *out = parsed;
+            return true;
+        }
+    } catch(...) {
+    }
+    return false;
+}
+
+bool ParseUintValue(const std::string& value, uint32_t* out)
+{
+    try {
+        size_t used = 0;
+        const unsigned long parsed = std::stoul(value, &used);
+        if(Trim(value.substr(used)).empty()){
+            *out = static_cast<uint32_t>(parsed);
+            return true;
+        }
+    } catch(...) {
+    }
+    return false;
+}
+
+bool ParseUint64Value(const std::string& value, uint64_t* out)
+{
+    try {
+        size_t used = 0;
+        const unsigned long long parsed = std::stoull(value, &used);
+        if(Trim(value.substr(used)).empty()){
+            *out = static_cast<uint64_t>(parsed);
+            return true;
+        }
+    } catch(...) {
+    }
+    return false;
+}
+
+void WarnConfigLine(const std::string& path,
+                    uint32_t line_no,
+                    const std::string& message)
+{
+    std::cerr << "[freqBbrConfig warning] " << path << ":" << line_no
+              << ": " << message << std::endl;
+}
+
+bool SetFreqBbrConfigValue(FreqBbrConfig* config,
+                           const std::string& key,
+                           const std::string& value,
+                           const std::string& path,
+                           uint32_t line_no)
+{
+    double d = 0.0;
+    uint32_t u32 = 0;
+    uint64_t u64 = 0;
+    bool b = false;
+
+    if(key.rfind("flow.", 0) == 0){
+        const size_t id_begin = 5;
+        const size_t id_end = key.find('.', id_begin);
+        if(id_end == std::string::npos){
+            WarnConfigLine(path, line_no, "invalid flow key: " + key);
+            return false;
+        }
+        uint32_t flow_id = 0;
+        if(!ParseUintValue(key.substr(id_begin, id_end - id_begin), &flow_id)){
+            WarnConfigLine(path, line_no, "invalid flow id in key: " + key);
+            return false;
+        }
+        const std::string field = key.substr(id_end + 1);
+        FreqBbrFlowConfig& flow = config->flow[flow_id];
+        if(field == "modulation_freq_hz"){
+            if(!ParseDoubleValue(value, &d)){
+                WarnConfigLine(path, line_no, "invalid double for " + key);
+                return false;
+            }
+            flow.modulation_freq_hz = d;
+            flow.has_modulation_freq_hz = true;
+            return true;
+        }
+        if(field == "fixed_amplitude_mbps"){
+            if(!ParseDoubleValue(value, &d)){
+                WarnConfigLine(path, line_no, "invalid double for " + key);
+                return false;
+            }
+            flow.fixed_amplitude_mbps = d;
+            flow.has_fixed_amplitude_mbps = true;
+            return true;
+        }
+        WarnConfigLine(path, line_no, "unknown flow field: " + key);
+        return false;
+    }
+
+#define SET_DOUBLE(KEY, FIELD) \
+    if(key == KEY){ \
+        if(!ParseDoubleValue(value, &d)){ \
+            WarnConfigLine(path, line_no, "invalid double for " + key); \
+            return false; \
+        } \
+        config->FIELD = d; \
+        return true; \
+    }
+#define SET_U32(KEY, FIELD) \
+    if(key == KEY){ \
+        if(!ParseUintValue(value, &u32)){ \
+            WarnConfigLine(path, line_no, "invalid uint for " + key); \
+            return false; \
+        } \
+        config->FIELD = u32; \
+        return true; \
+    }
+#define SET_U64(KEY, FIELD) \
+    if(key == KEY){ \
+        if(!ParseUint64Value(value, &u64)){ \
+            WarnConfigLine(path, line_no, "invalid uint64 for " + key); \
+            return false; \
+        } \
+        config->FIELD = u64; \
+        return true; \
+    }
+#define SET_BOOL(KEY, FIELD) \
+    if(key == KEY){ \
+        if(!ParseBoolValue(value, &b)){ \
+            WarnConfigLine(path, line_no, "invalid bool for " + key); \
+            return false; \
+        } \
+        config->FIELD = b; \
+        return true; \
+    }
+
+    SET_DOUBLE("default_modulation_freq_hz", default_modulation_freq_hz)
+    if(key == "default_amplitude_mode"){
+        config->default_amplitude_mode = value;
+        return true;
+    }
+    SET_DOUBLE("default_fixed_amplitude_mbps", default_fixed_amplitude_mbps)
+    SET_DOUBLE("stability.single_round_exit_threshold", stability_single_round_exit_threshold)
+    SET_DOUBLE("stability.consecutive_exit_threshold", stability_consecutive_exit_threshold)
+    SET_U32("stability.stable_rounds", stability_stable_rounds)
+    SET_DOUBLE("stability.full_pipe_growth_threshold", stability_full_pipe_growth_threshold)
+    SET_DOUBLE("spectral.min_validity", spectral_min_validity)
+    SET_DOUBLE("spectral.min_drate_snr", spectral_min_drate_snr)
+    SET_DOUBLE("spectral.min_srtt_snr", spectral_min_srtt_snr)
+    SET_DOUBLE("spectral.max_drate_width_ratio", spectral_max_drate_width_ratio)
+    SET_DOUBLE("spectral.max_srtt_width_ratio", spectral_max_srtt_width_ratio)
+    SET_DOUBLE("spectral.min_drate_phase_coherence", spectral_min_drate_phase_coherence)
+    SET_DOUBLE("spectral.min_srtt_phase_coherence", spectral_min_srtt_phase_coherence)
+    SET_DOUBLE("spectral.freq_sigma_ratio", spectral_freq_sigma_ratio)
+    SET_DOUBLE("spectral.snr_slope", spectral_snr_slope)
+    SET_DOUBLE("spectral.energy_threshold", spectral_energy_threshold)
+    SET_DOUBLE("spectral.energy_slope", spectral_energy_slope)
+    SET_DOUBLE("spectral.width_r0_drate", spectral_width_r0_drate)
+    SET_DOUBLE("spectral.width_r0_srtt", spectral_width_r0_srtt)
+    SET_DOUBLE("spectral.width_sigma", spectral_width_sigma)
+    SET_BOOL("merged_rescue.enable", merged_rescue_enable)
+    SET_DOUBLE("merged_rescue.window_multiplier", merged_rescue_window_multiplier)
+    SET_U32("merged_rescue.max_passes", merged_rescue_max_passes)
+    SET_DOUBLE("merged_rescue.max_trend_ratio", merged_rescue_max_trend_ratio)
+    SET_DOUBLE("merged_rescue.confidence_discount", merged_rescue_confidence_discount)
+    SET_BOOL("median_guard.enable", median_guard_enable)
+    SET_U32("median_guard.min_samples", median_guard_min_samples)
+    SET_DOUBLE("median_guard.max_iqr_ratio", median_guard_max_iqr_ratio)
+    SET_DOUBLE("median_guard.max_trend_ratio", median_guard_max_trend_ratio)
+    SET_DOUBLE("median_guard.margin", median_guard_margin)
+    SET_DOUBLE("median_guard.scale_min", median_guard_scale_min)
+    SET_DOUBLE("median_guard.scale_max", median_guard_scale_max)
+    SET_DOUBLE("median_guard.weight_alpha", median_guard_weight_alpha)
+    if(key == "effective_bw.scale_mode"){
+        config->effective_bw_scale_mode = value;
+        return true;
+    }
+    SET_DOUBLE("effective_bw.up_beta", effective_bw_up_beta)
+    SET_DOUBLE("effective_bw.scale_min", effective_bw_scale_min)
+    SET_DOUBLE("effective_bw.scale_max", effective_bw_scale_max)
+    SET_DOUBLE("effective_bw.high_conf_threshold", effective_bw_high_conf_threshold)
+    SET_BOOL("effective_bw.phase_specific_application", effective_bw_phase_specific_application)
+    SET_BOOL("effective_bw.cruise_uses_native_bw", effective_bw_cruise_uses_native_bw)
+    SET_BOOL("effective_bw.allow_stale_effective_bw", effective_bw_allow_stale_effective_bw)
+    SET_BOOL("effective_bw.apply_to_refill", effective_bw_apply_to_refill)
+    SET_BOOL("effective_bw.apply_to_up", effective_bw_apply_to_up)
+    SET_BOOL("effective_bw.apply_to_down", effective_bw_apply_to_down)
+    SET_BOOL("effective_bw.apply_to_cruise", effective_bw_apply_to_cruise)
+    SET_BOOL("effective_bw.clear_on_cruise_start", effective_bw_clear_on_cruise_start)
+    SET_BOOL("effective_bw.clear_on_stable_closure", effective_bw_clear_on_stable_closure)
+    if(key == "trace.gate_trace_mode"){
+        config->trace_gate_trace_mode = value;
+        return true;
+    }
+    SET_U64("trace.gate_trace_sample_interval_us", trace_gate_trace_sample_interval_us)
+    SET_BOOL("trace.enable_cruise_window_trace", trace_enable_cruise_window_trace)
+    SET_BOOL("trace.enable_effective_bw_selection_trace", trace_enable_effective_bw_selection_trace)
+
+#undef SET_DOUBLE
+#undef SET_U32
+#undef SET_U64
+#undef SET_BOOL
+
+    WarnConfigLine(path, line_no, "unknown key: " + key);
+    return false;
+}
+
+bool LoadFreqBbrConfig(const std::string& path, FreqBbrConfig* config)
+{
+    std::ifstream in(path.c_str());
+    if(!in.is_open()){
+        std::cerr << "[freqBbrConfig warning] unable to open config: "
+                  << path << "; using built-in defaults" << std::endl;
+        return false;
+    }
+    std::string line;
+    uint32_t line_no = 0;
+    while(std::getline(in, line)){
+        ++line_no;
+        const size_t comment = line.find('#');
+        if(comment != std::string::npos){
+            line = line.substr(0, comment);
+        }
+        line = Trim(line);
+        if(line.empty()){
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if(eq == std::string::npos){
+            WarnConfigLine(path, line_no, "expected key=value");
+            continue;
+        }
+        const std::string key = Trim(line.substr(0, eq));
+        const std::string value = Trim(line.substr(eq + 1));
+        if(key.empty()){
+            WarnConfigLine(path, line_no, "empty key");
+            continue;
+        }
+        SetFreqBbrConfigValue(config, key, value, path, line_no);
+    }
+    std::cout << "[freqBbrConfig] loaded " << path << std::endl;
+    return true;
+}
+
+void ApplyFreqBbrConfigToGlobals(const FreqBbrConfig& config)
+{
+    for(uint32_t i = 0; i < NUM_FLOWS; ++i){
+        g_freq_hz[i] = config.default_modulation_freq_hz;
+        g_fixed_mbps[i] = config.default_fixed_amplitude_mbps;
+        auto it = config.flow.find(i);
+        if(it != config.flow.end()){
+            if(it->second.has_modulation_freq_hz){
+                g_freq_hz[i] = it->second.modulation_freq_hz;
+            }
+            if(it->second.has_fixed_amplitude_mbps){
+                g_fixed_mbps[i] = it->second.fixed_amplitude_mbps;
+            }
+        }
+        g_amp_mode[i] = config.default_amplitude_mode;
+    }
+    g_gate_trace_mode = config.trace_gate_trace_mode;
+    g_gate_trace_sample_interval_us =
+        config.trace_gate_trace_sample_interval_us;
+    g_freq_ref_scale_mode = config.effective_bw_scale_mode;
+    g_freq_ref_high_conf_threshold =
+        config.effective_bw_high_conf_threshold;
+    g_freq_ref_up_beta = config.effective_bw_up_beta;
+    g_enable_cruise_window_trace =
+        config.trace_enable_cruise_window_trace;
+    g_enable_convergence_gate_trace =
+        config.trace_enable_effective_bw_selection_trace;
+}
+
+void ApplyGlobalsToFreqBbrConfig(FreqBbrConfig* config)
+{
+    config->default_amplitude_mode = g_amp_mode[0];
+    config->default_modulation_freq_hz = g_freq_hz[0];
+    config->default_fixed_amplitude_mbps = g_fixed_mbps[0];
+    for(uint32_t i = 0; i < NUM_FLOWS; ++i){
+        FreqBbrFlowConfig& flow = config->flow[i];
+        flow.modulation_freq_hz = g_freq_hz[i];
+        flow.has_modulation_freq_hz = true;
+        flow.fixed_amplitude_mbps = g_fixed_mbps[i];
+        flow.has_fixed_amplitude_mbps = true;
+    }
+    config->trace_gate_trace_mode = g_gate_trace_mode;
+    config->trace_gate_trace_sample_interval_us =
+        g_gate_trace_sample_interval_us;
+    config->effective_bw_scale_mode = g_freq_ref_scale_mode;
+    config->effective_bw_high_conf_threshold =
+        g_freq_ref_high_conf_threshold;
+    config->effective_bw_up_beta = g_freq_ref_up_beta;
+    config->trace_enable_cruise_window_trace =
+        g_enable_cruise_window_trace;
+    config->trace_enable_effective_bw_selection_trace =
+        g_enable_convergence_gate_trace;
+}
+
+std::string PreScanFreqBbrConfigPath(int argc, char* argv[],
+                                     const std::string& default_path)
+{
+    const std::string prefix = "--freqBbrConfig=";
+    for(int i = 1; i < argc; ++i){
+        const std::string arg = argv[i];
+        if(arg.rfind(prefix, 0) == 0){
+            return arg.substr(prefix.size());
+        }
+        if(arg == "--freqBbrConfig" && i + 1 < argc){
+            return argv[i + 1];
+        }
+    }
+    return default_path;
+}
 
 Ptr<PointToPointChannel>
 GetPointToPointChannel(const NetDeviceContainer& devices)
@@ -183,16 +558,20 @@ ConfigurePropagationDelaySchedule(const std::vector<Ptr<PointToPointChannel>>& e
 static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
                         Ptr<Node> sender,Ptr<Node> receiver,
                         uint16_t send_port,uint16_t recv_port,
-                        float startTime,float stopTime,
+                        double startTime,double stopTime,
                         DqcTrace *trace, DqcTraceState *stat,
                         double freq_hz, const std::string& amp_mode, double fixed_mbps,
                         uint32_t max_bps=0,uint32_t cid=0,bool ecn=false,uint32_t emucons=1,
-                        uint64_t fair_share_bps=0)
+	                        uint64_t fair_share_bps=0,
+	                        uint64_t flow_size_bytes=0,
+	                        uint32_t trace_enable=0,
+	                        uint32_t flow_index=0)
 {
-    Ptr<DqcSender> sendApp = CreateObject<DqcSender> (cc_type,ecn);
+    Ptr<DqcSender> sendApp = CreateObject<DqcSender> (cc_type,ecn,g_use_engine_timer);
     Ptr<DqcReceiver> recvApp = CreateObject<DqcReceiver>(100);  // 100ms goodput统计间隔，更实时
     sender->AddApplication (sendApp);
     receiver->AddApplication (recvApp);
+    sendApp->SetProcessIntervalUs(g_process_interval_us);
     sendApp->SetNumEmulatedConnections(emucons);
     Ptr<Ipv4> ipv4 = receiver->GetObject<Ipv4> ();
     Ipv4Address receiverIp = ipv4->GetAddress (1, 0).GetLocal ();
@@ -203,6 +582,9 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
     sendApp->SetStopTime (Seconds (stopTime));
     recvApp->SetStartTime (Seconds (startTime));
     recvApp->SetStopTime (Seconds (stopTime));
+    if(flow_size_bytes > 0){
+        sendApp->SetPacketLimitBytes(flow_size_bytes);
+    }
     if(max_bps>0){
         sendApp->SetMaxBandwidth(max_bps);
     }
@@ -211,38 +593,75 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         sendApp->SetCongestionId(cid);
     }
     if(trace){
+        if(trace_enable & DqcTraceEnable::E_DQC_BW){
         sendApp->SetBwTraceFuc(MakeCallback(&DqcTrace::OnBw,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_RTT){
         sendApp->SetRttTraceFuc(MakeCallback(&DqcTrace::OnRtt,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_QUEUE_DELAY){
         sendApp->SetQueueDelayTraceFuc(MakeCallback(&DqcTrace::OnQueueDelay,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_SEND_RATE){
         sendApp->SetSendRateTraceFuc(MakeCallback(&DqcTrace::OnSendRate,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_RECV_RATE){
         sendApp->SetRecvRateTraceFuc(MakeCallback(&DqcTrace::OnRecvRate,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_RECV_RATE_RAW){
+        sendApp->SetRecvRateRawTraceFuc(MakeCallback(&DqcTrace::OnRecvRateRaw,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_INFLIGHT){
         sendApp->SetInflightTraceFuc(MakeCallback(&DqcTrace::OnInflight,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_BBR_MODE){
         sendApp->SetBbrModeTraceFuc(MakeCallback(&DqcTrace::OnBbrMode,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_UP_PHASE){
         sendApp->SetUpPhaseTraceFuc(MakeCallback(&DqcTrace::OnUpPhase,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_FREQ_ANALYSIS){
         sendApp->SetFreqAnalysisTraceFuc(MakeCallback(&DqcTrace::OnFreqAnalysis,trace));
         sendApp->SetRttFreqAnalysisTraceFuc(MakeCallback(&DqcTrace::OnRttFreqAnalysis,trace));
+        }
+        if(trace_enable & (DqcTraceEnable::E_DQC_FREQCCV4_LOAD |
+                           DqcTraceEnable::E_DQC_FREQCCV4_GATE)){
         sendApp->SetFreqCCv4LoadTraceFuc(MakeCallback(&DqcTrace::OnFreqCCv4Load,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_GOODPUT){
         recvApp->SetGoodputTraceFuc(MakeCallback(&DqcTrace::OnGoodput,trace));
+        }
+        if(trace_enable & DqcTraceEnable::E_DQC_LOSS_RATE){
         sendApp->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate,trace));
+        }
     }
-    // Configure FreqCCv4 oscillation parameters
-    if(cc_type == kFreqCCv4){
-        sendApp->ConfigureFreqCC(freq_hz, amp_mode, fixed_mbps);
+	    // Configure FreqCCv4 oscillation parameters
+	    if(cc_type == kFreqCCv4){
+	        sendApp->ConfigureFreqBbr(g_freq_bbr_config, flow_index);
+	        sendApp->ConfigureFreqCC(freq_hz, amp_mode, fixed_mbps);
+	        sendApp->ConfigureFreqCCv4ConvergenceGate(g_enable_convergence_gate_trace,
+                                                  g_enable_convergence_gate_control,
+                                                  g_enable_freq_ref_pacing_control,
+                                                  g_gate_trace_mode,
+                                                  g_gate_trace_sample_interval_us,
+                                                  g_freq_ref_scale_mode,
+                                                  g_freq_ref_high_conf_threshold,
+                                                  g_freq_ref_up_beta);
         sendApp->SetFreqCCIntervalWindowMultiplier(g_interval_window_rtt_mult);
         sendApp->SetFreqCCFairShareBandwidth(fair_share_bps);
     }
     return sendApp;
 }
 
-void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=60, int loss_integer=0){
+void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, double sim_time=60.0, int loss_integer=0){
     std::string instance=DQC_SCENARIO_INSTANCE;
     uint64_t linkBw   = TOPO_BOTTLE_BW;
     uint16_t sendPort=1000;
     uint16_t recvPort=5000;
 
     double sim_dur=sim_time;
-    int end_time=sim_time;
-    float appStop=end_time;
+    double end_time=sim_time;
+    double appStop=end_time;
 
     NodeContainer c;
     c.Create (10);  // 10 nodes: n0-n3 (senders), n4-n5 (routers), n6-n9 (receivers)
@@ -351,8 +770,10 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     // Set up the routing
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
-    // Use FreqCCv4 for all 4 flows
     dqc::CongestionControlType cc = kFreqCCv4;
+    if(algo == "bbrv2" || algo == "BBRv2" || algo == "bbr2"){
+        cc = kBBRv2;
+    }
 
     uint32_t max_bps=0;
     int test_pair=1;
@@ -365,31 +786,45 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     std::string prefix=instance+delimiter;  // instance already includes script name and algorithm
     log=prefix+std::to_string(test_pair);
     std::unique_ptr<DqcTrace> trace;
-    const uint32_t trace_enable =
-        DqcTraceEnable::E_DQC_GOODPUT |
-        DqcTraceEnable::E_DQC_RTT |
-        DqcTraceEnable::E_DQC_BW |
-        DqcTraceEnable::E_DQC_OWD |
-        DqcTraceEnable::E_DQC_STAT |
-        DqcTraceEnable::E_DQC_SEND_RATE |
-        DqcTraceEnable::E_DQC_RECV_RATE |
-        DqcTraceEnable::E_DQC_INFLIGHT |
-        DqcTraceEnable::E_DQC_BBR_MODE |
-        DqcTraceEnable::E_DQC_UP_PHASE |
-        DqcTraceEnable::E_DQC_FREQ_ANALYSIS |
-        DqcTraceEnable::E_DQC_LOSS_RATE |
-        DqcTraceEnable::E_DQC_QUEUE_DELAY |
-        DqcTraceEnable::E_DQC_FREQCCV4_LOAD;
+	    uint32_t trace_enable =
+	        DqcTraceEnable::E_DQC_GOODPUT |
+	        DqcTraceEnable::E_DQC_BBR_MODE |
+	        DqcTraceEnable::E_DQC_LOSS_RATE;
+	    if(g_enable_cruise_window_trace){
+	        trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_LOAD;
+	    }
+    if(g_enable_heavy_trace){
+        trace_enable |=
+            DqcTraceEnable::E_DQC_BW |
+            DqcTraceEnable::E_DQC_SEND_RATE |
+            DqcTraceEnable::E_DQC_RECV_RATE |
+            DqcTraceEnable::E_DQC_RECV_RATE_RAW |
+            DqcTraceEnable::E_DQC_QUEUE_DELAY |
+            DqcTraceEnable::E_DQC_INFLIGHT;
+    }
+    if(g_enable_convergence_gate_trace){
+        trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_GATE;
+    }
 
     float flow_start_times[NUM_FLOWS] = {0.0, 0.0, 0.0, 0.0};
+    if(g_flow_start_mode == "staggered_start"){
+        flow_start_times[0] = 0.000;
+        flow_start_times[1] = 0.020;
+        flow_start_times[2] = 0.040;
+        flow_start_times[3] = 0.060;
+    }
     const uint64_t fair_share_bps = TOPO_BOTTLE_BW / NUM_FLOWS;
 
     // Flow 1: n0 -> n6
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
     stat->RegisterCongestionType(test_pair);
+    log="flow"+std::to_string(test_pair);
     trace->Log(log, trace_enable);
-    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,flow_start_times[0]+0.001,appStop,trace.get(),stat,g_freq_hz[0],g_amp_mode[0],g_fixed_mbps[0],max_bps,sender_id,false,1,fair_share_bps);
+	    Ptr<DqcSender> sender1 = InstallDqc(cc,c.Get(0),c.Get(6),sendPort,recvPort,flow_start_times[0],appStop,trace.get(),stat,g_freq_hz[0],g_amp_mode[0],g_fixed_mbps[0],max_bps,sender_id,false,1,fair_share_bps,g_flow_size_bytes,trace_enable,0);
+    if(g_enable_equivalence_audit_trace && !g_trace_output_dir.empty()){
+        sender1->SetEquivalenceAuditTracePrefix(g_trace_output_dir+"flow1");
+    }
     senders.push_back(sender1);
     sender_id++;
     test_pair++;
@@ -400,9 +835,12 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     // Flow 2: n1 -> n7
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
-    log=prefix+std::to_string(test_pair);
+    log="flow"+std::to_string(test_pair);
     trace->Log(log, trace_enable);
-    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,flow_start_times[1]+0.002,appStop,trace.get(),stat,g_freq_hz[1],g_amp_mode[1],g_fixed_mbps[1],max_bps,sender_id,false,1,fair_share_bps);
+	    Ptr<DqcSender> sender2 = InstallDqc(cc,c.Get(1),c.Get(7),sendPort,recvPort,flow_start_times[1],appStop,trace.get(),stat,g_freq_hz[1],g_amp_mode[1],g_fixed_mbps[1],max_bps,sender_id,false,1,fair_share_bps,g_flow_size_bytes,trace_enable,1);
+    if(g_enable_equivalence_audit_trace && !g_trace_output_dir.empty()){
+        sender2->SetEquivalenceAuditTracePrefix(g_trace_output_dir+"flow2");
+    }
     senders.push_back(sender2);
     sender_id++;
     test_pair++;
@@ -413,9 +851,12 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     // Flow 3: n2 -> n8
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
-    log=prefix+std::to_string(test_pair);
+    log="flow"+std::to_string(test_pair);
     trace->Log(log, trace_enable);
-    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,flow_start_times[2]+0.003,appStop,trace.get(),stat,g_freq_hz[2],g_amp_mode[2],g_fixed_mbps[2],max_bps,sender_id,false,1,fair_share_bps);
+	    Ptr<DqcSender> sender3 = InstallDqc(cc,c.Get(2),c.Get(8),sendPort,recvPort,flow_start_times[2],appStop,trace.get(),stat,g_freq_hz[2],g_amp_mode[2],g_fixed_mbps[2],max_bps,sender_id,false,1,fair_share_bps,g_flow_size_bytes,trace_enable,2);
+    if(g_enable_equivalence_audit_trace && !g_trace_output_dir.empty()){
+        sender3->SetEquivalenceAuditTracePrefix(g_trace_output_dir+"flow3");
+    }
     senders.push_back(sender3);
     sender_id++;
     test_pair++;
@@ -426,9 +867,12 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     // Flow 4: n3 -> n9
     trace.reset(new DqcTrace(test_pair));
     stat->ReisterAvgDelayId(test_pair);
-    log=prefix+std::to_string(test_pair);
+    log="flow"+std::to_string(test_pair);
     trace->Log(log, trace_enable);
-    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,flow_start_times[3]+0.004,appStop,trace.get(),stat,g_freq_hz[3],g_amp_mode[3],g_fixed_mbps[3],max_bps,sender_id,false,1,fair_share_bps);
+	    Ptr<DqcSender> sender4 = InstallDqc(cc,c.Get(3),c.Get(9),sendPort,recvPort,flow_start_times[3],appStop,trace.get(),stat,g_freq_hz[3],g_amp_mode[3],g_fixed_mbps[3],max_bps,sender_id,false,1,fair_share_bps,g_flow_size_bytes,trace_enable,3);
+    if(g_enable_equivalence_audit_trace && !g_trace_output_dir.empty()){
+        sender4->SetEquivalenceAuditTracePrefix(g_trace_output_dir+"flow4");
+    }
     senders.push_back(sender4);
     sender_id++;
     test_pair++;
@@ -437,21 +881,89 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, int sim_time=6
     traces.push_back(std::move(trace));
 
     Simulator::Stop (Seconds(sim_dur));
+    auto run_wall_start = std::chrono::high_resolution_clock::now();
     Simulator::Run ();
+    auto run_wall_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> run_wall = run_wall_end - run_wall_start;
+    std::cout << "[runtime-diagnosis] sim_stop_s=" << sim_dur
+              << " simulator_now_s=" << Simulator::Now().GetSeconds()
+              << " event_count=unavailable_in_this_ns3_tree"
+              << " wall_seconds=" << run_wall.count()
+              << " process_interval_us=" << g_process_interval_us
+              << " gate_trace_mode=" << g_gate_trace_mode
+              << " heavy_trace=" << g_enable_heavy_trace
+              << std::endl;
     Simulator::Destroy();
     stat->Flush(linkBw,sim_dur);
 }
 
 int main (int argc, char *argv[]){
-    int sim_time=30;
+    double sim_time=30.0;
     int ins[]={1};
     std::string trace_path="";
+    std::string output_dir="";
+    std::string algo="freqccv4";
+	    uint32_t run_id=1;
+	    uint32_t seed=1;
+	    g_freq_bbr_config_path =
+	        PreScanFreqBbrConfigPath(argc, argv, g_freq_bbr_config_path);
+	    LoadFreqBbrConfig(g_freq_bbr_config_path, &g_freq_bbr_config);
+	    ApplyFreqBbrConfigToGlobals(g_freq_bbr_config);
 
-    // Command line arguments
-    CommandLine cmd;
-    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
+	    // Command line arguments
+	    CommandLine cmd;
+	    cmd.AddValue("freqBbrConfig", "FreqBBR key=value config file path", g_freq_bbr_config_path);
+	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
-    // Per-flow parameters
+    cmd.AddValue("outputDir", "Output trace directory path", output_dir);
+    cmd.AddValue("algo", "Congestion control: freqccv4 or bbrv2", algo);
+    cmd.AddValue("runId", "ns-3 RNG run id", run_id);
+    cmd.AddValue("seed", "ns-3 RNG seed", seed);
+	    cmd.AddValue("enableConvergenceGateTrace", "Enable FreqCCv4 convergence-gate CSV trace", g_enable_convergence_gate_trace);
+	    cmd.AddValue("enableConvergenceGateControl", "Gate CRUISE modulation by BBR stability", g_enable_convergence_gate_control);
+	    cmd.AddValue("enableFreqRefPacingControl", "Enable F_ref pacing-layer scaling", g_enable_freq_ref_pacing_control);
+	    cmd.AddValue("enableCruiseWindowTrace", "Enable FreqCCv4 CRUISE window trace", g_enable_cruise_window_trace);
+    cmd.AddValue("flowStartMode", "Flow start mode: same_start or staggered_start", g_flow_start_mode);
+    cmd.AddValue("flowSizeBytes", "Per-flow send limit in bytes; 0 keeps unlimited/default behavior", g_flow_size_bytes);
+    cmd.AddValue("processIntervalUs", "DqcSender process timer interval in microseconds", g_process_interval_us);
+    cmd.AddValue("smokeMode", "Use tiny, fast packet-level smoke defaults", g_smoke_mode);
+    cmd.AddValue("enableHeavyTrace", "Enable per-packet/per-pacing heavy trace callbacks", g_enable_heavy_trace);
+    cmd.AddValue("gateTraceMode", "FreqCCv4 gate trace mode: off, round_only, sampled_pacing, full", g_gate_trace_mode);
+	    cmd.AddValue("gateTraceSampleIntervalUs", "Minimum interval for sampled_pacing gate trace rows", g_gate_trace_sample_interval_us);
+	    cmd.AddValue("gateStateMachineSelfTest", "Run synthetic convergence-gate state-machine self-test and exit", g_gate_state_machine_self_test);
+	    cmd.AddValue("effectiveBwSelectionSelfTest", "Run synthetic EffectiveBw Selection self-test and exit", g_effective_bw_selection_self_test);
+	    cmd.AddValue("effectiveBwPhaseApplicationSelfTest", "Run synthetic EffectiveBw phase-application self-test and exit", g_effective_bw_phase_application_self_test);
+	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
+    cmd.AddValue("freqRefScaleMode", "F_ref pacing scale mode: current, downward_only, asymmetric, high_conf_only, early_episode_only", g_freq_ref_scale_mode);
+    cmd.AddValue("freqRefHighConfThreshold", "F_ref high-confidence scale threshold", g_freq_ref_high_conf_threshold);
+	    cmd.AddValue("freqRefUpBeta", "F_ref asymmetric upward scale beta", g_freq_ref_up_beta);
+	    cmd.AddValue("enableEquivalenceAuditTrace", "Enable packet/ACK/pacing audit traces for B/C equivalence checks", g_enable_equivalence_audit_trace);
+	    cmd.AddValue("stabilitySingleRoundExitThreshold", "EffectiveBw Selection MaxDRate single-round exit threshold", g_freq_bbr_config.stability_single_round_exit_threshold);
+	    cmd.AddValue("stabilityConsecutiveExitThreshold", "EffectiveBw Selection MaxDRate consecutive exit threshold", g_freq_bbr_config.stability_consecutive_exit_threshold);
+	    cmd.AddValue("stabilityStableRounds", "EffectiveBw Selection stable rounds", g_freq_bbr_config.stability_stable_rounds);
+	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "EffectiveBw Selection full-pipe growth threshold", g_freq_bbr_config.stability_full_pipe_growth_threshold);
+	    cmd.AddValue("spectralMinValidity", "Spectral Validity Gate V2 minimum score", g_freq_bbr_config.spectral_min_validity);
+	    cmd.AddValue("spectralMinDrateSnr", "Spectral Validity Gate V2 minimum DRate SNR", g_freq_bbr_config.spectral_min_drate_snr);
+	    cmd.AddValue("spectralMinSrttSnr", "Spectral Validity Gate V2 minimum SRTT SNR", g_freq_bbr_config.spectral_min_srtt_snr);
+	    cmd.AddValue("spectralMaxDrateWidthRatio", "Spectral Validity Gate V2 maximum DRate width ratio", g_freq_bbr_config.spectral_max_drate_width_ratio);
+	    cmd.AddValue("spectralMaxSrttWidthRatio", "Spectral Validity Gate V2 maximum SRTT width ratio", g_freq_bbr_config.spectral_max_srtt_width_ratio);
+	    cmd.AddValue("spectralMinDratePhaseCoherence", "Spectral Validity Gate V2 minimum DRate phase coherence", g_freq_bbr_config.spectral_min_drate_phase_coherence);
+	    cmd.AddValue("spectralMinSrttPhaseCoherence", "Spectral Validity Gate V2 minimum SRTT phase coherence", g_freq_bbr_config.spectral_min_srtt_phase_coherence);
+	    cmd.AddValue("mergedRescueEnable", "Enable merged-window rescue", g_freq_bbr_config.merged_rescue_enable);
+	    cmd.AddValue("mergedRescueWindowMultiplier", "Merged-window rescue duration multiplier", g_freq_bbr_config.merged_rescue_window_multiplier);
+	    cmd.AddValue("mergedRescueMaxPasses", "Merged-window rescue max passes", g_freq_bbr_config.merged_rescue_max_passes);
+	    cmd.AddValue("mergedRescueMaxTrendRatio", "Merged-window rescue max trend ratio", g_freq_bbr_config.merged_rescue_max_trend_ratio);
+	    cmd.AddValue("medianGuardEnable", "Enable robust median guard", g_freq_bbr_config.median_guard_enable);
+	    cmd.AddValue("medianGuardMinSamples", "Robust median guard minimum DRate samples", g_freq_bbr_config.median_guard_min_samples);
+	    cmd.AddValue("medianGuardMaxIqrRatio", "Robust median guard maximum IQR ratio", g_freq_bbr_config.median_guard_max_iqr_ratio);
+	    cmd.AddValue("medianGuardMaxTrendRatio", "Robust median guard maximum trend ratio", g_freq_bbr_config.median_guard_max_trend_ratio);
+	    cmd.AddValue("medianGuardMargin", "Robust median guard margin", g_freq_bbr_config.median_guard_margin);
+	    cmd.AddValue("medianGuardScaleMin", "Robust median guard scale lower bound", g_freq_bbr_config.median_guard_scale_min);
+	    cmd.AddValue("medianGuardScaleMax", "Robust median guard scale upper bound", g_freq_bbr_config.median_guard_scale_max);
+	    cmd.AddValue("medianGuardWeightAlpha", "Robust median guard weight alpha", g_freq_bbr_config.median_guard_weight_alpha);
+	    cmd.AddValue("effectiveBwScaleMin", "NORMAL/MERGED EffectiveBw scale lower bound", g_freq_bbr_config.effective_bw_scale_min);
+	    cmd.AddValue("effectiveBwScaleMax", "NORMAL/MERGED EffectiveBw scale upper bound", g_freq_bbr_config.effective_bw_scale_max);
+	    // Per-flow parameters
     cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
     cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);
     cmd.AddValue("freq3", "Flow 3 oscillation frequency (Hz)", g_freq_hz[2]);
@@ -465,20 +977,73 @@ int main (int argc, char *argv[]){
     cmd.AddValue("fixed3", "Flow 3 fixed amplitude (Mbps)", g_fixed_mbps[2]);
     cmd.AddValue("fixed4", "Flow 4 fixed amplitude (Mbps)", g_fixed_mbps[3]);
     cmd.AddValue("interval_win_rtt_mult", "Interval-phase STFT window multiplier on min_rtt", g_interval_window_rtt_mult);
-    cmd.AddValue("dynamic_delay_enable", "Enable scheduled propagation delay changes at 4,7,12,18,22,27s", g_dynamic_delay_enable);
-    cmd.Parse(argc, argv);
+	    cmd.AddValue("dynamic_delay_enable", "Enable scheduled propagation delay changes at 4,7,12,18,22,27s", g_dynamic_delay_enable);
+	    cmd.Parse(argc, argv);
+	    ApplyGlobalsToFreqBbrConfig(&g_freq_bbr_config);
+	    if(g_gate_state_machine_self_test){
+	        return FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(std::cout) ? 0 : 1;
+	    }
+	    if(g_effective_bw_selection_self_test){
+	        return FreqCCv4Sender::RunEffectiveBwSelectionSelfTest(std::cout) ? 0 : 1;
+	    }
+	    if(g_effective_bw_phase_application_self_test){
+	        return FreqCCv4Sender::RunEffectiveBwPhaseApplicationSelfTest(std::cout) ? 0 : 1;
+	    }
+    if(g_smoke_mode){
+        sim_time = std::min(sim_time, 0.5);
+        if(g_flow_size_bytes == 0 || g_flow_size_bytes > 20000ULL){
+            g_flow_size_bytes = 20000ULL;
+        }
+        g_process_interval_us = std::max<int64_t>(g_process_interval_us, 20000);
+        g_dynamic_delay_enable = false;
+        g_enable_heavy_trace = false;
+        g_use_engine_timer = false;
+        if(g_gate_trace_mode == "full" || g_gate_trace_mode == "sampled_pacing"){
+            g_gate_trace_mode = "round_only";
+        }
+    }
+    RngSeedManager::SetSeed(seed);
+    RngSeedManager::SetRun(run_id);
+    SendPacketManager::SetDeterministicRandomSeed(seed, run_id);
+    if(!output_dir.empty()){
+        trace_path = output_dir;
+    }
     if(!trace_path.empty()){
         if(trace_path.back() != '/'){
             trace_path.push_back('/');
         }
+        EnsureDirectoryExists(trace_path);
         set_dqc_trace_folder(trace_path);
     }
+    g_trace_output_dir = trace_path;
     SetQueueOccupancyTraceFolder(trace_path);
 
     // Print configuration
     std::cout << "=== " << DQC_SCENARIO_TITLE << " Configuration ===" << std::endl;
     std::cout << "Number of flows: " << NUM_FLOWS << std::endl;
-    std::cout << "Congestion control: FreqCCv4" << std::endl;
+    std::cout << "Congestion control: " << algo << std::endl;
+	    std::cout << "Run id / seed: " << run_id << " / " << seed << std::endl;
+	    std::cout << "FreqBBR config: " << g_freq_bbr_config_path << std::endl;
+	    std::cout << "Flow start mode: " << g_flow_start_mode << std::endl;
+    std::cout << "Flow size bytes: " << g_flow_size_bytes << std::endl;
+    std::cout << "Process interval us: " << g_process_interval_us << std::endl;
+    std::cout << "Use engine timer: " << g_use_engine_timer << std::endl;
+    std::cout << "Smoke mode: " << g_smoke_mode << std::endl;
+	    std::cout << "Heavy trace: " << g_enable_heavy_trace << std::endl;
+	    std::cout << "Cruise window trace: " << g_enable_cruise_window_trace << std::endl;
+    std::cout << "Gate trace mode/sample interval us: "
+              << g_gate_trace_mode << "/"
+              << g_gate_trace_sample_interval_us << std::endl;
+    std::cout << "F_ref scale mode/high_conf/up_beta: "
+              << g_freq_ref_scale_mode << "/"
+              << g_freq_ref_high_conf_threshold << "/"
+              << g_freq_ref_up_beta << std::endl;
+    std::cout << "Equivalence audit trace: "
+              << g_enable_equivalence_audit_trace << std::endl;
+    std::cout << "Convergence gate trace/control/f_ref_pacing: "
+              << g_enable_convergence_gate_trace << "/"
+              << g_enable_convergence_gate_control << "/"
+              << g_enable_freq_ref_pacing_control << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;
@@ -499,9 +1064,9 @@ int main (int argc, char *argv[]){
     }
     std::cout << "====================================" << std::endl;
 
-    const char *algos[]={"freqccv4"};
+    const char *algos[]={""};
     for (size_t c = 0; c < sizeof(algos) / sizeof(algos[0]); ++c){
-        std::string cong=std::string(algos[c]);
+        std::string cong=algo;
         std::string name=cong;
         std::unique_ptr<DqcTraceState> stat;
         stat.reset(new DqcTraceState(name));

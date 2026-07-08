@@ -45,6 +45,9 @@ MinRttFilter::MinRttFilter(TimeDelta initial_min_rtt,
       min_rtt_timestamp_(initial_min_rtt_timestamp) {}
 
 void MinRttFilter::Update(TimeDelta sample_rtt, QuicTime now) {
+  if (sample_rtt <= TimeDelta::Zero()) {
+    return;
+  }
   if (sample_rtt < min_rtt_ || min_rtt_timestamp_ == QuicTime::Zero()) {
     min_rtt_ = sample_rtt;
     min_rtt_timestamp_ = now;
@@ -52,6 +55,9 @@ void MinRttFilter::Update(TimeDelta sample_rtt, QuicTime now) {
 }
 
 void MinRttFilter::ForceUpdate(TimeDelta sample_rtt, QuicTime now) {
+  if (sample_rtt <= TimeDelta::Zero()) {
+    return;
+  }
   min_rtt_ = sample_rtt;
   min_rtt_timestamp_ = now;
 }
@@ -80,6 +86,14 @@ void Bbr2NetworkModel::OnPacketSent(QuicTime sent_time,
                                     QuicPacketNumber packet_number,
                                     QuicByteCount bytes,
                                     HasRetransmittableData is_retransmittable) {
+  // Updating the min here ensures a more realistic value when flows exit
+  // quiescence.
+  if (bytes_in_flight < min_bytes_in_flight_in_round_) {
+    min_bytes_in_flight_in_round_ = bytes_in_flight;
+  }
+  if (bytes_in_flight + bytes >= inflight_hi_) {
+    inflight_hi_limited_in_round_ = true;
+  }
   round_trip_counter_.OnPacketSent(packet_number);
 
   bandwidth_sampler_.OnPacketSent(sent_time, packet_number, bytes,
@@ -104,7 +118,16 @@ void Bbr2NetworkModel::OnCongestionEventStart(
       bandwidth_sampler_.OnCongestionEvent(event_time, acked_packets,
                                            lost_packets, MaxBandwidth(),
                                            bandwidth_lo(), RoundTripCount());
+
+  if (sample.extra_acked == 0) {
+    cwnd_limited_before_aggregation_epoch_ =
+        congestion_event->prior_bytes_in_flight >= congestion_event->prior_cwnd;
+  }
+
   delivery_rate_latest_ = sample.sample_max_bandwidth;
+  congestion_event->sample_valid = !sample.sample_max_bandwidth.IsZero();
+  congestion_event->sample_is_app_limited = sample.sample_is_app_limited;
+  congestion_event->sample_max_bandwidth = sample.sample_max_bandwidth;
 
   if (sample.last_packet_send_state.is_valid) {
     congestion_event->last_packet_send_state = sample.last_packet_send_state;
@@ -122,7 +145,6 @@ void Bbr2NetworkModel::OnCongestionEventStart(
         << " packets have been acked, but sample_max_bandwidth is zero.";
     if (!sample.sample_is_app_limited ||
         sample.sample_max_bandwidth > MaxBandwidth()) {
-      congestion_event->sample_max_bandwidth = sample.sample_max_bandwidth;
       max_bandwidth_filter_.Update(congestion_event->sample_max_bandwidth);
     }
   }
@@ -154,6 +176,21 @@ void Bbr2NetworkModel::OnCongestionEventStart(
     loss_events_in_round_++;
   }
 
+  if (congestion_event->bytes_acked > 0 &&
+      congestion_event->last_packet_send_state.is_valid &&
+      total_bytes_acked() >
+          congestion_event->last_packet_send_state.total_bytes_acked) {
+    QuicByteCount bytes_delivered =
+        total_bytes_acked() -
+        congestion_event->last_packet_send_state.total_bytes_acked;
+    max_bytes_delivered_in_round_ =
+        std::max(max_bytes_delivered_in_round_, bytes_delivered);
+  }
+
+  if (congestion_event->bytes_in_flight < min_bytes_in_flight_in_round_) {
+    min_bytes_in_flight_in_round_ = congestion_event->bytes_in_flight;
+  }
+
   // |bandwidth_latest_| and |inflight_latest_| only increased within a round.
   if (sample.sample_max_bandwidth > bandwidth_latest_) {
     bandwidth_latest_ = sample.sample_max_bandwidth;
@@ -163,12 +200,12 @@ void Bbr2NetworkModel::OnCongestionEventStart(
     inflight_latest_ = sample.sample_max_inflight;
   }
 
+  // Adapt lower bounds(bandwidth_lo and inflight_lo).
+  AdaptLowerBounds(*congestion_event);
+
   if (!congestion_event->end_of_round_trip) {
     return;
   }
-
-  // Per round-trip updates.
-  AdaptLowerBounds(*congestion_event);
 
   if (!sample.sample_max_bandwidth.IsZero()) {
     bandwidth_latest_ = sample.sample_max_bandwidth;
@@ -181,44 +218,110 @@ void Bbr2NetworkModel::OnCongestionEventStart(
 
 void Bbr2NetworkModel::AdaptLowerBounds(
     const Bbr2CongestionEvent& congestion_event) {
-  if (!congestion_event.end_of_round_trip ||
-      congestion_event.is_probing_for_bandwidth) {
+  if (Params().bw_lo_mode_ == Bbr2Params::DEFAULT) {
+    if (!congestion_event.end_of_round_trip ||
+        congestion_event.is_probing_for_bandwidth) {
+      return;
+    }
+    QuicByteCount ecn_inflight_lo=inflight_lo_default();
+    /* ECN response. */
+    if(Params().enable_ecn&&ecn_in_round_){
+      uint32_t ecn_cut=(BBR_UNIT -
+                        ((Params().ecn_alpha * Params().ecn_factor) >>
+                         BBR_SCALE));
+      if (inflight_lo_ == inflight_lo_default()) {
+        inflight_lo_ = congestion_event.prior_cwnd;
+      }
+      ecn_inflight_lo=(QuicByteCount)inflight_lo_*ecn_cut>>BBR_SCALE;
+      CHECK(ecn_inflight_lo>0);
+    }
+
+    if (bytes_lost_in_round_ > 0) {
+      if (bandwidth_lo_.IsInfinite()) {
+        bandwidth_lo_ = MaxBandwidth();
+      }
+      bandwidth_lo_ =
+          std::max(bandwidth_latest_, bandwidth_lo_ * (1.0 - Params().beta));
+      QUIC_DVLOG(3) << "bandwidth_lo_ updated to " << bandwidth_lo_
+                    << ", bandwidth_latest_ is " << bandwidth_latest_;
+
+      if (Params().ignore_inflight_lo) {
+        return;
+      }
+      if (inflight_lo_ == inflight_lo_default()) {
+        inflight_lo_ = congestion_event.prior_cwnd;
+      }
+      inflight_lo_ = std::max<QuicByteCount>(
+          inflight_latest_, inflight_lo_ * (1.0 - Params().beta));
+    }
+    if(Params().enable_ecn&&ecn_in_round_){
+      inflight_lo_=std::min(inflight_lo_,ecn_inflight_lo);
+    }
     return;
   }
 
-    QuicByteCount ecn_inflight_lo=inflight_lo_default();
-	/* ECN response. */
-   if(Params().enable_ecn&&ecn_in_round_){
-       uint32_t ecn_cut=(BBR_UNIT -
-			   ((Params().ecn_alpha * Params().ecn_factor) >>
-			    BBR_SCALE));
-    if (inflight_lo_ == inflight_lo_default()) {
-      inflight_lo_ = congestion_event.prior_cwnd;
-    }
-    ecn_inflight_lo=(QuicByteCount)inflight_lo_*ecn_cut>>BBR_SCALE;
-    CHECK(ecn_inflight_lo>0);
-   }
+  if (congestion_event.bytes_lost == 0) {
+    return;
+  }
+  // Ignore losses from packets sent when probing for more bandwidth in
+  // STARTUP or PROBE_UP when they are lost in DRAIN or PROBE_DOWN.
+  if (pacing_gain_ < 1) {
+    return;
+  }
 
-  if (bytes_lost_in_round_ > 0) {
-    if (bandwidth_lo_.IsInfinite()) {
-      bandwidth_lo_ = MaxBandwidth();
+  // Decrease bandwidth_lo whenever there is loss.
+  // Set bandwidth_lo_ if it is not yet set.
+  if (bandwidth_lo_.IsInfinite()) {
+    bandwidth_lo_ = MaxBandwidth();
+  }
+  // Save bandwidth_lo_ if it has not already been saved.
+  if (prior_bandwidth_lo_.IsZero()) {
+    prior_bandwidth_lo_ = bandwidth_lo_;
+  }
+
+  switch (Params().bw_lo_mode_) {
+    case Bbr2Params::MIN_RTT_REDUCTION:
+      bandwidth_lo_ =
+          bandwidth_lo_ - QuicBandwidth::FromBytesAndTimeDelta(
+                              congestion_event.bytes_lost, MinRtt());
+      break;
+    case Bbr2Params::INFLIGHT_REDUCTION: {
+      const QuicByteCount effective_inflight =
+          std::max(BDP(), congestion_event.prior_bytes_in_flight);
+      bandwidth_lo_ =
+          bandwidth_lo_ * ((effective_inflight - congestion_event.bytes_lost) /
+                           static_cast<double>(effective_inflight));
+      break;
     }
+    case Bbr2Params::CWND_REDUCTION:
+      bandwidth_lo_ =
+          bandwidth_lo_ *
+          ((congestion_event.prior_cwnd - congestion_event.bytes_lost) /
+           static_cast<double>(congestion_event.prior_cwnd));
+      break;
+    case Bbr2Params::DEFAULT:
+      QUIC_BUG << "Unreachable case DEFAULT.";
+  }
+
+  QuicBandwidth last_bandwidth = bandwidth_latest_;
+  if (!congestion_event.sample_max_bandwidth.IsZero()) {
+    last_bandwidth = congestion_event.sample_max_bandwidth;
+  }
+  if (pacing_gain_ > Params().full_bw_threshold) {
     bandwidth_lo_ =
-        std::max(bandwidth_latest_, bandwidth_lo_ * (1.0 - Params().beta));
-    QUIC_DVLOG(3) << "bandwidth_lo_ updated to " << bandwidth_lo_
-                  << ", bandwidth_latest_ is " << bandwidth_latest_;
-
-    if (Params().ignore_inflight_lo) {
+        std::max(bandwidth_lo_,
+                 last_bandwidth * (Params().full_bw_threshold / pacing_gain_));
+  } else {
+    bandwidth_lo_ = std::max(bandwidth_lo_, last_bandwidth);
+  }
+  if (congestion_event.end_of_round_trip) {
+    if (bandwidth_lo_.IsInfinite()) {
+      prior_bandwidth_lo_ = QuicBandwidth::Zero();
       return;
     }
-    if (inflight_lo_ == inflight_lo_default()) {
-      inflight_lo_ = congestion_event.prior_cwnd;
-    }
-    inflight_lo_ = std::max<QuicByteCount>(
-        inflight_latest_, inflight_lo_ * (1.0 - Params().beta));
-  }
-  if(Params().enable_ecn&&ecn_in_round_){
-      inflight_lo_=std::min(inflight_lo_,ecn_inflight_lo);
+    bandwidth_lo_ =
+        std::max(bandwidth_lo_, prior_bandwidth_lo_ * (1.0 - Params().beta));
+    prior_bandwidth_lo_ = QuicBandwidth::Zero();
   }
 }
 void Bbr2NetworkModel::OnEcnUpdate(){
@@ -228,9 +331,7 @@ void Bbr2NetworkModel::OnCongestionEventFinish(
     QuicPacketNumber least_unacked_packet,
     const Bbr2CongestionEvent& congestion_event) {
   if (congestion_event.end_of_round_trip) {
-    bytes_lost_in_round_ = 0;
-    loss_events_in_round_ = 0;
-    ecn_in_round_=0;
+    OnNewRound();
   }
 
   bandwidth_sampler_.RemoveObsoletePackets(least_unacked_packet);
@@ -238,11 +339,7 @@ void Bbr2NetworkModel::OnCongestionEventFinish(
 
 void Bbr2NetworkModel::UpdateNetworkParameters(QuicBandwidth bandwidth,
                                                TimeDelta rtt) {
-  if (!improve_adjust_network_parameters_ && !bandwidth.IsInfinite() &&
-      bandwidth > MaxBandwidth()) {
-    max_bandwidth_filter_.Update(bandwidth);
-  }
-
+  (void)bandwidth;
   if (!rtt.IsZero()) {
     min_rtt_filter_.Update(rtt, MinRttTimestamp());
   }
@@ -273,11 +370,16 @@ bool Bbr2NetworkModel::IsCongestionWindowLimited(
   return prior_bytes_in_flight >= congestion_event.prior_cwnd;
 }
 
-bool Bbr2NetworkModel::IsInflightTooHigh(const Bbr2CongestionEvent& congestion_event,
-                                        QuicByteCount delivered_ce) const {
+bool Bbr2NetworkModel::IsInflightTooHigh(
+    const Bbr2CongestionEvent& congestion_event,
+    int64_t max_loss_events) const {
   const QuicSendTimeState& send_state = congestion_event.last_packet_send_state;
   if (!send_state.is_valid) {
     // Not enough information.
+    return false;
+  }
+
+  if (loss_events_in_round() < max_loss_events) {
     return false;
   }
 
@@ -287,7 +389,9 @@ bool Bbr2NetworkModel::IsInflightTooHigh(const Bbr2CongestionEvent& congestion_e
   // bytes_lost_in_round_, OTOH, is the total bytes lost in the "current" round.
   const QuicByteCount bytes_lost_in_round = bytes_lost_in_round_;
 
-  QUIC_DVLOG(3) << "IsInflightTooHigh: bytes_lost_in_round:"
+  QUIC_DVLOG(3) << "IsInflightTooHigh: loss_events_in_round:"
+                << loss_events_in_round()
+                << " bytes_lost_in_round:"
                 << bytes_lost_in_round << ", lost_in_round_threshold:"
                 << inflight_at_send * Params().loss_threshold;
 
@@ -298,25 +402,52 @@ bool Bbr2NetworkModel::IsInflightTooHigh(const Bbr2CongestionEvent& congestion_e
       return true;
     }
   }
-  //add by zsy for ecn marking
+
+  return false;
+}
+
+bool Bbr2NetworkModel::IsInflightTooHighWithEcn(
+    const Bbr2CongestionEvent& congestion_event,
+    int64_t max_loss_events,
+    QuicByteCount delivered_ce) const {
+  if (IsInflightTooHigh(congestion_event, max_loss_events)) {
+    return true;
+  }
+
   if(Params().enable_ecn){
+    const QuicSendTimeState& send_state =
+        congestion_event.last_packet_send_state;
+    if (!send_state.is_valid) {
+      return false;
+    }
     //not quite accurate
     QuicByteCount delivered=total_bytes_acked()-send_state.total_bytes_acked;
-    CHECK(delivered);
+    if (delivered == 0) {
+      return false;
+    }
     QuicByteCount ecn_in_round_threshold=delivered*Params().ecn_thresh>>BBR_SCALE;
     if(delivered_ce>=ecn_in_round_threshold){
         return true;
     }
   }
-  
-  
+
   return false;
 }
 
-void Bbr2NetworkModel::RestartRound() {
+void Bbr2NetworkModel::RestartRoundEarly() {
+  OnNewRound();
+  round_trip_counter_.RestartRound();
+  rounds_with_queueing_ = 0;
+}
+
+void Bbr2NetworkModel::OnNewRound() {
   bytes_lost_in_round_ = 0;
   loss_events_in_round_ = 0;
-  round_trip_counter_.RestartRound();
+  max_bytes_delivered_in_round_ = 0;
+  min_bytes_in_flight_in_round_ =
+      std::numeric_limits<QuicByteCount>::max();
+  inflight_hi_limited_in_round_ = false;
+  ecn_in_round_=0;
 }
 
 void Bbr2NetworkModel::cap_inflight_lo(QuicByteCount cap) {
@@ -332,6 +463,59 @@ QuicByteCount Bbr2NetworkModel::inflight_hi_with_headroom() const {
   QuicByteCount headroom = inflight_hi_ * Params().inflight_hi_headroom;
 
   return inflight_hi_ > headroom ? inflight_hi_ - headroom : 0;
+}
+
+bool Bbr2NetworkModel::HasBandwidthGrowth(
+    const Bbr2CongestionEvent& congestion_event) {
+  DCHECK(!full_bandwidth_reached_);
+  DCHECK(congestion_event.end_of_round_trip);
+
+  QuicBandwidth threshold =
+      full_bandwidth_baseline_ * Params().full_bw_threshold;
+
+  if (MaxBandwidth() >= threshold) {
+    QUIC_DVLOG(3) << " CheckBandwidthGrowth at end of round. max_bandwidth:"
+                  << MaxBandwidth() << ", threshold:" << threshold
+                  << " (Still growing)  @ " << congestion_event.event_time;
+    full_bandwidth_baseline_ = MaxBandwidth();
+    rounds_without_bandwidth_growth_ = 0;
+    return true;
+  }
+
+  ++rounds_without_bandwidth_growth_;
+  if (rounds_without_bandwidth_growth_ >= Params().startup_full_bw_rounds &&
+      !congestion_event.last_packet_send_state.is_app_limited) {
+    full_bandwidth_reached_ = true;
+  }
+
+  QUIC_DVLOG(3) << " CheckBandwidthGrowth at end of round. max_bandwidth:"
+                << MaxBandwidth() << ", threshold:" << threshold
+                << " rounds_without_growth:" << rounds_without_bandwidth_growth_
+                << " full_bw_reached:" << full_bandwidth_reached_ << "  @ "
+                << congestion_event.event_time;
+
+  return false;
+}
+
+void Bbr2NetworkModel::CheckPersistentQueue(
+    const Bbr2CongestionEvent& congestion_event,
+    float target_gain) {
+  DCHECK(congestion_event.end_of_round_trip);
+  DCHECK_NE(min_bytes_in_flight_in_round_,
+            std::numeric_limits<QuicByteCount>::max());
+  DCHECK_GE(target_gain, Params().full_bw_threshold);
+  QuicByteCount target =
+      std::max(static_cast<QuicByteCount>(target_gain * BDP()),
+               BDP() + QueueingThresholdExtraBytes());
+  if (min_bytes_in_flight_in_round_ < target) {
+    rounds_with_queueing_ = 0;
+    return;
+  }
+  ++rounds_with_queueing_;
+  if (Params().max_startup_queue_rounds > 0 &&
+      rounds_with_queueing_ >= Params().max_startup_queue_rounds) {
+    full_bandwidth_reached_ = true;
+  }
 }
 
 }  // namespace quic

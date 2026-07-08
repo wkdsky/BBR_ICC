@@ -3,6 +3,7 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <fstream>
 #include "ns3/event-id.h"
 #include "ns3/callback.h"
 #include "ns3/application.h"
@@ -19,6 +20,9 @@
 #include "ns3/process_alarm_factory.h"
 #include "ns3/proto_con.h"
 #include "ns3/dqc_trace.h"
+namespace dqc{
+struct FreqBbrConfig;
+}
 namespace ns3{
 class DqcSender;
 class OneWayDelaySink{
@@ -90,7 +94,16 @@ public:
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
     // FreqCC configuration methods
-    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="bandwidth_latest");
+	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="bandwidth_latest");
+	    void ConfigureFreqBbr(const dqc::FreqBbrConfig& config, uint32_t flow_id);
+	    void ConfigureFreqCCv4ConvergenceGate(bool enable_trace,
+                                          bool enable_control,
+                                          bool enable_freq_ref_pacing,
+                                          const std::string& gate_trace_mode="round_only",
+                                          uint64_t gate_trace_sample_interval_us=1000,
+                                          const std::string& freq_ref_scale_mode="current",
+                                          double freq_ref_high_conf_threshold=0.8,
+                                          double freq_ref_up_beta=0.25);
     void SetFreqCCIntervalWindowMultiplier(double multiplier);
     void SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier);
     void SetFreqCCFairShareBandwidth(uint64_t fair_share_bps);
@@ -117,7 +130,10 @@ public:
                               double min_probe_up_duration_s);
     void SetBbr2MaxCongestionWindowPackets(uint32_t packets);
     void SetStreamSendBufferBytes(uint32_t bytes);
+    void SetPacketLimitBytes(uint64_t bytes);
     void SetDataGeneratorBatch(uint32_t packets_per_fill);
+    void SetProcessIntervalUs(int64_t interval_us);
+    void SetEquivalenceAuditTracePrefix(const std::string& prefix);
 private:
 	void DataGenerator(int times);
 	virtual void StartApplication() override;
@@ -133,6 +149,8 @@ private:
     uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
     void EnsureRttTraceHooked();
+    void AttachFreqCCv4PacingAudit();
+    void CloseEquivalenceAuditTrace();
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
     bool m_running{false};
@@ -177,6 +195,12 @@ private:
     TraceRttFreqAnalysis m_traceRttFreqAnalysisCb;
     TraceFreqCCv4Load m_traceFreqCCv4LoadCb;
     TraceLossRate m_traceLossRateCb;
+    std::string m_equivalenceAuditPrefix;
+    std::fstream m_equivalenceSent;
+    std::fstream m_equivalenceAcked;
+    std::fstream m_equivalencePacing;
+    uint64_t m_equivalenceSentBytes{0};
+    uint64_t m_equivalenceAckedBytes{0};
     bool m_lossTraceHooked{false};
     bool m_rttTraceHooked{false};
     struct LossWindowStats{

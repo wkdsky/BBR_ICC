@@ -25,6 +25,8 @@ public:
 private:
     std::multimap<int64_t,AlarmCb*> cbs_;
     bool stop_{false};
+    bool in_heartbeat_{false};
+    int64_t heartbeat_now_ms_{0};
 };
 class AlarmCb{
 public:

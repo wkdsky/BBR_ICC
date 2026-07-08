@@ -23,7 +23,7 @@ Bbr2Mode Bbr2DrainMode::OnCongestionEvent(
   if (congestion_event.bytes_in_flight <= drain_target) {
     QUIC_DVLOG(3) << sender_ << " Exiting DRAIN. bytes_in_flight:"
                   << congestion_event.bytes_in_flight
-                  << ", bdp:" << model_->BDP(model_->MaxBandwidth())
+                  << ", bdp:" << model_->BDP()
                   << ", drain_target:" << drain_target << "  @ "
                   << congestion_event.event_time;
     return Bbr2Mode::PROBE_BW;
@@ -31,14 +31,14 @@ Bbr2Mode Bbr2DrainMode::OnCongestionEvent(
 
   QUIC_DVLOG(3) << sender_ << " Staying in DRAIN. bytes_in_flight:"
                 << congestion_event.bytes_in_flight
-                << ", bdp:" << model_->BDP(model_->MaxBandwidth())
+                << ", bdp:" << model_->BDP()
                 << ", drain_target:" << drain_target << "  @ "
                 << congestion_event.event_time;
   return Bbr2Mode::DRAIN;
 }
 
 QuicByteCount Bbr2DrainMode::DrainTarget() const {
-  QuicByteCount bdp = model_->BDP(model_->MaxBandwidth());
+  QuicByteCount bdp = model_->BDP();
   return std::max<QuicByteCount>(bdp, sender_->GetMinimumCongestionWindow());
 }
 

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <cstdint>
 #include "ns3/simulator.h"
@@ -55,6 +56,39 @@ std::string
 Bbr2ProbePhaseName(Bbr2ProbeBwMode::CyclePhase phase)
 {
     return Bbr2ProbeBwMode::CyclePhaseToString(phase);
+}
+
+FreqCCv4GateTraceMode
+ParseFreqCCv4GateTraceMode(const std::string& mode)
+{
+    if(mode == "off"){
+        return FreqCCv4GateTraceMode::kOff;
+    }
+    if(mode == "sampled_pacing"){
+        return FreqCCv4GateTraceMode::kSampledPacing;
+    }
+    if(mode == "full"){
+        return FreqCCv4GateTraceMode::kFull;
+    }
+    return FreqCCv4GateTraceMode::kRoundOnly;
+}
+
+FreqCCv4ScaleMode
+ParseFreqCCv4ScaleMode(const std::string& mode)
+{
+    if(mode == "downward_only"){
+        return FreqCCv4ScaleMode::kDownwardOnly;
+    }
+    if(mode == "asymmetric"){
+        return FreqCCv4ScaleMode::kAsymmetric;
+    }
+    if(mode == "high_conf_only"){
+        return FreqCCv4ScaleMode::kHighConfidenceOnly;
+    }
+    if(mode == "early_episode_only"){
+        return FreqCCv4ScaleMode::kEarlyEpisodeOnly;
+    }
+    return FreqCCv4ScaleMode::kCurrentBidirectional;
 }
 
 }  // namespace
@@ -143,6 +177,83 @@ void DqcSender::SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb){
 void DqcSender::SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb){
     m_traceFreqCCv4LoadCb=cb;
 }
+void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
+    m_equivalenceAuditPrefix=prefix;
+    CloseEquivalenceAuditTrace();
+    if(m_equivalenceAuditPrefix.empty()){
+        return;
+    }
+    m_equivalenceSent.open((m_equivalenceAuditPrefix+"_sent_audit.csv").c_str(),
+                           std::fstream::out);
+    if(m_equivalenceSent.is_open()){
+        m_equivalenceSent<<"time_s,seq,cum_sent_bytes\n";
+    }
+    m_equivalenceAcked.open((m_equivalenceAuditPrefix+"_acked_audit.csv").c_str(),
+                            std::fstream::out);
+    if(m_equivalenceAcked.is_open()){
+        m_equivalenceAcked<<"time_s,sent_time_s,bytes_acked,cum_acked_bytes\n";
+    }
+    m_equivalencePacing.open((m_equivalenceAuditPrefix+"_pacing_audit.csv").c_str(),
+                             std::fstream::out);
+    if(m_equivalencePacing.is_open()){
+        m_equivalencePacing<<"time_s,native_pacing_bps,final_pacing_bps"
+                           <<",b_native_bps,b_target_bps,raw_scale"
+                           <<",clamped_scale,scale_applied"
+                           <<",should_oscillate,f_ref_valid\n";
+    }
+    m_equivalenceSentBytes=0;
+    m_equivalenceAckedBytes=0;
+    EnsureLossTraceHooked();
+    AttachFreqCCv4PacingAudit();
+}
+void DqcSender::CloseEquivalenceAuditTrace(){
+    if(m_equivalenceSent.is_open()){
+        m_equivalenceSent.close();
+    }
+    if(m_equivalenceAcked.is_open()){
+        m_equivalenceAcked.close();
+    }
+    if(m_equivalencePacing.is_open()){
+        m_equivalencePacing.close();
+    }
+}
+void DqcSender::AttachFreqCCv4PacingAudit(){
+    if(m_equivalenceAuditPrefix.empty()){
+        return;
+    }
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    if(sent_manager == nullptr){
+        return;
+    }
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->SetPacingAuditTraceCallback(
+            [this](double time_s,
+                   uint64_t native_pacing_bps,
+                   uint64_t final_pacing_bps,
+                   uint64_t b_native_bps,
+                   uint64_t b_target_bps,
+                   double raw_scale,
+                   double clamped_scale,
+                   bool scale_applied,
+                   bool should_oscillate,
+                   bool f_ref_valid){
+                if(m_equivalencePacing.is_open()){
+                    m_equivalencePacing<<time_s<<","
+                                       <<native_pacing_bps<<","
+                                       <<final_pacing_bps<<","
+                                       <<b_native_bps<<","
+                                       <<b_target_bps<<","
+                                       <<raw_scale<<","
+                                       <<clamped_scale<<","
+                                       <<(scale_applied?"true":"false")<<","
+                                       <<(should_oscillate?"true":"false")<<","
+                                       <<(f_ref_valid?"true":"false")<<"\n";
+                }
+            });
+    }
+}
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost,dqc::ProtoTime sent_ts){
     uint64_t window_id=GetLossWindowId(sent_ts);
     m_lossWindows[window_id].lost_bytes+=bytes_lost;
@@ -155,10 +266,23 @@ void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t byt
 void DqcSender::OnPacketSent(dqc::ProtoTime sent_ts,uint32_t bytes_sent){
     uint64_t window_id=GetLossWindowId(sent_ts);
     m_lossWindows[window_id].sent_bytes+=bytes_sent;
+    if(m_equivalenceSent.is_open()){
+        m_equivalenceSentBytes+=bytes_sent;
+    }
 }
 void DqcSender::OnPacketAcked(dqc::ProtoTime sent_ts,uint32_t bytes_acked){
     uint64_t window_id=GetLossWindowId(sent_ts);
     m_lossWindows[window_id].acked_bytes+=bytes_acked;
+    if(m_equivalenceAcked.is_open()){
+        m_equivalenceAckedBytes+=bytes_acked;
+        const double now_s=Simulator::Now().GetSeconds();
+        const double sent_s=
+            static_cast<double>(sent_ts.ToDebuggingValue())/1000000.0;
+        m_equivalenceAcked<<now_s<<","
+                          <<sent_s<<","
+                          <<bytes_acked<<","
+                          <<m_equivalenceAckedBytes<<"\n";
+    }
     FlushLossWindows(false);
 }
 uint64_t DqcSender::GetLossWindowId(dqc::ProtoTime sent_ts) const{
@@ -288,6 +412,7 @@ void DqcSender::Bind(uint16_t port){
         });
     } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->SetTraceFlowId(m_id);
         freqccv4->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
                                                     uint32_t latest_rtt_ms,
                                                     uint32_t min_rtt_ms){
@@ -378,6 +503,7 @@ void DqcSender::StopApplication(){
 	m_processTimer.Cancel();
 	m_engineTimer.Cancel();
     FlushLossWindows(true);
+    CloseEquivalenceAuditTrace();
     m_sinks.clear();
 }
 void DqcSender::RecvPacket(Ptr<Socket> socket){
@@ -491,6 +617,13 @@ void DqcSender::OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) {
 		int32_t sent=(int32_t)seq.ToUint64();
 		m_traceSentSeqCb(sent);
 	}
+    if(m_equivalenceSent.is_open()){
+        const double sent_s=
+            static_cast<double>(sent_ts.ToDebuggingValue())/1000000.0;
+        m_equivalenceSent<<sent_s<<","
+                         <<seq.ToUint64()<<","
+                         <<m_equivalenceSentBytes<<"\n";
+    }
 }
 void DqcSender::Process(){
     if(!m_running){return ;}
@@ -749,9 +882,78 @@ void DqcSender::SetStreamSendBufferBytes(uint32_t bytes){
     }
 }
 
+void DqcSender::SetPacketLimitBytes(uint64_t bytes){
+    if(bytes == 0){
+        m_pakcetLimit = false;
+        return;
+    }
+    const uint64_t packets = (bytes + 1499) / 1500;
+    m_packetAllowed = static_cast<int>(std::min<uint64_t>(
+        packets, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+    m_pakcetLimit = true;
+}
+
 void DqcSender::SetDataGeneratorBatch(uint32_t packets_per_fill){
     if(packets_per_fill > 0){
         m_dataGeneratorBatch = packets_per_fill;
+    }
+}
+
+void DqcSender::SetProcessIntervalUs(int64_t interval_us){
+    if(interval_us > 0){
+        m_packetInteval = interval_us;
+    }
+}
+
+void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
+                                 uint32_t flow_id){
+    double freq_hz = config.default_modulation_freq_hz;
+    double fixed_mbps = config.default_fixed_amplitude_mbps;
+    auto it = config.flow.find(flow_id);
+    if(it != config.flow.end()){
+        if(it->second.has_modulation_freq_hz){
+            freq_hz = it->second.modulation_freq_hz;
+        }
+        if(it->second.has_fixed_amplitude_mbps){
+            fixed_mbps = it->second.fixed_amplitude_mbps;
+        }
+    }
+
+    ConfigureFreqCC(freq_hz, config.default_amplitude_mode, fixed_mbps);
+
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->ConfigureFreqBbr(config);
+    }
+}
+
+void DqcSender::ConfigureFreqCCv4ConvergenceGate(
+    bool enable_trace,
+    bool enable_control,
+    bool enable_freq_ref_pacing,
+    const std::string& gate_trace_mode,
+    uint64_t gate_trace_sample_interval_us,
+    const std::string& freq_ref_scale_mode,
+    double freq_ref_high_conf_threshold,
+    double freq_ref_up_beta){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->SetTraceFlowId(m_id);
+        freqccv4->SetConvergenceGateTraceEnabled(enable_trace);
+        freqccv4->SetConvergenceGateControlEnabled(enable_control);
+        freqccv4->SetFreqRefPacingControlEnabled(enable_freq_ref_pacing);
+        freqccv4->SetGateTraceMode(
+            ParseFreqCCv4GateTraceMode(gate_trace_mode),
+            gate_trace_sample_interval_us);
+        freqccv4->SetFreqRefScaleMode(
+            ParseFreqCCv4ScaleMode(freq_ref_scale_mode));
+        freqccv4->SetFreqRefHighConfidenceThreshold(
+            freq_ref_high_conf_threshold);
+        freqccv4->SetFreqRefUpBeta(freq_ref_up_beta);
     }
 }
 

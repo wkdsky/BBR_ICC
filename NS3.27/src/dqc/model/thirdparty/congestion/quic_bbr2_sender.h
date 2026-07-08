@@ -194,6 +194,11 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   const CongestionControlType congestion_control_type_;
   const bool enable_probe_rtt_;
   Bbr2Params params_;
+
+  // Max congestion window when adjusting network parameters.
+  QuicByteCount max_cwnd_when_network_parameters_adjusted_ =
+      kMaxInitialCongestionWindow * kDefaultTCPMSS;
+
   // model_ depends on params_
   Bbr2NetworkModel model_;
   // initial_cwnd_ uses cwnd_limits() which uses params_
@@ -260,6 +265,7 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   Bbr2ProbeRttMode probe_rtt_;
 
   // Debug only.
+  bool has_non_app_limited_sample_ = false;
   bool last_sample_is_app_limited_;
   QueueDelayTraceCallback queue_delay_trace_cb_;
   QuicTime last_ack_event_time_ = QuicTime::Zero();
