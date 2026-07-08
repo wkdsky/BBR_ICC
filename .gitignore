@@ -14,3 +14,15 @@ NS3.27/showcase_results
 /experiments
 NS3.27/results
 
+# oBBR build artifacts (sources are tracked)
+oBBR/boringssl/build/
+oBBR/boringssl/.git/
+oBBR/nginx/objs/
+oBBR/nginx/.git/
+oBBR/nginx1/objs/
+oBBR/nginx1/.git/
+oBBR/nginx-quic/build/
+oBBR/nginx-quic/objs/
+oBBR/nginx-quic/.git/
+oBBR/ssl/.git/
+
