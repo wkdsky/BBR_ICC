@@ -54,6 +54,15 @@ void PacingSender::OnPacketSent(
     QuicByteCount bytes,
     HasRetransmittableData has_retransmittable_data) {
   DCHECK(sender_ != nullptr);
+  last_debug_state_ = DebugState();
+  last_debug_state_.actual_emission_time_us = sent_time.ToDebuggingValue();
+  last_debug_state_.ideal_send_time_before_us =
+      ideal_next_packet_send_time_.ToDebuggingValue();
+  if (last_debug_state_.ideal_send_time_before_us > 0) {
+    last_debug_state_.emission_lateness_us = std::max<int64_t>(
+        0, last_debug_state_.actual_emission_time_us -
+               last_debug_state_.ideal_send_time_before_us);
+  }
   sender_->OnPacketSent(sent_time, bytes_in_flight, packet_number, bytes,
                         has_retransmittable_data);
   if (has_retransmittable_data != HAS_RETRANSMITTABLE_DATA) {
@@ -74,6 +83,11 @@ void PacingSender::OnPacketSent(
       ideal_next_packet_send_time_ = ProtoTime::Zero();
     }
     pacing_limited_ = false;
+    last_debug_state_.burst_tokens = burst_tokens_;
+    last_debug_state_.lumpy_tokens = lumpy_tokens_;
+    last_debug_state_.pacing_limited = pacing_limited_;
+    last_debug_state_.ideal_next_send_time_us =
+        ideal_next_packet_send_time_.ToDebuggingValue();
     return;
   }
   // The next packet should be sent as soon as the current packet has been
@@ -81,6 +95,8 @@ void PacingSender::OnPacketSent(
   QuicBandwidth bw=PacingRate(bytes_in_flight + bytes);
   //QuicBandwidth sender_bw=sender_->PacingRate(bytes_in_flight+bytes);
   TimeDelta delay =bw.TransferTime(bytes);
+  last_debug_state_.commanded_pacing_bps = bw.ToBitsPerSecond();
+  last_debug_state_.requested_delay_us = delay.ToMicroseconds();
   if (!pacing_limited_ || lumpy_tokens_ == 0) {
     // Reset lumpy_tokens_ if either application or cwnd throttles sending or
     // token runs out.
@@ -100,6 +116,14 @@ void PacingSender::OnPacketSent(
       lumpy_tokens_ = 1u;
     }
   }
+  // F-BBR's coded carrier is only a few percent of the baseline.  Sending a
+  // lumpy group at one timestamp quantizes away that signal even when the
+  // average pacing rate is correct, so use one packet per pacing interval
+  // while its CRUISE identification probe is active.
+  if (sender_->RequiresFineGrainedPacing()) {
+    lumpy_tokens_ = 1;
+    last_debug_state_.fine_grained = true;
+  }
   --lumpy_tokens_;
   if (pacing_limited_) {
     // Make up for lost time since pacing throttles the sending.
@@ -111,6 +135,15 @@ void PacingSender::OnPacketSent(
   }
   // Stop making up for lost time if underlying sender prevents sending.
   pacing_limited_ = sender_->CanSend(bytes_in_flight + bytes);
+  last_debug_state_.burst_tokens = burst_tokens_;
+  last_debug_state_.lumpy_tokens = lumpy_tokens_;
+  last_debug_state_.pacing_limited = pacing_limited_;
+  last_debug_state_.ideal_next_send_time_us =
+      ideal_next_packet_send_time_.ToDebuggingValue();
+}
+
+PacingSender::DebugState PacingSender::ExportDebugState() const {
+  return last_debug_state_;
 }
 
 void PacingSender::OnApplicationLimited() {

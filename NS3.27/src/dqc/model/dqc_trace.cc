@@ -19,9 +19,17 @@ void DqcTrace::SetCongestionControlType(uint32_t type){
     m_ccType=type;
 }
 void DqcTrace::Log(std::string name,uint32_t enable){
-    // Just store the name and enable flags, files will be opened lazily on first write
     m_name = name;
     m_enable = enable;
+    // Validation consumers require schema-bearing files even when a flow has
+    // no eligible block (for example the forced-underload control).
+    if(m_enable & E_DQC_FBBR_LOAD){
+        OpenFbbrTriggerCycleFile();
+        OpenFbbrBinFile();
+        OpenFbbrEventWindowFile();
+        OpenFbbrDiagnosticWindowFile();
+        OpenFbbrCruiseFile();
+    }
 }
 void DqcTrace::OpenOwdFile(){
     if(!(m_enable & E_DQC_OWD) || m_owd.is_open()) return;
@@ -391,6 +399,43 @@ void DqcTrace::OnFreqCCv4Load(double window_start_s, double window_end_s,
         }
     }
 }
+void DqcTrace::OnFBBRLoad(double window_start_s, double window_end_s,
+                          double p_underload, double p_full_load,
+                          double p_overload, double confidence,
+                          std::string label, bool low_confidence,
+                          std::string diagnostics){
+    (void)window_start_s;
+    (void)window_end_s;
+    (void)p_underload;
+    (void)p_full_load;
+    (void)p_overload;
+    (void)confidence;
+    (void)low_confidence;
+    if(label == "FBBR_TRIGGER_CYCLE"){
+        OpenFbbrTriggerCycleFile();
+        if(m_fbbrTriggerCycle.is_open()) m_fbbrTriggerCycle<<diagnostics<<"\n";
+    }else if(label == "FBBR_BIN"){
+        OpenFbbrBinFile();
+        if(m_fbbrBin.is_open()) m_fbbrBin<<diagnostics<<"\n";
+    }else if(label == "FBBR_EVENT_WINDOW"){
+        OpenFbbrEventWindowFile();
+        if(m_fbbrEventWindow.is_open()) m_fbbrEventWindow<<diagnostics<<"\n";
+    }else if(label == "FBBR_DIAGNOSTIC_WINDOW"){
+        OpenFbbrDiagnosticWindowFile();
+        if(m_fbbrDiagnosticWindow.is_open()){
+            m_fbbrDiagnosticWindow<<diagnostics<<"\n";
+        }
+    }else if(label == "FBBR_CRUISE"){
+        OpenFbbrCruiseFile();
+        if(m_fbbrCruise.is_open()) m_fbbrCruise<<diagnostics<<"\n";
+    }else if(label == "FBBR_QUEUE_SERVO"){
+        OpenFbbrQueueServoFile();
+        if(m_fbbrQueueServo.is_open()) m_fbbrQueueServo<<diagnostics<<"\n";
+    }else if(label == "FREQ_GATE_TRACE"){
+        OpenFbbrGateFile();
+        if(m_fbbrGate.is_open()) m_fbbrGate<<diagnostics<<"\n";
+    }
+}
 void DqcTrace::OnStats(uint64_t recv_count,uint64_t largest,
                         uint64_t recv_bytes,uint64_t duration,
                        float avg_owd){
@@ -426,6 +471,13 @@ void DqcTrace::Close(){
     CloseFreqCCv4LoadFile();
     CloseFreqCCv4CruiseSummaryFile();
     CloseFreqCCv4GateFile();
+    CloseFbbrGateFile();
+    CloseFbbrTriggerCycleFile();
+    CloseFbbrBinFile();
+    CloseFbbrEventWindowFile();
+    CloseFbbrCruiseFile();
+    CloseFbbrDiagnosticWindowFile();
+    CloseFbbrQueueServoFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -527,6 +579,48 @@ void DqcTrace::CloseFreqCCv4GateFile(){
         m_freqccv4Gate.close();
     }
 }
+void DqcTrace::CloseFbbrGateFile(){
+    if(m_fbbrGate.is_open()){
+        m_fbbrGate.flush();
+        m_fbbrGate.close();
+    }
+}
+void DqcTrace::CloseFbbrTriggerCycleFile(){
+    if(m_fbbrTriggerCycle.is_open()){
+        m_fbbrTriggerCycle.flush();
+        m_fbbrTriggerCycle.close();
+    }
+}
+void DqcTrace::CloseFbbrBinFile(){
+    if(m_fbbrBin.is_open()){
+        m_fbbrBin.flush();
+        m_fbbrBin.close();
+    }
+}
+void DqcTrace::CloseFbbrEventWindowFile(){
+    if(m_fbbrEventWindow.is_open()){
+        m_fbbrEventWindow.flush();
+        m_fbbrEventWindow.close();
+    }
+}
+void DqcTrace::CloseFbbrCruiseFile(){
+    if(m_fbbrCruise.is_open()){
+        m_fbbrCruise.flush();
+        m_fbbrCruise.close();
+    }
+}
+void DqcTrace::CloseFbbrDiagnosticWindowFile(){
+    if(m_fbbrDiagnosticWindow.is_open()){
+        m_fbbrDiagnosticWindow.flush();
+        m_fbbrDiagnosticWindow.close();
+    }
+}
+void DqcTrace::CloseFbbrQueueServoFile(){
+    if(m_fbbrQueueServo.is_open()){
+        m_fbbrQueueServo.flush();
+        m_fbbrQueueServo.close();
+    }
+}
 void DqcTrace::CloseStatsFile(){
     if(m_stats.is_open()){
         m_stats.close();
@@ -588,8 +682,14 @@ void DqcTrace::OpenFreqCCv4LoadFile(){
 	                       <<",is_full_load_candidate,full_load_quality,full_load_rank_in_cruise"
 	                       <<",is_best_full_load_window,low_confidence,label"
 	                       <<",full_load_quality_v1,full_load_quality_v2"
-	                       <<",spectral_validity_score,spectral_validity_pass"
-	                       <<",spectral_invalid_reason,drate_snr,srtt_snr"
+	                       <<",drate_spectral_integrity_score"
+	                       <<",srtt_spectral_integrity_score"
+	                       <<",joint_spectral_integrity_score"
+	                       <<",drate_spectral_gate_pass"
+	                       <<",srtt_spectral_gate_pass"
+	                       <<",dual_signal_spectral_gate_pass"
+	                       <<",limiting_spectral_signal"
+	                       <<",spectral_invalid_reason,drate_snr"
 	                       <<",drate_band_energy_rel,srtt_band_energy_rel"
 	                       <<",drate_band_peak_rel,srtt_band_peak_rel"
 	                       <<",srate_peak_width_hz,drate_peak_width_hz"
@@ -616,13 +716,20 @@ void DqcTrace::OpenFreqCCv4CruiseSummaryFile(){
                                 <<",best_full_load_quality,best_drate_freq_score,best_srtt_freq_score"
 	                                <<",best_srtt_waveform_quality,best_drate_amplitude_score,best_srtt_amplitude_score"
 	                                <<",best_drate_mean_kbps"
-	                                <<",cruise_end_max_bandwidth_kbps,fair_share_bandwidth_kbps"
+	                                <<",cruise_end_native_bw_kbps,fair_share_bandwidth_kbps"
 	                                <<",best_trusted_bw,best_trusted_bw_source"
 	                                <<",best_full_load_quality_v1,best_full_load_quality_v2"
-	                                <<",best_spectral_validity_score"
-	                                <<",best_spectral_validity_pass"
+	                                <<",drate_spectral_integrity_score"
+	                                <<",srtt_spectral_integrity_score"
+	                                <<",joint_spectral_integrity_score"
+	                                <<",drate_spectral_gate_pass"
+	                                <<",srtt_spectral_gate_pass"
+	                                <<",dual_signal_spectral_gate_pass"
+	                                <<",limiting_spectral_signal"
 	                                <<",best_spectral_invalid_reason"
-	                                <<",best_max_drate,best_effective_bw"
+	                                <<",selection_native_bw_bps,trusted_bw_valid"
+	                                <<",trusted_bw_cruise_id,trusted_bw_fresh"
+	                                <<",trusted_bw_application_valid"
 	                                <<std::endl;
     }
 }
@@ -639,41 +746,287 @@ void DqcTrace::OpenFreqCCv4GateFile(){
     }
     m_freqccv4Gate.open(path.c_str(), std::fstream::out);
     if(m_freqccv4Gate.is_open()){
-        m_freqccv4Gate<<"time,flow_id,row_type,round_id,bbr_state,probe_bw_phase,is_cruise"
-                       <<",d_round,d_prev,d_round_valid,d_prev_valid,v_round,prev_v_round"
-                       <<",full_drate_ref,stable_cnt,bbr_stable,just_exited"
-                       <<",freq_tool_needed,freq_tool_on,f_ref,f_ref_valid,f_conf"
-                       <<",f_ref_age_cruise_windows,unstable_episode_id"
-                       <<",unstable_episode_active,f_ref_invalid_reason"
-                       <<",w_freq,b_native,b_target,b_eff,scale,raw_scale"
-                       <<",clamped_scale,scale_clamped_low,scale_clamped_high"
-	                       <<",native_pacing,final_pacing,amplitude_bps,amplitude_bps_eff"
-	                       <<",triangle_wave,current_delivery_rate,sample_is_app_limited"
-	                       <<",sample_valid"
-	                       <<",trusted_bw,trusted_bw_valid,trusted_bw_conf"
-	                       <<",trusted_bw_source,max_drate,native_bw"
-	                       <<",raw_effective_bw,effective_bw,effective_bw_source"
-	                       <<",raw_scale,clamped_scale"
-	                       <<",median_guard_valid,median_guard_bw"
-	                       <<",median_guard_iqr_ratio,median_guard_trend_ratio"
-	                       <<",median_guard_weight,merged_rescue_attempted"
-	                       <<",merged_rescue_success"
-	                       <<",effective_bw_selection_compute_us"
+	        m_freqccv4Gate<<"time,flow_id,row_type,round_id,bbr_state,probe_bw_phase,is_cruise"
+	                       <<",d_round,d_prev,d_round_valid,d_prev_valid,v_round,prev_v_round"
+	                       <<",full_drate_ref,stable_cnt,bbr_stable,just_exited"
+	                       <<",freq_tool_needed,freq_tool_on,w_freq"
+	                       <<",unstable_episode_id,unstable_episode_active"
+	                       <<",selection_native_bw_bps,current_native_bw_bps"
+	                       <<",trusted_bw_bps,trusted_bw_valid,trusted_bw_conf"
+	                       <<",trusted_bw_source,trusted_bw_cruise_id,trusted_bw_fresh"
+	                       <<",trusted_bw_application_valid"
+	                       <<",trusted_bw_ready_for_post_cruise"
+	                       <<",trusted_bw_application_phase,trusted_bw_invalid_reason"
+	                       <<",drate_spectral_integrity_score"
+	                       <<",srtt_spectral_integrity_score"
+	                       <<",joint_spectral_integrity_score"
+	                       <<",drate_spectral_gate_pass,srtt_spectral_gate_pass"
+	                       <<",dual_signal_spectral_gate_pass,limiting_spectral_signal"
+	                       <<",pacing_base_bw_bps,pacing_base_source,phase_pacing_gain"
+	                       <<",native_pacing_bps,final_pacing_rate_bps"
+	                       <<",amplitude_bps,amplitude_bps_eff,triangle_wave"
+	                       <<",current_delivery_rate,sample_is_app_limited,sample_valid"
+	                       <<",merged_rescue_attempted,merged_rescue_success"
+	                       <<",trusted_bw_selection_compute_us"
 	                       <<",normal_window_count,merged_window_count"
 	                       <<",spectral_invalid_count"
-	                       <<",bbr_mode,is_refill,is_up,is_down"
-	                       <<",effective_bw_valid"
-	                       <<",effective_bw_application_valid"
-	                       <<",adjusted_scale,scale_applied"
-	                       <<",scale_application_phase"
-	                       <<",cruise_uses_native_bw"
-	                       <<",effective_bw_cleared_on_cruise_start"
-	                       <<",stale_effective_bw_used"
-	                       <<",effective_bw_generation_phase"
-	                       <<",effective_bw_ready_for_post_cruise"
-	                       <<",effective_bw_applied_in_refill"
-	                       <<",effective_bw_applied_in_up"
-	                       <<",effective_bw_applied_in_down"<<std::endl;
+	                       <<",trusted_bw_cleared_on_cruise_start"<<std::endl;
+    }
+}
+void DqcTrace::OpenFbbrGateFile(){
+    if(!(m_enable & E_DQC_FBBR_GATE) || m_fbbrGate.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_gate_trace.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+"_fbbr_gate_trace.csv";
+    }
+    m_fbbrGate.open(path.c_str(), std::fstream::out);
+    if(m_fbbrGate.is_open()){
+        m_fbbrGate<<"time,flow_id,row_type,round_id,bbr_state,probe_bw_phase,is_cruise"
+                  <<",d_round,d_prev,d_round_valid,d_prev_valid,v_round,prev_v_round"
+                  <<",full_drate_ref,stable_cnt,bbr_stable,just_exited"
+                  <<",freq_tool_needed,freq_tool_on,w_freq"
+                  <<",unstable_episode_id,unstable_episode_active"
+                  <<",selection_native_bw_bps,current_native_bw_bps"
+                  <<",trusted_bw_bps,trusted_bw_valid,trusted_bw_conf"
+                  <<",trusted_bw_source,trusted_bw_cruise_id,trusted_bw_fresh"
+                  <<",trusted_bw_application_valid"
+                  <<",trusted_bw_ready_for_post_cruise"
+                  <<",trusted_bw_application_phase,trusted_bw_invalid_reason"
+                  <<",drate_spectral_integrity_score"
+                  <<",srtt_spectral_integrity_score"
+                  <<",joint_spectral_integrity_score"
+                  <<",drate_spectral_gate_pass,srtt_spectral_gate_pass"
+                  <<",dual_signal_spectral_gate_pass,limiting_spectral_signal"
+                  <<",pacing_base_bw_bps,pacing_base_source,phase_pacing_gain"
+                  <<",native_pacing_bps,final_pacing_rate_bps"
+                  <<",amplitude_bps,amplitude_bps_eff,triangle_wave"
+                  <<",current_delivery_rate,sample_is_app_limited,sample_valid"
+                  <<",merged_rescue_attempted,merged_rescue_success"
+                  <<",trusted_bw_selection_compute_us"
+                  <<",normal_window_count,merged_window_count"
+                  <<",spectral_invalid_count"
+                  <<",trusted_bw_cleared_on_cruise_start"
+                  <<",algorithm,probe_waveform,probe_factor"
+                  <<",probe_period_rtts,probe_code_id"<<std::endl;
+    }
+}
+void DqcTrace::OpenFbbrTriggerCycleFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrTriggerCycle.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_trigger_cycles.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+
+             "_fbbr_trigger_cycles.csv";
+    }
+    m_fbbrTriggerCycle.open(path.c_str(),std::fstream::out);
+    if(m_fbbrTriggerCycle.is_open()){
+        m_fbbrTriggerCycle
+            <<"trace_prefix,compat_trace_prefix,algorithm,flow_id,cruise_id,cycle_id"
+            <<",cycle_start_s,cycle_end_s,window_state,pulser_role,carrier_period_s"
+            <<",actual_input_amp,actual_input_energy,delivery_response_amp_bps"
+            <<",delivery_response_bytes,period_estimate_s,period_error_ratio"
+            <<",spectral_prominence_eta,normalized_match_rho,selected_delay_s"
+            <<",phase_coverage,trigger_pass,continue_pass,trigger_reason,pause_reason"
+            <<",app_limited_fraction,recovery_fraction,baseline_drift"
+            <<",actual_input_measurable,period_match,weak_periodic_response"
+            <<",commanded_amplitude,actual_input_snr,delivery_period_estimate_s"
+            <<",delivery_period_error,delivery_prominence,delivery_match"
+            <<",delivery_trigger_pass,delivery_continue_pass,delivery_reason"
+            <<",queue_derivative_amp,queue_period_estimate_s,queue_period_error"
+            <<",queue_prominence,queue_match,queue_noise_floor"
+            <<",queue_trigger_pass,queue_continue_pass,queue_reason"
+            <<",combined_trigger_source,combined_confidence,detected_cycle_start"
+            <<",alignment_error_cycles,hard_safety\n";
+    }
+}
+void DqcTrace::OpenFbbrBinFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrBin.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_bins.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+"_fbbr_bins.csv";
+    }
+    m_fbbrBin.open(path.c_str(),std::fstream::out);
+    if(m_fbbrBin.is_open()){
+        m_fbbrBin
+            <<"trace_prefix,compat_trace_prefix,algorithm,flow_id,cruise_id,block_id,cycle_id,bin_id"
+            <<",time_start_s,time_end_s,frequency_hz,period_rtts,code_id,code_sign"
+            <<",phase_rad,coded_excitation,native_pacing_bps,commanded_pacing_bps"
+            <<",actual_send_bps,sent_bytes,acked_bytes,delivery_rate_bps"
+            <<",latest_rtt_us,qdelay_us,loss_ratio,ecn_ratio"
+            <<",app_limited_fraction,cwnd_limited_fraction,coverage,rtt_valid,valid"
+            <<",recovery_fraction,waveform,queue_servo_factor"
+            <<",queue_servo_transition\n";
+    }
+}
+void DqcTrace::OpenFbbrEventWindowFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrEventWindow.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_event_windows.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+"_fbbr_event_windows.csv";
+    }
+    m_fbbrEventWindow.open(path.c_str(),std::fstream::out);
+    if(m_fbbrEventWindow.is_open()){
+        m_fbbrEventWindow
+            <<"trace_prefix,compat_trace_prefix,algorithm,flow_id,cruise_id,block_id,window_start_s,window_end_s"
+            <<",frequency_hz,period_rtts,code_id,initial_phase_rad,target_amplitude_ratio"
+            <<",realized_amplitude_ratio,rtprop_frozen_us,selected_delay_us,delay_ratio"
+            <<",delay_at_search_boundary,cross_block_delay_stable,valid_cycles"
+            <<",phase_bin_coverage,non_app_limited_fraction,input_cycle_coherence"
+            <<",native_baseline_drift,delivery_baseline_drift,loss_ratio,ecn_ratio"
+            <<",C_coverage,C_input,C_stationarity,C_cycle,C_response,C_delay,C_regression,C_meas"
+            <<",snr_input,snr_delivery,snr_queue,snr_utility,r2_input,r2_delivery,r2_queue,r2_utility"
+            <<",condition_input,condition_delivery,condition_queue,condition_utility"
+            <<",G_d,G_q,phase_d,phase_q,phase_J,R2_d,R2_q,G_d_pos"
+            <<",delta_q_pos_us,G_q_pos,q_zero_us,q_probe_max_us,q_floor_us,q95_us,q_amp_us"
+            <<",drain_ratio,q_trend,g_lockin,g_fd,g_fused,h_fd,gradient_agreement"
+            <<",S_full,S_lowq,S_stationary,S_safe,S_opt,rate_adjustment_signal,classification"
+            <<",candidate_valid,candidate_bps,candidate_robust_cv,candidate_relative_ci_width"
+            <<",candidate_cycle_count,candidate_invalid_reason,invalid_reason"
+            <<",actual_input_amplitude_ratio,cwnd_limited_fraction,input_carrier_snr"
+            <<",signature_leakage,residual_to_own_carrier_ratio,collision_suspected"
+            <<",S_raw,E_under,E_over,direction_score,search_state_before,search_state_after"
+            <<",baseline_before_bps,proposed_next_baseline_bps,applied_next_baseline_bps"
+            <<",log_step,update_reason,hard_loss_abort,underload_bound_valid"
+            <<",underload_bound_bps,overload_bound_valid,overload_bound_bps,bracket_width"
+            <<",same_direction_streak,consecutive_dynamic,consecutive_near_optimal"
+            <<",lock_candidate,locked,window_candidate_valid,window_candidate_bps"
+            <<",trusted_bw_published,trusted_bw_control_bps,trusted_conf_control"
+            <<",fbbr_rtprop_anchor_us,fbbr_rtprop_confidence,fbbr_rtprop_source"
+            <<",gradient_se,gradient_ci90_low,gradient_ci90_high"
+            <<",gradient_ci95_low,gradient_ci95_high,gradient_equivalent"
+            <<",delivery_median_bps,search_active,unresolved_cruises"
+            <<",unresolved_decisions,search_attempts,eligible_cruises"
+            <<",last_failure_reason,control_baseline_source,trusted_bw_valid"
+            <<",is_pulser,pulser_lease_remaining,waveform,recovery_fraction"
+            <<",effective_cycles,carrier_detected,decision_collision_suspected"
+            <<",search_generation,election_backoff_cycles,pulser_lease_count"
+            <<",collision_count,provisional_state_valid,provisional_age_cruises"
+            <<",carrier_sense_snr,carrier_sense_amplitude"
+            <<",event_window_id,trigger_cycle_id,capture_start_s,capture_end_s"
+            <<",window_length_cycles,window_stride_cycles,sequential_stop_reason"
+            <<",window_state,trigger_cycle_excluded_from_score,overlap_fraction"
+            <<",independent_for_control,independent_for_trusted,lockable_score"
+            <<",S_sat,S_band,S_stable,S_target,q_min_us,q_L_us,q_H_us"
+            <<",q_peak_cap_us,q95_event_us,queue_trend_event,D_freq,E_q,D_total"
+            <<",delivery_spectral_prominence,delivery_normalized_match"
+            <<",trigger_source,H_delivery_gain,H_queue_derivative_gain"
+            <<",delivery_partition,queue_partition,C_delivery_channel"
+            <<",C_queue_channel,queue_spectral_prominence,queue_normalized_match"
+            <<",queue_servo_factor_mean,queue_servo_transition_cycles\n";
+    }
+}
+void DqcTrace::OpenFbbrCruiseFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrCruise.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_cruises.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+"_fbbr_cruises.csv";
+    }
+    m_fbbrCruise.open(path.c_str(),std::fstream::out);
+    if(m_fbbrCruise.is_open()){
+        m_fbbrCruise
+            <<"trace_prefix,compat_trace_prefix,algorithm,flow_id,cruise_id,start_time_s,end_time_s"
+            <<",probe_enabled,probe_disabled_reason,frequency_hz,period_rtts,code_id"
+            <<",amplitude_ratio,block_count,underload_count,near_optimal_count"
+            <<",overload_count,dynamic_count,invalid_count,consensus_valid"
+            <<",raw_candidate_bps,consensus_confidence,robust_cv,relative_ci_width"
+            <<",consensus_block_count,consensus_cycle_count,source_block_id"
+            <<",consensus_invalid_reason,publication_valid,published_bps"
+            <<",history_update_action,publication_invalid_reason,trusted_bw_bps"
+            <<",trusted_bw_confidence,trusted_bw_source,trusted_bw_invalid_reason"
+            <<",fair_share_bps,search_active,search_state,eligible_cruises"
+            <<",search_attempts,unresolved_cruises,unresolved_decisions"
+            <<",valid_direction_decisions,last_failure_reason,is_pulser"
+            <<",pulser_lease_remaining,waveform,carrier_detected,search_generation"
+            <<",pulser_lease_count,collision_count,watcher_decisions,drain_decisions"
+            <<",seek_decisions,track_decisions,persistent_unresolved_decisions"
+            <<",trusted_bw_age_cruises,carrier_sense_snr"
+            <<",carrier_sense_amplitude,dual_trigger_attempts,delivery_triggers"
+            <<",queue_triggers,both_triggers,hard_safety_events,event_windows"
+            <<",dense_windows,queue_servo_updates,queue_servo_drain_rtts"
+            <<",queue_servo_recovery_rtts,baseline_commits,slow_loop_updates"
+            <<",trusted_publications,persistent_retry\n";
+    }
+}
+void DqcTrace::OpenFbbrDiagnosticWindowFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrDiagnosticWindow.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_diagnostic_windows.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+
+             "_fbbr_diagnostic_windows.csv";
+    }
+    m_fbbrDiagnosticWindow.open(path.c_str(),std::fstream::out);
+    if(m_fbbrDiagnosticWindow.is_open()){
+        m_fbbrDiagnosticWindow
+            <<"trace_prefix,compat_trace_prefix,algorithm,flow_id,cruise_id,window_id,window_start_s,window_end_s"
+            <<",frequency_hz,period_rtts,code_id,initial_phase_rad,target_amplitude_ratio"
+            <<",realized_amplitude_ratio,rtprop_frozen_us,selected_delay_us,delay_ratio"
+            <<",delay_at_search_boundary,cross_block_delay_stable,valid_cycles"
+            <<",phase_bin_coverage,non_app_limited_fraction,input_cycle_coherence"
+            <<",native_baseline_drift,delivery_baseline_drift,loss_ratio,ecn_ratio"
+            <<",C_coverage,C_input,C_stationarity,C_cycle,C_response,C_delay,C_regression,C_meas"
+            <<",snr_input,snr_delivery,snr_queue,snr_utility,r2_input,r2_delivery,r2_queue,r2_utility"
+            <<",condition_input,condition_delivery,condition_queue,condition_utility"
+            <<",G_d,G_q,phase_d,phase_q,phase_J,R2_d,R2_q,G_d_pos"
+            <<",delta_q_pos_us,G_q_pos,q_zero_us,q_probe_max_us,q_floor_us,q95_us,q_amp_us"
+            <<",drain_ratio,q_trend,g_lockin,g_fd,g_fused,h_fd,gradient_agreement"
+            <<",S_full,S_lowq,S_stationary,S_safe,S_opt,rate_adjustment_signal,classification"
+            <<",candidate_valid,candidate_bps,candidate_robust_cv,candidate_relative_ci_width"
+            <<",candidate_cycle_count,candidate_invalid_reason,invalid_reason"
+            <<",shadow_window,decision_eligible\n";
+    }
+}
+void DqcTrace::OpenFbbrQueueServoFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrQueueServo.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string(getcwd(buf,FILENAME_MAX))+"/traces/flow"+
+             std::to_string(m_id)+"_fbbr_queue_servo.csv";
+    }else{
+        path=kDqcTracePath+"flow"+std::to_string(m_id)+
+             "_fbbr_queue_servo.csv";
+    }
+    m_fbbrQueueServo.open(path.c_str(),std::fstream::out);
+    if(m_fbbrQueueServo.is_open()){
+        m_fbbrQueueServo
+            <<"trace_prefix,compat_trace_prefix,algorithm,time_s,flow_id,cruise_id"
+            <<",servo_state,search_baseline_bps,servo_factor"
+            <<",final_nonprobe_baseline_bps,q_floor_fast_us,q_median_fast_us"
+            <<",q_peak_fast_us,q_low_us,q_high_us,q_peak_cap_us"
+            <<",queue_trend_fast,delivery_median_fast_bps,loss_ratio_fast"
+            <<",ecn_ratio_fast,down_correction,up_correction"
+            <<",consecutive_drain_rtts,baseline_commit_eligible"
+            <<",baseline_commit_applied,baseline_commit_bps,reason\n";
     }
 }
 DqcTraceState::DqcTraceState(std::string name){

@@ -43,43 +43,28 @@ fi
 
 GROUP_IDS=(
   "group_A_bbrv2"
-  "group_B_old_freqccv4"
-  "group_C_trace_only"
-  "group_D_gate_mod_only"
-  "group_E_gate_plus_fref"
+  "group_B_freqccv4_open"
+  "group_C_freqccv4_gated"
 )
 
 declare -A GROUP_ALGO=(
   ["group_A_bbrv2"]="bbrv2"
-  ["group_B_old_freqccv4"]="freqccv4"
-  ["group_C_trace_only"]="freqccv4"
-  ["group_D_gate_mod_only"]="freqccv4"
-  ["group_E_gate_plus_fref"]="freqccv4"
+  ["group_B_freqccv4_open"]="freqccv4"
+  ["group_C_freqccv4_gated"]="freqccv4"
 )
 
 declare -A GROUP_TRACE=(
   ["group_A_bbrv2"]="false"
-  ["group_B_old_freqccv4"]="false"
-  ["group_C_trace_only"]="true"
-  ["group_D_gate_mod_only"]="true"
-  ["group_E_gate_plus_fref"]="true"
+  ["group_B_freqccv4_open"]="false"
+  ["group_C_freqccv4_gated"]="true"
 )
 
 declare -A GROUP_CONTROL=(
   ["group_A_bbrv2"]="false"
-  ["group_B_old_freqccv4"]="false"
-  ["group_C_trace_only"]="false"
-  ["group_D_gate_mod_only"]="true"
-  ["group_E_gate_plus_fref"]="true"
+  ["group_B_freqccv4_open"]="false"
+  ["group_C_freqccv4_gated"]="true"
 )
 
-declare -A GROUP_FREF=(
-  ["group_A_bbrv2"]="false"
-  ["group_B_old_freqccv4"]="false"
-  ["group_C_trace_only"]="false"
-  ["group_D_gate_mod_only"]="false"
-  ["group_E_gate_plus_fref"]="true"
-)
 
 mkdir -p "${MATRIX_DIR}" "${REPORT_DIR}"
 cd "${ROOT_DIR}"
@@ -138,11 +123,11 @@ for size_idx in "${!SIZE_LABEL_LIST[@]}"; do
 
         mkdir -p "${out_dir}"
         gate_mode="${GATE_TRACE_MODE_DEFAULT}"
-        if [[ "${group}" == "group_E_gate_plus_fref" ]]; then
+        if [[ "${group}" == "group_C_freqccv4_gated" ]]; then
           gate_mode="${GATE_TRACE_MODE_E}"
         fi
 
-        run_arg="scratch/freqccv4_4flow --algo=${GROUP_ALGO[$group]} --sim_time=${SIM_TIME} --flowSizeBytes=${flow_size_bytes} --processIntervalUs=${PROCESS_INTERVAL_US} --flowStartMode=${start_mode} --runId=${seed} --seed=${seed} --outputDir=${out_dir}/ --enableConvergenceGateTrace=${GROUP_TRACE[$group]} --enableConvergenceGateControl=${GROUP_CONTROL[$group]} --enableFreqRefPacingControl=${GROUP_FREF[$group]} --dynamic_delay_enable=${DYNAMIC_DELAY_ENABLE} --enableHeavyTrace=${ENABLE_HEAVY_TRACE} --gateTraceMode=${gate_mode} --gateTraceSampleIntervalUs=${GATE_TRACE_SAMPLE_INTERVAL_US} --useEngineTimer=${USE_ENGINE_TIMER}"
+        run_arg="scratch/freqccv4_4flow --algo=${GROUP_ALGO[$group]} --sim_time=${SIM_TIME} --flowSizeBytes=${flow_size_bytes} --processIntervalUs=${PROCESS_INTERVAL_US} --flowStartMode=${start_mode} --runId=${seed} --seed=${seed} --outputDir=${out_dir}/ --enableConvergenceGateTrace=${GROUP_TRACE[$group]} --enableConvergenceGateControl=${GROUP_CONTROL[$group]} --dynamic_delay_enable=${DYNAMIC_DELAY_ENABLE} --enableHeavyTrace=${ENABLE_HEAVY_TRACE} --gateTraceMode=${gate_mode} --gateTraceSampleIntervalUs=${GATE_TRACE_SAMPLE_INTERVAL_US} --useEngineTimer=${USE_ENGINE_TIMER}"
         printf '%s\n' "./waf --run \"${run_arg}\"" > "${out_dir}/command.txt"
         echo "[run] finite_flow_fct/${size_dir}/${start_mode}/${group}/seed_${seed}"
         rm -f "${done_marker}"

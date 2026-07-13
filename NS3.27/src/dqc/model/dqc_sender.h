@@ -22,6 +22,7 @@
 #include "ns3/dqc_trace.h"
 namespace dqc{
 struct FreqBbrConfig;
+struct FBBRConfig;
 }
 namespace ns3{
 class DqcSender;
@@ -79,6 +80,8 @@ public:
     void SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb);
     typedef Callback<void,double,double,double,double,double,double,std::string,bool,std::string> TraceFreqCCv4Load;
     void SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb);
+    typedef Callback<void,double,double,double,double,double,double,std::string,bool,std::string> TraceFBBRLoad;
+    void SetFBBRLoadTraceFuc(TraceFBBRLoad cb);
     void Bind(uint16_t port);
     InetSocketAddress GetLocalAddress();
     void ConfigurePeer(Ipv4Address addr,uint16_t port);    
@@ -96,17 +99,19 @@ public:
     // FreqCC configuration methods
 	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="bandwidth_latest");
 	    void ConfigureFreqBbr(const dqc::FreqBbrConfig& config, uint32_t flow_id);
+	    void ConfigureFBBR(const dqc::FBBRConfig& config, uint32_t flow_id);
 	    void ConfigureFreqCCv4ConvergenceGate(bool enable_trace,
-                                          bool enable_control,
-                                          bool enable_freq_ref_pacing,
-                                          const std::string& gate_trace_mode="round_only",
-                                          uint64_t gate_trace_sample_interval_us=1000,
-                                          const std::string& freq_ref_scale_mode="current",
-                                          double freq_ref_high_conf_threshold=0.8,
-                                          double freq_ref_up_beta=0.25);
+	                                          bool enable_control,
+	                                          const std::string& gate_trace_mode="round_only",
+	                                          uint64_t gate_trace_sample_interval_us=1000);
+	    void ConfigureFBBRConvergenceGate(bool enable_trace,
+	                                     bool enable_control,
+	                                     const std::string& gate_trace_mode="round_only",
+	                                     uint64_t gate_trace_sample_interval_us=1000);
     void SetFreqCCIntervalWindowMultiplier(double multiplier);
     void SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier);
     void SetFreqCCFairShareBandwidth(uint64_t fair_share_bps);
+    void SetFreqCCv4CruiseBaselineCap(uint64_t cap_bps);
     struct Bbr2ExperimentSnapshot {
         int32_t bbr_state{0};
         std::string probe_phase;
@@ -132,6 +137,8 @@ public:
     void SetStreamSendBufferBytes(uint32_t bytes);
     void SetPacketLimitBytes(uint64_t bytes);
     void SetDataGeneratorBatch(uint32_t packets_per_fill);
+    void SetDataChunkVariationBytes(uint32_t variation_bytes,
+                                    uint64_t variation_seed = 0);
     void SetProcessIntervalUs(int64_t interval_us);
     void SetEquivalenceAuditTracePrefix(const std::string& prefix);
 private:
@@ -143,13 +150,13 @@ private:
     void CheckNoPacketOut();
     void EngineEvent();
     void UpdateEngineEvent();
-    void OnPacketSent(dqc::ProtoTime sent_ts,uint32_t bytes_sent);
+    void OnPacketSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts,uint32_t bytes_sent);
     void OnPacketAcked(dqc::ProtoTime sent_ts,uint32_t bytes_acked);
     void FlushLossWindows(bool final_flush);
     uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
     void EnsureRttTraceHooked();
-    void AttachFreqCCv4PacingAudit();
+    void AttachFBBRPacingAudit();
     void CloseEquivalenceAuditTrace();
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
@@ -176,6 +183,8 @@ private:
 	bool m_pakcetLimit{false};
     int m_packetAllowed{50000};
     uint32_t m_dataGeneratorBatch{2};
+    uint32_t m_dataChunkVariationBytes{0};
+    uint64_t m_dataChunkVariationSeed{0};
     std::vector<OneWayDelaySink*> m_sinks;
 	TraceBandwidth m_traceBwCb;
 	int64_t m_lastSentTs{0};
@@ -194,6 +203,7 @@ private:
     TraceFreqAnalysis m_traceFreqAnalysisCb;
     TraceRttFreqAnalysis m_traceRttFreqAnalysisCb;
     TraceFreqCCv4Load m_traceFreqCCv4LoadCb;
+    TraceFBBRLoad m_traceFBBRLoadCb;
     TraceLossRate m_traceLossRateCb;
     std::string m_equivalenceAuditPrefix;
     std::fstream m_equivalenceSent;

@@ -61,6 +61,10 @@ public:
   // The pacing rate of the send algorithm.  May be zero if the rate is unknown.
   virtual QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const = 0;
 
+  // True when the controller is applying a small, time-resolved excitation
+  // that would be destroyed by lumpy multi-packet pacing bursts.
+  virtual bool RequiresFineGrainedPacing() const { return false; }
+
   // What's the current estimated bandwidth in bytes per second.
   // Returns 0 when it does not have an estimate.
   virtual QuicBandwidth BandwidthEstimate() const = 0;

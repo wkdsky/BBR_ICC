@@ -131,7 +131,6 @@ double g_interval_window_rtt_mult = 1.0;                     // Interval STFT wi
 bool g_dynamic_delay_enable = true;
 bool g_enable_convergence_gate_trace = false;
 bool g_enable_convergence_gate_control = false;
-bool g_enable_freq_ref_pacing_control = false;
 bool g_enable_cruise_window_trace = true;
 std::string g_flow_start_mode = "same_start";
 uint64_t g_flow_size_bytes = 15ULL * 1000ULL * 1000ULL;
@@ -139,17 +138,14 @@ int64_t g_process_interval_us = 100;
 bool g_smoke_mode = false;
 bool g_enable_heavy_trace = false;
 bool g_gate_state_machine_self_test = false;
-bool g_effective_bw_selection_self_test = false;
-bool g_effective_bw_phase_application_self_test = false;
+bool g_trusted_bw_selection_self_test = false;
+bool g_trusted_bw_pacing_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
-std::string g_freq_ref_scale_mode = "asymmetric";
-double g_freq_ref_high_conf_threshold = 0.8;
-double g_freq_ref_up_beta = 0.25;
 bool g_enable_equivalence_audit_trace = false;
 std::string g_freq_bbr_config_path =
-    "/home/wkd/BBR_ICC/NS3.27/examples/CCconfig/freqbbr_default.conf";
+    "/home/wkd/BBR_ICC/NS3.27/examples/CCconfig/freqccv4_default.conf";
 FreqBbrConfig g_freq_bbr_config;
 
 std::string Trim(const std::string& in)
@@ -330,7 +326,8 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_DOUBLE("stability.consecutive_exit_threshold", stability_consecutive_exit_threshold)
     SET_U32("stability.stable_rounds", stability_stable_rounds)
     SET_DOUBLE("stability.full_pipe_growth_threshold", stability_full_pipe_growth_threshold)
-    SET_DOUBLE("spectral.min_validity", spectral_min_validity)
+    SET_DOUBLE("spectral.drate_integrity_threshold", spectral_drate_integrity_threshold)
+    SET_DOUBLE("spectral.srtt_integrity_threshold", spectral_srtt_integrity_threshold)
     SET_DOUBLE("spectral.min_drate_snr", spectral_min_drate_snr)
     SET_DOUBLE("spectral.min_srtt_snr", spectral_min_srtt_snr)
     SET_DOUBLE("spectral.max_drate_width_ratio", spectral_max_drate_width_ratio)
@@ -349,38 +346,14 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_U32("merged_rescue.max_passes", merged_rescue_max_passes)
     SET_DOUBLE("merged_rescue.max_trend_ratio", merged_rescue_max_trend_ratio)
     SET_DOUBLE("merged_rescue.confidence_discount", merged_rescue_confidence_discount)
-    SET_BOOL("median_guard.enable", median_guard_enable)
-    SET_U32("median_guard.min_samples", median_guard_min_samples)
-    SET_DOUBLE("median_guard.max_iqr_ratio", median_guard_max_iqr_ratio)
-    SET_DOUBLE("median_guard.max_trend_ratio", median_guard_max_trend_ratio)
-    SET_DOUBLE("median_guard.margin", median_guard_margin)
-    SET_DOUBLE("median_guard.scale_min", median_guard_scale_min)
-    SET_DOUBLE("median_guard.scale_max", median_guard_scale_max)
-    SET_DOUBLE("median_guard.weight_alpha", median_guard_weight_alpha)
-    if(key == "effective_bw.scale_mode"){
-        config->effective_bw_scale_mode = value;
-        return true;
-    }
-    SET_DOUBLE("effective_bw.up_beta", effective_bw_up_beta)
-    SET_DOUBLE("effective_bw.scale_min", effective_bw_scale_min)
-    SET_DOUBLE("effective_bw.scale_max", effective_bw_scale_max)
-    SET_DOUBLE("effective_bw.high_conf_threshold", effective_bw_high_conf_threshold)
-    SET_BOOL("effective_bw.phase_specific_application", effective_bw_phase_specific_application)
-    SET_BOOL("effective_bw.cruise_uses_native_bw", effective_bw_cruise_uses_native_bw)
-    SET_BOOL("effective_bw.allow_stale_effective_bw", effective_bw_allow_stale_effective_bw)
-    SET_BOOL("effective_bw.apply_to_refill", effective_bw_apply_to_refill)
-    SET_BOOL("effective_bw.apply_to_up", effective_bw_apply_to_up)
-    SET_BOOL("effective_bw.apply_to_down", effective_bw_apply_to_down)
-    SET_BOOL("effective_bw.apply_to_cruise", effective_bw_apply_to_cruise)
-    SET_BOOL("effective_bw.clear_on_cruise_start", effective_bw_clear_on_cruise_start)
-    SET_BOOL("effective_bw.clear_on_stable_closure", effective_bw_clear_on_stable_closure)
+    SET_BOOL("trusted_bw.clear_on_cruise_start", trusted_bw_clear_on_cruise_start)
     if(key == "trace.gate_trace_mode"){
         config->trace_gate_trace_mode = value;
         return true;
     }
     SET_U64("trace.gate_trace_sample_interval_us", trace_gate_trace_sample_interval_us)
     SET_BOOL("trace.enable_cruise_window_trace", trace_enable_cruise_window_trace)
-    SET_BOOL("trace.enable_effective_bw_selection_trace", trace_enable_effective_bw_selection_trace)
+    SET_BOOL("trace.enable_trusted_bw_selection_trace", trace_enable_trusted_bw_selection_trace)
 
 #undef SET_DOUBLE
 #undef SET_U32
@@ -447,14 +420,10 @@ void ApplyFreqBbrConfigToGlobals(const FreqBbrConfig& config)
     g_gate_trace_mode = config.trace_gate_trace_mode;
     g_gate_trace_sample_interval_us =
         config.trace_gate_trace_sample_interval_us;
-    g_freq_ref_scale_mode = config.effective_bw_scale_mode;
-    g_freq_ref_high_conf_threshold =
-        config.effective_bw_high_conf_threshold;
-    g_freq_ref_up_beta = config.effective_bw_up_beta;
     g_enable_cruise_window_trace =
         config.trace_enable_cruise_window_trace;
     g_enable_convergence_gate_trace =
-        config.trace_enable_effective_bw_selection_trace;
+        config.trace_enable_trusted_bw_selection_trace;
 }
 
 void ApplyGlobalsToFreqBbrConfig(FreqBbrConfig* config)
@@ -472,13 +441,9 @@ void ApplyGlobalsToFreqBbrConfig(FreqBbrConfig* config)
     config->trace_gate_trace_mode = g_gate_trace_mode;
     config->trace_gate_trace_sample_interval_us =
         g_gate_trace_sample_interval_us;
-    config->effective_bw_scale_mode = g_freq_ref_scale_mode;
-    config->effective_bw_high_conf_threshold =
-        g_freq_ref_high_conf_threshold;
-    config->effective_bw_up_beta = g_freq_ref_up_beta;
     config->trace_enable_cruise_window_trace =
         g_enable_cruise_window_trace;
-    config->trace_enable_effective_bw_selection_trace =
+    config->trace_enable_trusted_bw_selection_trace =
         g_enable_convergence_gate_trace;
 }
 
@@ -640,13 +605,9 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
 	        sendApp->ConfigureFreqBbr(g_freq_bbr_config, flow_index);
 	        sendApp->ConfigureFreqCC(freq_hz, amp_mode, fixed_mbps);
 	        sendApp->ConfigureFreqCCv4ConvergenceGate(g_enable_convergence_gate_trace,
-                                                  g_enable_convergence_gate_control,
-                                                  g_enable_freq_ref_pacing_control,
-                                                  g_gate_trace_mode,
-                                                  g_gate_trace_sample_interval_us,
-                                                  g_freq_ref_scale_mode,
-                                                  g_freq_ref_high_conf_threshold,
-                                                  g_freq_ref_up_beta);
+	                                                  g_enable_convergence_gate_control,
+	                                                  g_gate_trace_mode,
+	                                                  g_gate_trace_sample_interval_us);
         sendApp->SetFreqCCIntervalWindowMultiplier(g_interval_window_rtt_mult);
         sendApp->SetFreqCCFairShareBandwidth(fair_share_bps);
     }
@@ -921,7 +882,6 @@ int main (int argc, char *argv[]){
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FreqCCv4 convergence-gate CSV trace", g_enable_convergence_gate_trace);
 	    cmd.AddValue("enableConvergenceGateControl", "Gate CRUISE modulation by BBR stability", g_enable_convergence_gate_control);
-	    cmd.AddValue("enableFreqRefPacingControl", "Enable F_ref pacing-layer scaling", g_enable_freq_ref_pacing_control);
 	    cmd.AddValue("enableCruiseWindowTrace", "Enable FreqCCv4 CRUISE window trace", g_enable_cruise_window_trace);
     cmd.AddValue("flowStartMode", "Flow start mode: same_start or staggered_start", g_flow_start_mode);
     cmd.AddValue("flowSizeBytes", "Per-flow send limit in bytes; 0 keeps unlimited/default behavior", g_flow_size_bytes);
@@ -931,18 +891,16 @@ int main (int argc, char *argv[]){
     cmd.AddValue("gateTraceMode", "FreqCCv4 gate trace mode: off, round_only, sampled_pacing, full", g_gate_trace_mode);
 	    cmd.AddValue("gateTraceSampleIntervalUs", "Minimum interval for sampled_pacing gate trace rows", g_gate_trace_sample_interval_us);
 	    cmd.AddValue("gateStateMachineSelfTest", "Run synthetic convergence-gate state-machine self-test and exit", g_gate_state_machine_self_test);
-	    cmd.AddValue("effectiveBwSelectionSelfTest", "Run synthetic EffectiveBw Selection self-test and exit", g_effective_bw_selection_self_test);
-	    cmd.AddValue("effectiveBwPhaseApplicationSelfTest", "Run synthetic EffectiveBw phase-application self-test and exit", g_effective_bw_phase_application_self_test);
+	    cmd.AddValue("trustedBwSelectionSelfTest", "Run TrustedBw dual-signal selection self-test and exit", g_trusted_bw_selection_self_test);
+	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
 	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
-    cmd.AddValue("freqRefScaleMode", "F_ref pacing scale mode: current, downward_only, asymmetric, high_conf_only, early_episode_only", g_freq_ref_scale_mode);
-    cmd.AddValue("freqRefHighConfThreshold", "F_ref high-confidence scale threshold", g_freq_ref_high_conf_threshold);
-	    cmd.AddValue("freqRefUpBeta", "F_ref asymmetric upward scale beta", g_freq_ref_up_beta);
 	    cmd.AddValue("enableEquivalenceAuditTrace", "Enable packet/ACK/pacing audit traces for B/C equivalence checks", g_enable_equivalence_audit_trace);
-	    cmd.AddValue("stabilitySingleRoundExitThreshold", "EffectiveBw Selection MaxDRate single-round exit threshold", g_freq_bbr_config.stability_single_round_exit_threshold);
-	    cmd.AddValue("stabilityConsecutiveExitThreshold", "EffectiveBw Selection MaxDRate consecutive exit threshold", g_freq_bbr_config.stability_consecutive_exit_threshold);
-	    cmd.AddValue("stabilityStableRounds", "EffectiveBw Selection stable rounds", g_freq_bbr_config.stability_stable_rounds);
-	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "EffectiveBw Selection full-pipe growth threshold", g_freq_bbr_config.stability_full_pipe_growth_threshold);
-	    cmd.AddValue("spectralMinValidity", "Spectral Validity Gate V2 minimum score", g_freq_bbr_config.spectral_min_validity);
+	    cmd.AddValue("stabilitySingleRoundExitThreshold", "TrustedBw selection MaxDRate single-round exit threshold", g_freq_bbr_config.stability_single_round_exit_threshold);
+	    cmd.AddValue("stabilityConsecutiveExitThreshold", "TrustedBw selection MaxDRate consecutive exit threshold", g_freq_bbr_config.stability_consecutive_exit_threshold);
+	    cmd.AddValue("stabilityStableRounds", "TrustedBw selection stable rounds", g_freq_bbr_config.stability_stable_rounds);
+	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "TrustedBw selection full-pipe growth threshold", g_freq_bbr_config.stability_full_pipe_growth_threshold);
+	    cmd.AddValue("spectralDrateIntegrityThreshold", "Delivery Rate spectral integrity threshold", g_freq_bbr_config.spectral_drate_integrity_threshold);
+	    cmd.AddValue("spectralSrttIntegrityThreshold", "SRTT spectral integrity threshold", g_freq_bbr_config.spectral_srtt_integrity_threshold);
 	    cmd.AddValue("spectralMinDrateSnr", "Spectral Validity Gate V2 minimum DRate SNR", g_freq_bbr_config.spectral_min_drate_snr);
 	    cmd.AddValue("spectralMinSrttSnr", "Spectral Validity Gate V2 minimum SRTT SNR", g_freq_bbr_config.spectral_min_srtt_snr);
 	    cmd.AddValue("spectralMaxDrateWidthRatio", "Spectral Validity Gate V2 maximum DRate width ratio", g_freq_bbr_config.spectral_max_drate_width_ratio);
@@ -953,16 +911,6 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("mergedRescueWindowMultiplier", "Merged-window rescue duration multiplier", g_freq_bbr_config.merged_rescue_window_multiplier);
 	    cmd.AddValue("mergedRescueMaxPasses", "Merged-window rescue max passes", g_freq_bbr_config.merged_rescue_max_passes);
 	    cmd.AddValue("mergedRescueMaxTrendRatio", "Merged-window rescue max trend ratio", g_freq_bbr_config.merged_rescue_max_trend_ratio);
-	    cmd.AddValue("medianGuardEnable", "Enable robust median guard", g_freq_bbr_config.median_guard_enable);
-	    cmd.AddValue("medianGuardMinSamples", "Robust median guard minimum DRate samples", g_freq_bbr_config.median_guard_min_samples);
-	    cmd.AddValue("medianGuardMaxIqrRatio", "Robust median guard maximum IQR ratio", g_freq_bbr_config.median_guard_max_iqr_ratio);
-	    cmd.AddValue("medianGuardMaxTrendRatio", "Robust median guard maximum trend ratio", g_freq_bbr_config.median_guard_max_trend_ratio);
-	    cmd.AddValue("medianGuardMargin", "Robust median guard margin", g_freq_bbr_config.median_guard_margin);
-	    cmd.AddValue("medianGuardScaleMin", "Robust median guard scale lower bound", g_freq_bbr_config.median_guard_scale_min);
-	    cmd.AddValue("medianGuardScaleMax", "Robust median guard scale upper bound", g_freq_bbr_config.median_guard_scale_max);
-	    cmd.AddValue("medianGuardWeightAlpha", "Robust median guard weight alpha", g_freq_bbr_config.median_guard_weight_alpha);
-	    cmd.AddValue("effectiveBwScaleMin", "NORMAL/MERGED EffectiveBw scale lower bound", g_freq_bbr_config.effective_bw_scale_min);
-	    cmd.AddValue("effectiveBwScaleMax", "NORMAL/MERGED EffectiveBw scale upper bound", g_freq_bbr_config.effective_bw_scale_max);
 	    // Per-flow parameters
     cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
     cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);
@@ -983,11 +931,11 @@ int main (int argc, char *argv[]){
 	    if(g_gate_state_machine_self_test){
 	        return FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(std::cout) ? 0 : 1;
 	    }
-	    if(g_effective_bw_selection_self_test){
-	        return FreqCCv4Sender::RunEffectiveBwSelectionSelfTest(std::cout) ? 0 : 1;
+	    if(g_trusted_bw_selection_self_test){
+	        return FreqCCv4Sender::RunTrustedBwSelectionSelfTest(std::cout) ? 0 : 1;
 	    }
-	    if(g_effective_bw_phase_application_self_test){
-	        return FreqCCv4Sender::RunEffectiveBwPhaseApplicationSelfTest(std::cout) ? 0 : 1;
+	    if(g_trusted_bw_pacing_self_test){
+	        return FreqCCv4Sender::RunTrustedBwPacingSelfTest(std::cout) ? 0 : 1;
 	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);
@@ -1034,16 +982,11 @@ int main (int argc, char *argv[]){
     std::cout << "Gate trace mode/sample interval us: "
               << g_gate_trace_mode << "/"
               << g_gate_trace_sample_interval_us << std::endl;
-    std::cout << "F_ref scale mode/high_conf/up_beta: "
-              << g_freq_ref_scale_mode << "/"
-              << g_freq_ref_high_conf_threshold << "/"
-              << g_freq_ref_up_beta << std::endl;
     std::cout << "Equivalence audit trace: "
               << g_enable_equivalence_audit_trace << std::endl;
-    std::cout << "Convergence gate trace/control/f_ref_pacing: "
+    std::cout << "Convergence gate trace/control: "
               << g_enable_convergence_gate_trace << "/"
-              << g_enable_convergence_gate_control << "/"
-              << g_enable_freq_ref_pacing_control << std::endl;
+              << g_enable_convergence_gate_control << std::endl;
     std::cout << "Bottleneck bandwidth: "<<TOPO_BOTTLE_BW/1000000<<" Mbps" << std::endl;
     std::cout << "Bottleneck delay: "<<TOPO_BOTTLE_PDELAY<<" ms" << std::endl;
     std::cout << "Simulation time: " << sim_time << " seconds" << std::endl;

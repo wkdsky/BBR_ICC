@@ -12,11 +12,11 @@ MainEngine::~MainEngine(){
 }
 void MainEngine::HeartBeat(ProtoTime time){
     TimeDelta wall_time=time-ProtoTime::Zero();
-    int64_t now=wall_time.ToMilliseconds();
+    int64_t now=wall_time.ToMicroseconds();
     const bool was_in_heartbeat = in_heartbeat_;
-    const int64_t previous_heartbeat_now_ms = heartbeat_now_ms_;
+    const int64_t previous_heartbeat_now_us = heartbeat_now_us_;
     in_heartbeat_ = true;
-    heartbeat_now_ms_ = now;
+    heartbeat_now_us_ = now;
     std::vector<std::pair<AlarmCb*,int64_t>> registers;
     while(!cbs_.empty()){
         auto it=cbs_.begin();
@@ -37,7 +37,7 @@ void MainEngine::HeartBeat(ProtoTime time){
         }
     }
     in_heartbeat_ = was_in_heartbeat;
-    heartbeat_now_ms_ = previous_heartbeat_now_ms;
+    heartbeat_now_us_ = previous_heartbeat_now_us;
 }
 void MainEngine::ExecuteCallback(ProtoTime time){
 	HeartBeat(time);
@@ -45,9 +45,9 @@ void MainEngine::ExecuteCallback(ProtoTime time){
 ProtoTime MainEngine::PeekNextEventTime(){
 	ProtoTime nextTime=ProtoTime::Infinite();
 	if(!cbs_.empty()){
-        auto it=cbs_.begin();
-        int64_t time=it->first;
-        nextTime=ProtoTime::Zero()+TimeDelta::FromMilliseconds(time);
+	    auto it=cbs_.begin();
+	    int64_t time=it->first;
+	    nextTime=ProtoTime::Zero()+TimeDelta::FromMicroseconds(time);
 	}
 	return nextTime;
 }
@@ -55,8 +55,8 @@ void MainEngine::RegisterAlarm(int64_t &time_out,AlarmCb* alarm){
     if(stop_){
         return ;
     }
-    if(in_heartbeat_ && time_out<=heartbeat_now_ms_){
-        time_out=heartbeat_now_ms_+1;
+    if(in_heartbeat_ && time_out<=heartbeat_now_us_){
+        time_out=heartbeat_now_us_+1;
     }
     MainEngine::iterator ret=cbs_.insert(std::make_pair(time_out,alarm));
     alarm->OnRegistered(ret,this);
@@ -74,8 +74,8 @@ MainEngine::iterator MainEngine::RegisterAlarm(MainEngine::iterator token,int64_
         }
     }
     DCHECK(found);
-    if(in_heartbeat_ && time_out<=heartbeat_now_ms_){
-        time_out=heartbeat_now_ms_+1;
+    if(in_heartbeat_ && time_out<=heartbeat_now_us_){
+        time_out=heartbeat_now_us_+1;
     }
     cbs_.erase(beg);
     auto ret=cbs_.insert(std::make_pair(time_out,cb));
@@ -111,7 +111,7 @@ public:
     }
     void SetImpl() override{
         TimeDelta delta=deadline()-ProtoTime::Zero();
-        int64_t timeout=delta.ToMilliseconds();
+        int64_t timeout=delta.ToMicroseconds();
         engine_->RegisterAlarm(timeout,&cb_);
     }
     void CancelImpl() override{
@@ -119,7 +119,7 @@ public:
     }
     void UpdateImpl() override{
         TimeDelta delta=deadline()-ProtoTime::Zero();
-        int64_t timeout=delta.ToMilliseconds();
+        int64_t timeout=delta.ToMicroseconds();
         if(cb_.registered()){
             cb_.Reregistered(timeout);
         }else{

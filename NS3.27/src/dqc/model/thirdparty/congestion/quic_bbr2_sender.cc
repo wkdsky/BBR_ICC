@@ -629,6 +629,10 @@ bool Bbr2Sender::ShouldDelayProbeUpExit(QuicTime /*now*/) const {
   return false;
 }
 
+bool Bbr2Sender::ShouldDelayProbeBwCruiseExit(QuicTime /*now*/) const {
+  return false;
+}
+
 float Bbr2Sender::GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
                                        float pacing_gain) const {
   return pacing_gain;

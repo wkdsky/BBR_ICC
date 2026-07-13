@@ -473,7 +473,8 @@ void Bbr2ProbeBwMode::UpdateProbeCruise(
     sender_->OnMaxBandwidthFilterAdvanced(cycle_.phase);
   }
 
-  if (IsTimeToProbeBandwidth(congestion_event)) {
+  if (IsTimeToProbeBandwidth(congestion_event) &&
+      !sender_->ShouldDelayProbeBwCruiseExit(congestion_event.event_time)) {
     EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
     return;
   }

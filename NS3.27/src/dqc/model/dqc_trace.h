@@ -22,6 +22,8 @@ enum DqcTraceEnable:uint32_t{
     E_DQC_RECV_RATE_RAW=0x8000,
     E_DQC_FREQCCV4_LOAD=0x10000,
     E_DQC_FREQCCV4_GATE=0x20000,
+    E_DQC_FBBR_LOAD=0x40000,
+    E_DQC_FBBR_GATE=0x80000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -54,6 +56,11 @@ public:
                         double p_overload, double confidence,
                         std::string label, bool low_confidence,
                         std::string diagnostics);
+    void OnFBBRLoad(double window_start_s, double window_end_s,
+                    double p_underload, double p_full_load,
+                    double p_overload, double confidence,
+                    std::string label, bool low_confidence,
+                    std::string diagnostics);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -76,6 +83,13 @@ private:
     void OpenFreqCCv4LoadFile();
     void OpenFreqCCv4CruiseSummaryFile();
     void OpenFreqCCv4GateFile();
+    void OpenFbbrGateFile();
+    void OpenFbbrTriggerCycleFile();
+    void OpenFbbrBinFile();
+    void OpenFbbrEventWindowFile();
+    void OpenFbbrCruiseFile();
+    void OpenFbbrDiagnosticWindowFile();
+    void OpenFbbrQueueServoFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -94,6 +108,13 @@ private:
     void CloseFreqCCv4LoadFile();
     void CloseFreqCCv4CruiseSummaryFile();
     void CloseFreqCCv4GateFile();
+    void CloseFbbrGateFile();
+    void CloseFbbrTriggerCycleFile();
+    void CloseFbbrBinFile();
+    void CloseFbbrEventWindowFile();
+    void CloseFbbrCruiseFile();
+    void CloseFbbrDiagnosticWindowFile();
+    void CloseFbbrQueueServoFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
@@ -117,6 +138,13 @@ private:
     std::fstream m_freqccv4Load;
     std::fstream m_freqccv4CruiseSummary;
     std::fstream m_freqccv4Gate;
+    std::fstream m_fbbrGate;
+    std::fstream m_fbbrTriggerCycle;
+    std::fstream m_fbbrBin;
+    std::fstream m_fbbrEventWindow;
+    std::fstream m_fbbrCruise;
+    std::fstream m_fbbrDiagnosticWindow;
+    std::fstream m_fbbrQueueServo;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
     int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates

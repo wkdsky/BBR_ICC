@@ -38,6 +38,9 @@ public:
 	}
 	bool CheckCanSend() const {return send_algorithm_->CanSend(unacked_packets_.bytes_in_flight());}
     SendAlgorithmInterface* GetSendAlgorithm() { return send_algorithm_.get(); }
+    PacingSender::DebugState GetPacingDebugState() const {
+        return pacing_sender_.ExportDebugState();
+    }
   // Sets the send algorithm to |send_algorithm| and points the pacing sender at
   // |send_algorithm_|. Takes ownership of |send_algorithm|. Can be called any
   // number of times.

@@ -3,6 +3,18 @@
 namespace dqc{
 class PacingSender {
  public:
+  struct DebugState {
+    uint64_t commanded_pacing_bps = 0;
+    int64_t requested_delay_us = 0;
+    int64_t ideal_send_time_before_us = 0;
+    int64_t ideal_next_send_time_us = 0;
+    int64_t actual_emission_time_us = 0;
+    int64_t emission_lateness_us = 0;
+    uint32_t burst_tokens = 0;
+    uint32_t lumpy_tokens = 0;
+    bool pacing_limited = false;
+    bool fine_grained = false;
+  };
   PacingSender();
   PacingSender(const PacingSender&) = delete;
   PacingSender& operator=(const PacingSender&) = delete;
@@ -50,6 +62,7 @@ class PacingSender {
   ProtoTime ideal_next_packet_send_time() const {
     return ideal_next_packet_send_time_;
   }
+  DebugState ExportDebugState() const;
 
  private:
   //friend class test::QuicSentPacketManagerPeer;
@@ -76,6 +89,7 @@ class PacingSender {
   // Indicates whether pacing throttles the sending. If true, make up for lost
   // time.
   bool pacing_limited_;
+  DebugState last_debug_state_;
 };
 }
 

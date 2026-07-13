@@ -14,6 +14,7 @@
 #include "ns3/freqccv2_sender.h"
 #include "ns3/freqccv3_sender.h"
 #include "ns3/freqccv4_sender.h"
+#include "ns3/fbbr_sender.h"
 #include "ns3/obbr_sender.h"
 #include "proto_bbr_sender.h"
 #include "ns3/quic_bbr2_sender.h"
@@ -49,7 +50,7 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
-           type == kFreqCCv3 || type == kFreqCCv4;
+           type == kFreqCCv3 || type == kFreqCCv4 || type == kFBBR;
 }
 
 std::string
@@ -73,22 +74,19 @@ ParseFreqCCv4GateTraceMode(const std::string& mode)
     return FreqCCv4GateTraceMode::kRoundOnly;
 }
 
-FreqCCv4ScaleMode
-ParseFreqCCv4ScaleMode(const std::string& mode)
+FBBRGateTraceMode
+ParseFBBRGateTraceMode(const std::string& mode)
 {
-    if(mode == "downward_only"){
-        return FreqCCv4ScaleMode::kDownwardOnly;
+    if(mode == "off"){
+        return FBBRGateTraceMode::kOff;
     }
-    if(mode == "asymmetric"){
-        return FreqCCv4ScaleMode::kAsymmetric;
+    if(mode == "sampled_pacing"){
+        return FBBRGateTraceMode::kSampledPacing;
     }
-    if(mode == "high_conf_only"){
-        return FreqCCv4ScaleMode::kHighConfidenceOnly;
+    if(mode == "full"){
+        return FBBRGateTraceMode::kFull;
     }
-    if(mode == "early_episode_only"){
-        return FreqCCv4ScaleMode::kEarlyEpisodeOnly;
-    }
-    return FreqCCv4ScaleMode::kCurrentBidirectional;
+    return FBBRGateTraceMode::kRoundOnly;
 }
 
 }  // namespace
@@ -177,6 +175,9 @@ void DqcSender::SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb){
 void DqcSender::SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb){
     m_traceFreqCCv4LoadCb=cb;
 }
+void DqcSender::SetFBBRLoadTraceFuc(TraceFBBRLoad cb){
+    m_traceFBBRLoadCb=cb;
+}
 void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
     m_equivalenceAuditPrefix=prefix;
     CloseEquivalenceAuditTrace();
@@ -186,7 +187,15 @@ void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
     m_equivalenceSent.open((m_equivalenceAuditPrefix+"_sent_audit.csv").c_str(),
                            std::fstream::out);
     if(m_equivalenceSent.is_open()){
-        m_equivalenceSent<<"time_s,seq,cum_sent_bytes\n";
+        m_equivalenceSent
+            <<"flow_id,packet_number,send_time_s,packet_size"
+            <<",commanded_pacing_rate,search_baseline,commanded_probe_offset"
+            <<",carrier_phase,pacer_requested_delay_us"
+            <<",ideal_send_time_before_us,ideal_next_send_time_us"
+            <<",actual_emission_time_us,emission_lateness_us,send_quantum"
+            <<",burst_tokens,lumpy_tokens,bytes_in_flight,cwnd"
+            <<",is_cwnd_limited,is_app_limited,is_pacing_limited"
+            <<",fine_grained,is_pulser,search_active,cum_sent_bytes\n";
     }
     m_equivalenceAcked.open((m_equivalenceAuditPrefix+"_acked_audit.csv").c_str(),
                             std::fstream::out);
@@ -196,15 +205,15 @@ void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
     m_equivalencePacing.open((m_equivalenceAuditPrefix+"_pacing_audit.csv").c_str(),
                              std::fstream::out);
     if(m_equivalencePacing.is_open()){
-        m_equivalencePacing<<"time_s,native_pacing_bps,final_pacing_bps"
-                           <<",b_native_bps,b_target_bps,raw_scale"
-                           <<",clamped_scale,scale_applied"
-                           <<",should_oscillate,f_ref_valid\n";
+        m_equivalencePacing<<"time_s,native_pacing_bps,final_pacing_rate_bps"
+                           <<",current_native_bw_bps,pacing_base_bw_bps"
+                           <<",pacing_base_source,phase_pacing_gain"
+                           <<",should_oscillate,trusted_bw_valid\n";
     }
     m_equivalenceSentBytes=0;
     m_equivalenceAckedBytes=0;
     EnsureLossTraceHooked();
-    AttachFreqCCv4PacingAudit();
+    AttachFBBRPacingAudit();
 }
 void DqcSender::CloseEquivalenceAuditTrace(){
     if(m_equivalenceSent.is_open()){
@@ -217,7 +226,7 @@ void DqcSender::CloseEquivalenceAuditTrace(){
         m_equivalencePacing.close();
     }
 }
-void DqcSender::AttachFreqCCv4PacingAudit(){
+void DqcSender::AttachFBBRPacingAudit(){
     if(m_equivalenceAuditPrefix.empty()){
         return;
     }
@@ -226,30 +235,28 @@ void DqcSender::AttachFreqCCv4PacingAudit(){
         return;
     }
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetPacingAuditTraceCallback(
+    if(algo && algo->GetCongestionControlType() == kFBBR){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetPacingAuditTraceCallback(
             [this](double time_s,
                    uint64_t native_pacing_bps,
                    uint64_t final_pacing_bps,
-                   uint64_t b_native_bps,
-                   uint64_t b_target_bps,
-                   double raw_scale,
-                   double clamped_scale,
-                   bool scale_applied,
+                   uint64_t current_native_bw_bps,
+                   uint64_t pacing_base_bw_bps,
+                   const std::string& pacing_base_source,
+                   double phase_pacing_gain,
                    bool should_oscillate,
-                   bool f_ref_valid){
+                   bool trusted_bw_valid){
                 if(m_equivalencePacing.is_open()){
                     m_equivalencePacing<<time_s<<","
                                        <<native_pacing_bps<<","
                                        <<final_pacing_bps<<","
-                                       <<b_native_bps<<","
-                                       <<b_target_bps<<","
-                                       <<raw_scale<<","
-                                       <<clamped_scale<<","
-                                       <<(scale_applied?"true":"false")<<","
+                                       <<current_native_bw_bps<<","
+                                       <<pacing_base_bw_bps<<","
+                                       <<pacing_base_source<<","
+                                       <<phase_pacing_gain<<","
                                        <<(should_oscillate?"true":"false")<<","
-                                       <<(f_ref_valid?"true":"false")<<"\n";
+                                       <<(trusted_bw_valid?"true":"false")<<"\n";
                 }
             });
     }
@@ -263,11 +270,52 @@ void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t byt
         m_traceLossDelay(num,rtt,bytes_lost);
     }
 }
-void DqcSender::OnPacketSent(dqc::ProtoTime sent_ts,uint32_t bytes_sent){
+void DqcSender::OnPacketSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts,uint32_t bytes_sent){
     uint64_t window_id=GetLossWindowId(sent_ts);
     m_lossWindows[window_id].sent_bytes+=bytes_sent;
     if(m_equivalenceSent.is_open()){
         m_equivalenceSentBytes+=bytes_sent;
+        SendPacketManager *manager=m_connection.GetSentPacketManager();
+        PacingSender::DebugState pacer;
+        ByteCount inflight=0;
+        ByteCount cwnd=0;
+        FbbrPacketPacingDebugState fbbr;
+        if(manager){
+            pacer=manager->GetPacingDebugState();
+            manager->InFlight(&inflight,&cwnd);
+            SendAlgorithmInterface *algo=manager->GetSendAlgorithm();
+            if(algo && algo->GetCongestionControlType()==kFBBR){
+                FBBRSender *sender=static_cast<FBBRSender*>(algo);
+                const uint64_t commanded=pacer.commanded_pacing_bps>0
+                    ? pacer.commanded_pacing_bps
+                    : manager->PacingRate().ToBitsPerSecond();
+                pacer.commanded_pacing_bps=commanded;
+                fbbr=sender->ExportPacketPacingDebugState(
+                    sent_ts,inflight,commanded);
+            }
+        }
+        m_equivalenceSent
+            <<m_id<<","<<seq.ToUint64()<<","<<
+              static_cast<double>(sent_ts.ToDebuggingValue())/1e6<<","<<bytes_sent
+            <<","<<pacer.commanded_pacing_bps
+            <<","<<fbbr.search_baseline_bps
+            <<","<<fbbr.commanded_probe_offset_bps
+            <<","<<fbbr.carrier_phase
+            <<","<<pacer.requested_delay_us
+            <<","<<pacer.ideal_send_time_before_us
+            <<","<<pacer.ideal_next_send_time_us
+            <<","<<pacer.actual_emission_time_us
+            <<","<<pacer.emission_lateness_us
+            <<","<<kDefaultTCPMSS
+            <<","<<pacer.burst_tokens<<","<<pacer.lumpy_tokens
+            <<","<<inflight<<","<<cwnd
+            <<","<<(fbbr.is_cwnd_limited?"true":"false")
+            <<","<<(fbbr.is_app_limited?"true":"false")
+            <<","<<(pacer.pacing_limited?"true":"false")
+            <<","<<(pacer.fine_grained?"true":"false")
+            <<","<<(fbbr.is_pulser?"true":"false")
+            <<","<<(fbbr.search_active?"true":"false")
+            <<","<<m_equivalenceSentBytes<<"\n";
     }
 }
 void DqcSender::OnPacketAcked(dqc::ProtoTime sent_ts,uint32_t bytes_acked){
@@ -333,8 +381,8 @@ void DqcSender::EnsureLossTraceHooked(){
     }
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     if(sent_manager){
-        sent_manager->SetTracePacketSent([this](PacketNumber,PacketLength bytes_sent,ProtoTime sent_ts){
-            OnPacketSent(sent_ts,bytes_sent);
+        sent_manager->SetTracePacketSent([this](PacketNumber seq,PacketLength bytes_sent,ProtoTime sent_ts){
+            OnPacketSent(seq,sent_ts,bytes_sent);
         });
         sent_manager->SetTracePacketAcked([this](PacketNumber,PacketLength bytes_acked,ProtoTime sent_ts){
             OnPacketAcked(sent_ts,bytes_acked);
@@ -436,6 +484,32 @@ void DqcSender::Bind(uint16_t port){
                                       diagnostics);
             }
         });
+    } else if(algo && algo->GetCongestionControlType() == kFBBR){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetTraceFlowId(m_id);
+        fbbr->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
+                                                uint32_t latest_rtt_ms,
+                                                uint32_t min_rtt_ms){
+            if(!m_traceQueueDelayCb.IsNull()){
+                m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+            }
+        });
+        fbbr->SetCruiseLoadTraceCallback([this](double window_start_s,
+                                                double window_end_s,
+                                                double p_underload,
+                                                double p_full_load,
+                                                double p_overload,
+                                                double confidence,
+                                                const std::string& label,
+                                                bool low_confidence,
+                                                const std::string& diagnostics){
+            if(!m_traceFBBRLoadCb.IsNull()){
+                m_traceFBBRLoadCb(window_start_s, window_end_s,
+                                  p_underload, p_full_load, p_overload,
+                                  confidence, label, low_confidence,
+                                  diagnostics);
+            }
+        });
     } else if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
                        algo->GetCongestionControlType() == kBBRv2Ecn ||
                        algo->GetCongestionControlType() == kBBRv2NoProbeRtt ||
@@ -474,12 +548,26 @@ void DqcSender::DataGenerator(int times){
     for (i=0;i<1500;i++){
         data[i]=RandomLetter::Instance()->GetLetter();
     }
-    std::string piece(data,1500);
     bool success=false;
     for(i=0;i<times;i++){
         if(m_pakcetLimit&&(m_packetGenerated>m_packetAllowed)){
             break;
         }
+        uint32_t piece_size = 1500;
+        if(m_dataChunkVariationBytes > 0){
+            const uint32_t variation = std::min<uint32_t>(
+                600, m_dataChunkVariationBytes);
+            const uint64_t mixed =
+                (static_cast<uint64_t>(m_id) + 1) * 0x9e3779b97f4a7c15ULL ^
+                (static_cast<uint64_t>(m_packetGenerated) + 1) *
+                    0xbf58476d1ce4e5b9ULL ^ m_dataChunkVariationSeed;
+            const uint32_t span = 2 * variation + 1;
+            const int32_t offset = static_cast<int32_t>(mixed % span) -
+                                   static_cast<int32_t>(variation);
+            piece_size = static_cast<uint32_t>(std::max<int32_t>(
+                200, std::min<int32_t>(1500, 1400 + offset)));
+        }
+        std::string piece(data,piece_size);
         success=m_stream->WriteDataToBuffer(piece);
         if(!success){
             break;
@@ -617,13 +705,9 @@ void DqcSender::OnSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts) {
 		int32_t sent=(int32_t)seq.ToUint64();
 		m_traceSentSeqCb(sent);
 	}
-    if(m_equivalenceSent.is_open()){
-        const double sent_s=
-            static_cast<double>(sent_ts.ToDebuggingValue())/1000000.0;
-        m_equivalenceSent<<sent_s<<","
-                         <<seq.ToUint64()<<","
-                         <<m_equivalenceSentBytes<<"\n";
-    }
+    (void)sent_ts;
+    // Packet-level pacer audit is emitted by the SendPacketManager callback
+    // after pacing state has been updated; avoid a duplicate legacy row.
 }
 void DqcSender::Process(){
     if(!m_running){return ;}
@@ -793,6 +877,18 @@ void DqcSender::SetFreqCCFairShareBandwidth(uint64_t fair_share_bps){
     if(algo && algo->GetCongestionControlType() == kFreqCCv4){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetFairShareBandwidthBps(fair_share_bps);
+    } else if(algo && algo->GetCongestionControlType() == kFBBR){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetFairShareBandwidthBps(fair_share_bps);
+    }
+}
+
+void DqcSender::SetFreqCCv4CruiseBaselineCap(uint64_t cap_bps){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
+        freqccv4->SetCruiseBaselineCapBps(cap_bps);
     }
 }
 
@@ -906,7 +1002,7 @@ void DqcSender::SetProcessIntervalUs(int64_t interval_us){
 }
 
 void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
-                                 uint32_t flow_id){
+                                uint32_t flow_id){
     double freq_hz = config.default_modulation_freq_hz;
     double fixed_mbps = config.default_fixed_amplitude_mbps;
     auto it = config.flow.find(flow_id);
@@ -928,16 +1024,28 @@ void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
         freqccv4->ConfigureFreqBbr(config);
     }
 }
+void DqcSender::SetDataChunkVariationBytes(uint32_t variation_bytes,
+                                           uint64_t variation_seed){
+    m_dataChunkVariationBytes = variation_bytes;
+    m_dataChunkVariationSeed = variation_seed;
+}
+
+void DqcSender::ConfigureFBBR(const dqc::FBBRConfig& config,
+                              uint32_t flow_id){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFBBR){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetTraceFlowId(flow_id);
+        fbbr->ConfigureFBBR(config);
+    }
+}
 
 void DqcSender::ConfigureFreqCCv4ConvergenceGate(
     bool enable_trace,
     bool enable_control,
-    bool enable_freq_ref_pacing,
     const std::string& gate_trace_mode,
-    uint64_t gate_trace_sample_interval_us,
-    const std::string& freq_ref_scale_mode,
-    double freq_ref_high_conf_threshold,
-    double freq_ref_up_beta){
+    uint64_t gate_trace_sample_interval_us){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
     if(algo && algo->GetCongestionControlType() == kFreqCCv4){
@@ -945,15 +1053,27 @@ void DqcSender::ConfigureFreqCCv4ConvergenceGate(
         freqccv4->SetTraceFlowId(m_id);
         freqccv4->SetConvergenceGateTraceEnabled(enable_trace);
         freqccv4->SetConvergenceGateControlEnabled(enable_control);
-        freqccv4->SetFreqRefPacingControlEnabled(enable_freq_ref_pacing);
         freqccv4->SetGateTraceMode(
             ParseFreqCCv4GateTraceMode(gate_trace_mode),
             gate_trace_sample_interval_us);
-        freqccv4->SetFreqRefScaleMode(
-            ParseFreqCCv4ScaleMode(freq_ref_scale_mode));
-        freqccv4->SetFreqRefHighConfidenceThreshold(
-            freq_ref_high_conf_threshold);
-        freqccv4->SetFreqRefUpBeta(freq_ref_up_beta);
+    }
+}
+
+void DqcSender::ConfigureFBBRConvergenceGate(
+    bool enable_trace,
+    bool enable_control,
+    const std::string& gate_trace_mode,
+    uint64_t gate_trace_sample_interval_us){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && algo->GetCongestionControlType() == kFBBR){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetTraceFlowId(m_id);
+        fbbr->SetConvergenceGateTraceEnabled(enable_trace);
+        fbbr->SetConvergenceGateControlEnabled(enable_control);
+        fbbr->SetGateTraceMode(
+            ParseFBBRGateTraceMode(gate_trace_mode),
+            gate_trace_sample_interval_us);
     }
 }
 

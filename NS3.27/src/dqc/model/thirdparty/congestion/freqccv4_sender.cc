@@ -19,8 +19,9 @@ namespace {
 constexpr const char* kTrustedBwSourceNone = "NONE";
 constexpr const char* kTrustedBwSourceNormal = "NORMAL_SPECTRAL";
 constexpr const char* kTrustedBwSourceMerged = "MERGED_SPECTRAL";
-constexpr const char* kTrustedBwSourceMedianGuard = "ROBUST_MEDIAN_GUARD";
-constexpr const char* kEffectiveBwSourceNativeFallback = "NATIVE_FALLBACK";
+constexpr const char* kLimitingSpectralSignalDrate = "DRATE";
+constexpr const char* kLimitingSpectralSignalSrtt = "SRTT";
+constexpr const char* kLimitingSpectralSignalEqual = "EQUAL";
 
 double ClampValue(double value, double low, double high) {
   return std::max(low, std::min(high, value));
@@ -35,22 +36,6 @@ double MedianOfSorted(const std::vector<double>& sorted) {
     return sorted[mid];
   }
   return 0.5 * (sorted[mid - 1] + sorted[mid]);
-}
-
-double Percentile(std::vector<double> values, double q) {
-  if (values.empty()) {
-    return 0.0;
-  }
-  std::sort(values.begin(), values.end());
-  q = ClampValue(q, 0.0, 1.0);
-  const double pos = q * static_cast<double>(values.size() - 1);
-  const size_t left = static_cast<size_t>(std::floor(pos));
-  const size_t right = static_cast<size_t>(std::ceil(pos));
-  if (left == right) {
-    return values[left];
-  }
-  const double frac = pos - static_cast<double>(left);
-  return values[left] * (1.0 - frac) + values[right] * frac;
 }
 
 double Median(std::vector<double> values) {
@@ -73,11 +58,58 @@ QuicBandwidth BandwidthFromBps(double bps) {
       static_cast<int64_t>(std::llround(std::max(0.0, bps))));
 }
 
+bool HasValidRateCoverage(const std::vector<FreqCCv4RateSample>& samples,
+                          QuicTime start,
+                          QuicTime end,
+                          double reference_freq_hz) {
+  if (samples.size() < 4 || end <= start || reference_freq_hz <= 0.0) {
+    return false;
+  }
+  for (size_t i = 0; i < samples.size(); ++i) {
+    if (samples[i].rate.IsZero() ||
+        (i > 0 && samples[i].time <= samples[i - 1].time)) {
+      return false;
+    }
+  }
+  const double duration_s =
+      static_cast<double>((end - start).ToMicroseconds()) / 1000000.0;
+  const double covered_s =
+      static_cast<double>((samples.back().time - samples.front().time)
+                              .ToMicroseconds()) /
+      1000000.0;
+  return duration_s * reference_freq_hz >= 2.0 &&
+         covered_s * reference_freq_hz >= 2.0 &&
+         covered_s / duration_s >= 0.75;
+}
+
+bool HasValidRttCoverage(const std::vector<FreqCCv4RttSample>& samples,
+                         QuicTime start,
+                         QuicTime end,
+                         double reference_freq_hz) {
+  if (samples.size() < 4 || end <= start || reference_freq_hz <= 0.0) {
+    return false;
+  }
+  for (size_t i = 0; i < samples.size(); ++i) {
+    if (!std::isfinite(samples[i].rtt_ms) || samples[i].rtt_ms <= 0.0 ||
+        (i > 0 && samples[i].time <= samples[i - 1].time)) {
+      return false;
+    }
+  }
+  const double duration_s =
+      static_cast<double>((end - start).ToMicroseconds()) / 1000000.0;
+  const double covered_s =
+      static_cast<double>((samples.back().time - samples.front().time)
+                              .ToMicroseconds()) /
+      1000000.0;
+  return duration_s * reference_freq_hz >= 2.0 &&
+         covered_s * reference_freq_hz >= 2.0 &&
+         covered_s / duration_s >= 0.75;
+}
+
 }  // namespace
 
 constexpr size_t FreqCCv4Sender::kMaxHistorySamples;
 constexpr uint32_t FreqCCv4Sender::kStableRounds;
-constexpr uint32_t FreqCCv4Sender::kMaxFreqRefAgeCruiseWindows;
 constexpr double FreqCCv4Sender::kDefaultOscillationFreqHz;
 constexpr double FreqCCv4Sender::kSampleStepSec;
 constexpr double FreqCCv4Sender::kMinDrateFreqScoreForCandidate;
@@ -131,11 +163,8 @@ FreqCCv4Sender::FreqCCv4Sender(
       min_full_load_quality_for_reliable_window_(0.50),
       default_ecn_congestion_ratio_(0.02),
 	      fair_share_bandwidth_bps_(0),
+	      cruise_baseline_cap_bps_(0),
 	      cruise_freq_tool_active_(false),
-	      cruise_max_drate_(QuicBandwidth::Zero()),
-	      cruise_max_drate_valid_(false),
-	      round_max_drate_(QuicBandwidth::Zero()),
-	      round_max_drate_valid_(false),
 	      bbr_stable_(true),
 	      stable_cnt_(kStableRounds),
       d_round_(QuicBandwidth::Zero()),
@@ -151,73 +180,39 @@ FreqCCv4Sender::FreqCCv4Sender(
 	      trusted_bw_valid_(false),
 	      trusted_bw_conf_(0.0),
 	      trusted_bw_source_(kTrustedBwSourceNone),
-	      f_ref_(QuicBandwidth::Zero()),
-	      f_ref_valid_(false),
-	      f_conf_(0.0),
-	      f_ref_age_cruise_windows_(0),
-	      staged_trusted_bw_(QuicBandwidth::Zero()),
-	      staged_trusted_bw_valid_(false),
-	      staged_trusted_bw_conf_(0.0),
-	      staged_trusted_bw_source_(kTrustedBwSourceNone),
-	      staged_f_ref_(QuicBandwidth::Zero()),
-	      staged_f_ref_valid_(false),
-      staged_f_conf_(0.0),
-      staged_f_ref_age_cruise_windows_(0),
+	      trusted_bw_cruise_id_(0),
+	      trusted_bw_fresh_(false),
+	      trusted_bw_application_valid_(false),
+	      trusted_bw_ready_for_post_cruise_(false),
+	      trusted_bw_application_phase_("NONE"),
+	      trusted_bw_cleared_on_cruise_start_(false),
+	      trusted_bw_invalid_reason_("none"),
       unstable_episode_id_(0),
       unstable_episode_active_(false),
-	      f_ref_invalid_reason_("none"),
 	      w_freq_(0.0),
-	      native_bw_(QuicBandwidth::Zero()),
-	      raw_effective_bw_(QuicBandwidth::Zero()),
-	      effective_bw_(QuicBandwidth::Zero()),
-	      effective_bw_valid_(false),
-	      effective_bw_source_(kEffectiveBwSourceNativeFallback),
-	      effective_bw_raw_scale_(1.0),
-	      effective_bw_clamped_scale_(1.0),
-	      effective_bw_application_valid_(false),
-	      effective_bw_generation_phase_("NONE"),
-	      effective_bw_application_phase_("NONE"),
-	      effective_bw_ready_for_post_cruise_(false),
-	      effective_bw_applied_in_refill_(false),
-	      effective_bw_applied_in_up_(false),
-	      effective_bw_applied_in_down_(false),
-	      effective_bw_cleared_on_cruise_start_(false),
-	      stale_effective_bw_used_(false),
-	      b_eff_(QuicBandwidth::Zero()),
-	      b_eff_valid_(false),
-	      median_guard_valid_(false),
-	      median_guard_bw_(QuicBandwidth::Zero()),
-	      median_guard_iqr_ratio_(0.0),
-	      median_guard_trend_ratio_(0.0),
-	      median_guard_weight_(0.0),
+	      selection_native_bw_(QuicBandwidth::Zero()),
+	      drate_spectral_integrity_score_(0.0),
+	      srtt_spectral_integrity_score_(0.0),
+	      joint_spectral_integrity_score_(0.0),
+	      drate_spectral_gate_pass_(false),
+	      srtt_spectral_gate_pass_(false),
+	      dual_signal_spectral_gate_pass_(false),
+	      limiting_spectral_signal_(kLimitingSpectralSignalEqual),
 	      merged_rescue_attempted_(false),
 	      merged_rescue_success_(false),
-	      effective_bw_selection_compute_us_(0),
+	      trusted_bw_selection_compute_us_(0),
 	      normal_window_count_(0),
 	      merged_window_count_(0),
 	      spectral_invalid_count_(0),
 	      enable_convergence_gate_trace_(true),
 	      enable_convergence_gate_control_(false),
-	      enable_freq_ref_pacing_control_(false),
-	      freq_ref_scale_mode_(FreqCCv4ScaleMode::kAsymmetric),
-	      freq_ref_high_conf_threshold_(0.8),
-	      freq_ref_up_beta_(0.25),
-	      effective_bw_scale_min_(0.75),
-	      effective_bw_scale_max_(1.05),
-	      effective_bw_phase_specific_application_(true),
-	      effective_bw_cruise_uses_native_bw_(true),
-	      effective_bw_allow_stale_effective_bw_(false),
-	      effective_bw_apply_to_refill_(true),
-	      effective_bw_apply_to_up_(true),
-	      effective_bw_apply_to_down_(true),
-	      effective_bw_apply_to_cruise_(false),
-	      effective_bw_clear_on_cruise_start_(true),
-	      effective_bw_clear_on_stable_closure_(true),
+	      trusted_bw_clear_on_cruise_start_(true),
 	      stable_single_round_exit_threshold_(0.25),
 	      stable_consecutive_exit_threshold_(0.15),
 	      stable_rounds_(kStableRounds),
 	      stable_full_pipe_growth_threshold_(1.25),
-	      min_spectral_validity_(0.25),
+	      drate_spectral_integrity_threshold_(0.25),
+	      srtt_spectral_integrity_threshold_(0.25),
 	      min_drate_snr_(1.5),
 	      min_srtt_snr_(1.5),
 	      max_drate_width_ratio_(2.0),
@@ -236,14 +231,6 @@ FreqCCv4Sender::FreqCCv4Sender(
 	      max_merged_passes_(1),
 	      merged_window_max_trend_ratio_(0.20),
 	      merged_confidence_discount_(0.8),
-	      median_guard_enabled_(true),
-	      median_guard_min_samples_(16),
-	      median_guard_max_iqr_ratio_(0.35),
-	      median_guard_max_trend_ratio_(0.20),
-	      median_guard_margin_(0.05),
-	      median_guard_scale_min_(0.85),
-	      median_guard_scale_max_(1.0),
-	      median_guard_weight_alpha_(0.30),
 	      trace_flow_id_(0),
       gate_trace_mode_(FreqCCv4GateTraceMode::kRoundOnly),
       gate_trace_sample_interval_(TimeDelta::FromMilliseconds(1)),
@@ -281,36 +268,16 @@ void FreqCCv4Sender::SetFairShareBandwidthBps(uint64_t fair_share_bps) {
   fair_share_bandwidth_bps_ = fair_share_bps;
 }
 
+void FreqCCv4Sender::SetCruiseBaselineCapBps(uint64_t cap_bps) {
+  cruise_baseline_cap_bps_ = cap_bps;
+}
+
 void FreqCCv4Sender::SetConvergenceGateTraceEnabled(bool enabled) {
   enable_convergence_gate_trace_ = enabled;
 }
 
 void FreqCCv4Sender::SetConvergenceGateControlEnabled(bool enabled) {
   enable_convergence_gate_control_ = enabled;
-}
-
-void FreqCCv4Sender::SetFreqRefPacingControlEnabled(bool enabled) {
-  enable_freq_ref_pacing_control_ = enabled;
-}
-
-void FreqCCv4Sender::SetFreqRefScaleMode(FreqCCv4ScaleMode mode) {
-  freq_ref_scale_mode_ = mode;
-}
-
-void FreqCCv4Sender::SetFreqRefHighConfidenceThreshold(double threshold) {
-  freq_ref_high_conf_threshold_ = std::max(0.0, std::min(1.0, threshold));
-}
-
-void FreqCCv4Sender::SetFreqRefUpBeta(double beta) {
-  freq_ref_up_beta_ = std::max(0.0, std::min(1.0, beta));
-}
-
-void FreqCCv4Sender::SetEffectiveBwScaleBounds(double scale_min,
-                                                double scale_max) {
-  if (scale_min > 0.0 && scale_max >= scale_min) {
-    effective_bw_scale_min_ = scale_min;
-    effective_bw_scale_max_ = scale_max;
-  }
 }
 
 void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
@@ -325,7 +292,10 @@ void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
   stable_full_pipe_growth_threshold_ =
       std::max(1.0, config.stability_full_pipe_growth_threshold);
 
-  min_spectral_validity_ = Clamp01(config.spectral_min_validity);
+  drate_spectral_integrity_threshold_ =
+      Clamp01(config.spectral_drate_integrity_threshold);
+  srtt_spectral_integrity_threshold_ =
+      Clamp01(config.spectral_srtt_integrity_threshold);
   min_drate_snr_ = std::max(0.0, config.spectral_min_drate_snr);
   min_srtt_snr_ = std::max(0.0, config.spectral_min_srtt_snr);
   max_drate_width_ratio_ = std::max(0.0, config.spectral_max_drate_width_ratio);
@@ -352,50 +322,8 @@ void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
   merged_confidence_discount_ =
       Clamp01(config.merged_rescue_confidence_discount);
 
-  median_guard_enabled_ = config.median_guard_enable;
-  median_guard_min_samples_ =
-      std::max<uint32_t>(1, config.median_guard_min_samples);
-  median_guard_max_iqr_ratio_ =
-      std::max(0.0, config.median_guard_max_iqr_ratio);
-  median_guard_max_trend_ratio_ =
-      std::max(0.0, config.median_guard_max_trend_ratio);
-  median_guard_margin_ = std::max(0.0, config.median_guard_margin);
-  median_guard_scale_min_ = Clamp01(config.median_guard_scale_min);
-  median_guard_scale_max_ = Clamp01(config.median_guard_scale_max);
-  if (median_guard_scale_max_ < median_guard_scale_min_) {
-    median_guard_scale_max_ = median_guard_scale_min_;
-  }
-  median_guard_weight_alpha_ = Clamp01(config.median_guard_weight_alpha);
-
-  if (config.effective_bw_scale_mode == "downward_only") {
-    freq_ref_scale_mode_ = FreqCCv4ScaleMode::kDownwardOnly;
-  } else if (config.effective_bw_scale_mode == "asymmetric") {
-    freq_ref_scale_mode_ = FreqCCv4ScaleMode::kAsymmetric;
-  } else if (config.effective_bw_scale_mode == "high_conf_only") {
-    freq_ref_scale_mode_ = FreqCCv4ScaleMode::kHighConfidenceOnly;
-  } else if (config.effective_bw_scale_mode == "early_episode_only") {
-    freq_ref_scale_mode_ = FreqCCv4ScaleMode::kEarlyEpisodeOnly;
-  } else {
-    freq_ref_scale_mode_ = FreqCCv4ScaleMode::kCurrentBidirectional;
-  }
-  SetFreqRefUpBeta(config.effective_bw_up_beta);
-  SetFreqRefHighConfidenceThreshold(config.effective_bw_high_conf_threshold);
-  SetEffectiveBwScaleBounds(config.effective_bw_scale_min,
-                            config.effective_bw_scale_max);
-  effective_bw_phase_specific_application_ =
-      config.effective_bw_phase_specific_application;
-  effective_bw_cruise_uses_native_bw_ =
-      config.effective_bw_cruise_uses_native_bw;
-  effective_bw_allow_stale_effective_bw_ =
-      config.effective_bw_allow_stale_effective_bw;
-  effective_bw_apply_to_refill_ = config.effective_bw_apply_to_refill;
-  effective_bw_apply_to_up_ = config.effective_bw_apply_to_up;
-  effective_bw_apply_to_down_ = config.effective_bw_apply_to_down;
-  effective_bw_apply_to_cruise_ = config.effective_bw_apply_to_cruise;
-  effective_bw_clear_on_cruise_start_ =
-      config.effective_bw_clear_on_cruise_start;
-  effective_bw_clear_on_stable_closure_ =
-      config.effective_bw_clear_on_stable_closure;
+  trusted_bw_clear_on_cruise_start_ = config.trusted_bw_clear_on_cruise_start;
+  ClearTrustedBw("configuration_changed");
 }
 
 void FreqCCv4Sender::SetTraceFlowId(uint32_t flow_id) {
@@ -421,7 +349,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
     double prev_v_round = 0.0;
     bool freq_tool_needed = true;
     bool freq_tool_on = true;
-    bool f_ref_valid = true;
+    bool trusted_bw_valid = true;
     double w_freq = 1.0;
 
     struct Step {
@@ -432,7 +360,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
       bool bbr_stable = false;
       double full_ref = 0.0;
       bool freq_tool_on = false;
-      bool f_ref_valid = false;
+      bool trusted_bw_valid = false;
       double w_freq = 0.0;
     };
 
@@ -449,7 +377,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
         w_freq = 0.0;
         freq_tool_needed = false;
         freq_tool_on = false;
-        f_ref_valid = false;
+        trusted_bw_valid = false;
         return;
       }
       w_freq = std::max(0.0, std::min(1.0, 1.0 -
@@ -495,7 +423,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
           bbr_stable = true;
           freq_tool_needed = false;
           w_freq = 0.0;
-          f_ref_valid = false;
+          trusted_bw_valid = false;
           freq_tool_on = false;
           prev_v_round = 0.0;
         }
@@ -511,7 +439,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
               bbr_stable,
               full_ref_valid ? full_ref : 0.0,
               freq_tool_on,
-              f_ref_valid,
+              trusted_bw_valid,
               w_freq};
     }
   };
@@ -530,7 +458,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
                            const std::vector<TestState::Step>& steps) {
     os << "\n## " << name << "\n";
     os << "step,d_round,v_round,just_exited,stable_cnt,bbr_stable,"
-          "full_ref,freq_tool_on,f_ref_valid,w_freq\n";
+          "full_ref,freq_tool_on,trusted_bw_valid,w_freq\n";
     for (size_t i = 0; i < steps.size(); ++i) {
       const auto& s = steps[i];
       os << i << "," << s.d << "," << s.v << ","
@@ -538,7 +466,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
          << s.stable_cnt << "," << (s.bbr_stable ? "true" : "false")
          << "," << s.full_ref << ","
          << (s.freq_tool_on ? "true" : "false") << ","
-         << (s.f_ref_valid ? "true" : "false") << ","
+         << (s.trusted_bw_valid ? "true" : "false") << ","
          << s.w_freq << "\n";
     }
   };
@@ -570,7 +498,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
     s.d_prev_valid = true;
     s.freq_tool_needed = false;
     s.freq_tool_on = false;
-    s.f_ref_valid = false;
+    s.trusted_bw_valid = false;
     s.w_freq = 0.0;
     std::vector<TestState::Step> steps = {s.Round(130.0)};
     print_table("Sequence 2: single >25% stable exit", steps);
@@ -588,7 +516,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
     s.stable_cnt = 3;
     s.freq_tool_needed = false;
     s.freq_tool_on = false;
-    s.f_ref_valid = false;
+    s.trusted_bw_valid = false;
     s.w_freq = 0.0;
     std::vector<TestState::Step> steps;
     for (double d : {100.0, 116.0, 134.0}) {
@@ -613,7 +541,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
     s.full_ref_valid = true;
     s.freq_tool_needed = true;
     s.freq_tool_on = true;
-    s.f_ref_valid = true;
+    s.trusted_bw_valid = true;
     s.w_freq = 1.0;
     std::vector<TestState::Step> steps;
     for (double d : {135.0, 138.0, 140.0}) {
@@ -629,7 +557,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
             "seq4 step1 w_freq must be 1/3");
     require(nearly(steps[2].w_freq, 0.0), "seq4 final w_freq must be 0");
     require(steps[2].bbr_stable, "seq4 final bbr_stable must be true");
-    require(!steps[2].f_ref_valid, "seq4 final f_ref_valid must be false");
+    require(!steps[2].trusted_bw_valid, "seq4 final trusted_bw_valid must be false");
     require(!steps[2].freq_tool_on,
             "seq4 final freq_tool_on must be false");
   }
@@ -642,7 +570,7 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
     s.full_ref_valid = true;
     s.freq_tool_needed = true;
     s.freq_tool_on = true;
-    s.f_ref_valid = true;
+    s.trusted_bw_valid = true;
     s.w_freq = 1.0;
     std::vector<TestState::Step> steps;
     for (double d : {130.0, 132.0, 134.0}) {
@@ -666,306 +594,92 @@ bool FreqCCv4Sender::RunConvergenceGateStateMachineSelfTest(
 	  return pass;
 }
 
-bool FreqCCv4Sender::RunEffectiveBwSelectionSelfTest(std::ostream& os) {
+bool FreqCCv4Sender::RunTrustedBwSelectionSelfTest(std::ostream& os) {
   bool pass = true;
-  auto require = [&pass, &os](bool condition, const std::string& message) {
+  auto require = [&pass, &os](bool condition, const char* message) {
     if (!condition) {
       pass = false;
       os << "FAIL: " << message << "\n";
     }
   };
-  auto nearly = [](double lhs, double rhs) {
-    return std::abs(lhs - rhs) < 1e-6;
+  auto check = [&require, &os](double drate_score,
+                               double srtt_score,
+                               double drate_threshold,
+                               double srtt_threshold,
+                               bool drate_valid,
+                               bool srtt_valid) {
+    const double joint_score = std::min(drate_score, srtt_score);
+    const bool drate_gate =
+        drate_valid && std::isfinite(drate_score) &&
+        drate_score >= drate_threshold;
+    const bool srtt_gate =
+        srtt_valid && std::isfinite(srtt_score) &&
+        srtt_score >= srtt_threshold;
+    const bool dual_gate = drate_gate && srtt_gate;
+    os << drate_score << "," << srtt_score << "," << joint_score << ","
+       << (drate_gate ? "true" : "false") << ","
+       << (srtt_gate ? "true" : "false") << ","
+       << (dual_gate ? "true" : "false") << "\n";
+    require(std::abs(joint_score - std::min(drate_score, srtt_score)) < 1e-12,
+            "joint score must be the strict minimum");
+    return dual_gate;
   };
-  auto asymmetric_scale = [](double raw_scale) {
-    double adjusted = raw_scale;
-    if (raw_scale > 1.0) {
-      adjusted = 1.0 + 0.25 * (raw_scale - 1.0);
-    }
-    return ClampValue(adjusted, 0.75, 1.05);
-  };
 
-  os << "# FreqCCv4 EffectiveBw Selection self-test\n";
-  os << "case,source,raw_scale,clamped_scale,effective_bw\n";
-
-  {
-    const double native = 100.0;
-    const double max_drate = 90.0;
-    const double trusted = 80.0;
-    const double w_freq = 1.0;
-    const double raw = (1.0 - w_freq) * max_drate + w_freq * trusted;
-    const double raw_scale = raw / native;
-    const double scale = asymmetric_scale(raw_scale);
-    os << "NORMAL_SPECTRAL,NORMAL_SPECTRAL," << raw_scale << ","
-       << scale << "," << native * scale << "\n";
-    require(nearly(raw, 80.0), "normal raw EffectiveBw must use TrustedBw");
-    require(nearly(scale, 0.8), "normal asymmetric down scale must be raw");
-  }
-
-  {
-    const double q_freq = ExpFreqScore(0.0, 1.0);
-    const double q_snr = LogisticScore(0.8, 1.5, 2.0);
-    const double q_energy = LogisticScore(0.05, 0.10, 20.0);
-    const double q_width = WidthScore(3.5, 1.5, 0.8);
-    const double q_phase = 0.2;
-    const double q = std::pow(q_freq * q_snr * q_energy * q_width * q_phase,
-                              1.0 / 5.0);
-    const double score = std::sqrt(q * q);
-    os << "WEAK_SPECTRAL,NATIVE_FALLBACK," << score << ",1,100\n";
-    require(score < 0.25, "weak spectral score must fail validity gate");
-  }
-
-  {
-    const double quality_v2 = 0.70;
-    const double discount = 0.8;
-    const double conf = discount * quality_v2;
-    os << "MERGED_SPECTRAL,MERGED_SPECTRAL,0.95,0.95,95\n";
-    require(nearly(conf, 0.56),
-            "merged confidence must be discount * full_load_quality_v2");
-  }
-
-  {
-    const double native = 100.0;
-    const double median = 80.0;
-    const double margin = 0.05;
-    double guard = std::min(native, median * (1.0 + margin));
-    guard = native * ClampValue(guard / native, 0.85, 1.0);
-    const double guard_weight = 0.30 * 1.0;
-    const double raw =
-        (1.0 - guard_weight) * native + guard_weight * guard;
-    const double scale = ClampValue(raw / native, 0.85, 1.0);
-    os << "ROBUST_MEDIAN_GUARD,ROBUST_MEDIAN_GUARD,"
-       << raw / native << "," << scale << "," << native * scale << "\n";
-    require(scale <= 1.0, "median guard must not up-scale");
-    require(scale >= 0.85, "median guard must honor scale lower bound");
-  }
-
-  {
-    const double native = 100.0;
-    os << "NATIVE_FALLBACK,NATIVE_FALLBACK,1,1," << native << "\n";
-    require(nearly(native, 100.0),
-            "native fallback must keep EffectiveBw equal to NativeBw");
-  }
-
-  {
-    bool trusted_bw_valid = true;
-    double scale = 0.8;
-    const bool bbr_stable = true;
-    if (bbr_stable) {
-      trusted_bw_valid = false;
-      scale = 1.0;
-    }
-    os << "STABLE_CLOSURE,NATIVE_FALLBACK,1," << scale << ",100\n";
-    require(!trusted_bw_valid,
-            "stable closure must invalidate stale TrustedBw immediately");
-    require(nearly(scale, 1.0), "stable closure must restore scale 1");
-  }
-
+  os << "# FreqCCv4 TrustedBw dual-signal selection self-test\n";
+  os << "drate_score,srtt_score,joint_score,drate_gate,srtt_gate,dual_gate\n";
+  require(!check(0.90, 0.20, 0.25, 0.25, true, true),
+          "low SRTT integrity must reject the window");
+  require(!check(0.30, 0.95, 0.40, 0.25, true, true),
+          "low Delivery Rate integrity must reject the window");
+  require(check(0.85, 0.82, 0.40, 0.40, true, true),
+          "both signals above their thresholds must pass");
+  require(!check(0.85, 0.82, 0.40, 0.40, true, false),
+          "missing SRTT evidence must reject the window");
+  require(!check(0.85, 0.82, 0.40, 0.40, false, true),
+          "missing Delivery Rate evidence must reject the window");
   os << "\nRESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
 
-bool FreqCCv4Sender::RunEffectiveBwPhaseApplicationSelfTest(
-    std::ostream& os) {
+bool FreqCCv4Sender::RunTrustedBwPacingSelfTest(std::ostream& os) {
   bool pass = true;
-  auto require = [&pass, &os](bool condition, const std::string& message) {
+  auto require = [&pass, &os](bool condition, const char* message) {
     if (!condition) {
       pass = false;
       os << "FAIL: " << message << "\n";
     }
   };
-  auto nearly = [](double lhs, double rhs) {
-    return std::abs(lhs - rhs) < 1e-9;
-  };
-  auto bw = [](uint64_t mbps) {
-    return QuicBandwidth::FromBitsPerSecond(mbps * 1000ULL * 1000ULL);
-  };
-  auto decide = [&](Bbr2ProbeBwMode::CyclePhase phase,
-                    uint64_t native_mbps,
-                    uint64_t effective_mbps,
-                    bool effective_valid,
-                    const char* source,
-                    bool app_valid,
-                    bool allow_stale) {
-    return ComputeEffectiveBwPhaseApplicationDecisionForTest(
-        phase,
-        bw(native_mbps),
-        bw(effective_mbps),
-        effective_valid,
-        source,
-        true,
-        app_valid,
-        allow_stale,
-        true,
-        true,
-        true,
-        false,
-        0.75,
-        1.05,
-        0.25,
-        0.85,
-        1.0);
+  auto check_phase = [&require, &os](const char* phase,
+                                     double native_gbps,
+                                     double trusted_gbps,
+                                     bool trusted_valid,
+                                     double gain,
+                                     double expected_gbps) {
+    const double pacing_base_gbps =
+        trusted_valid ? trusted_gbps : native_gbps;
+    const double target_gbps = gain * pacing_base_gbps;
+    os << phase << "," << native_gbps << "," << trusted_gbps << ","
+       << (trusted_valid ? "TRUSTED_BW" : "NATIVE_BBR") << ","
+       << gain << "," << target_gbps << "\n";
+    require(std::abs(target_gbps - expected_gbps) < 1e-12,
+            "phase pacing must be gain times the selected bandwidth baseline");
   };
 
-  os << "case,phase,source,raw_scale,adjusted_scale,clamped_scale,"
-        "scale_applied,application_valid\n";
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE,
-        100,
-        80,
-        true,
-        kTrustedBwSourceNormal,
-        true,
-        false);
-    os << "cruise_baseline,CRUISE,NORMAL_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.clamped_scale, 1.0),
-            "CRUISE must keep EffectiveBw scale at 1");
-    require(!decision.application_valid,
-            "CRUISE must not apply EffectiveBw");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL,
-        100,
-        80,
-        true,
-        kTrustedBwSourceNormal,
-        true,
-        false);
-    os << "refill_apply,REFILL,NORMAL_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.raw_scale, 0.8),
-            "REFILL raw scale must be EffectiveBw / NativeBw");
-    require(nearly(decision.clamped_scale, 0.8),
-            "REFILL must apply asymmetric NORMAL scale");
-    require(decision.application_valid && decision.scale_applied,
-            "REFILL EffectiveBw application must be active");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_UP,
-        100,
-        120,
-        true,
-        kTrustedBwSourceMerged,
-        true,
-        false);
-    os << "up_apply,UP,MERGED_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.adjusted_scale, 1.05),
-            "UP upward scale must use asymmetric up_beta once");
-    require(nearly(decision.clamped_scale, 1.05),
-            "UP upward scale must honor NORMAL/MERGED upper clamp");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN,
-        100,
-        80,
-        true,
-        kTrustedBwSourceNormal,
-        true,
-        false);
-    os << "down_apply,DOWN,NORMAL_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.clamped_scale, 0.8),
-            "DOWN must apply the post-CRUISE EffectiveBw scale");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL,
-        100,
-        80,
-        false,
-        kTrustedBwSourceNormal,
-        false,
-        false);
-    os << "no_effective_fallback,REFILL,NORMAL_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.clamped_scale, 1.0),
-            "REFILL must fall back to NativeBw when EffectiveBw is invalid");
-    require(!decision.application_valid,
-            "invalid EffectiveBw must not open application window");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL,
-        100,
-        80,
-        true,
-        kTrustedBwSourceNormal,
-        false,
-        false);
-    os << "stale_forbidden,REFILL,NORMAL_SPECTRAL,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.clamped_scale, 1.0),
-            "stale EffectiveBw must be ignored by default");
-    require(!decision.stale_effective_bw_used,
-            "stale_effective_bw_used must remain false by default");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_UP,
-        100,
-        80,
-        false,
-        kEffectiveBwSourceNativeFallback,
-        false,
-        false);
-    os << "stable_cleanup,UP,NATIVE_FALLBACK,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(nearly(decision.clamped_scale, 1.0),
-            "stable cleanup must restore scale 1");
-    require(!decision.application_valid,
-            "stable cleanup must close application window");
-  }
-
-  {
-    const auto decision = decide(
-        Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN,
-        100,
-        120,
-        true,
-        kTrustedBwSourceMedianGuard,
-        true,
-        false);
-    os << "median_guard_no_up,DOWN,ROBUST_MEDIAN_GUARD,"
-       << decision.raw_scale << "," << decision.adjusted_scale << ","
-       << decision.clamped_scale << "," << decision.scale_applied << ","
-       << decision.application_valid << "\n";
-    require(decision.clamped_scale <= 1.0,
-            "median guard must not up-scale");
-    require(nearly(decision.clamped_scale, 1.0),
-            "median guard raw_scale>1 must clamp to 1");
-  }
-
+  os << "# FreqCCv4 TrustedBw pacing self-test\n";
+  os << "phase,native_gbps,trusted_gbps,pacing_base_source,gain,target_gbps\n";
+  check_phase("REFILL", 100.0, 80.0, true, 1.0, 80.0);
+  check_phase("UP", 100.0, 80.0, true, 1.25, 100.0);
+  check_phase("DOWN", 100.0, 80.0, true, 0.9, 72.0);
+  check_phase("REFILL", 100.0, 0.0, false, 1.0, 100.0);
+  check_phase("UP", 100.0, 0.0, false, 1.25, 125.0);
+  check_phase("DOWN", 100.0, 0.0, false, 0.9, 90.0);
+  const double cruise_native_pacing = 100.0;
+  const double cruise_triangle = 7.0;
+  require(std::abs(cruise_native_pacing + cruise_triangle - 107.0) < 1e-12,
+          "CRUISE must add triangular modulation to native pacing");
   os << "\nRESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
-
 Bbr2ProbeBwMode::CyclePhase FreqCCv4Sender::GetCurrentProbeBwPhase() const {
   DebugState state = ExportDebugState();
   if (state.mode == Bbr2Mode::PROBE_BW) {
@@ -1062,15 +776,15 @@ void FreqCCv4Sender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
   ++cruise_id_;
   cruise_start_time_ = now;
-  effective_bw_cleared_on_cruise_start_ = false;
-  if (effective_bw_clear_on_cruise_start_) {
-    ClearEffectiveBwApplication("cruise_start");
+  trusted_bw_cleared_on_cruise_start_ = false;
+  if (!trusted_bw_clear_on_cruise_start_) {
+    QUIC_DVLOG(1) << "FreqCCv4: trusted_bw.clear_on_cruise_start=false "
+                     "is overridden to preserve fresh-only application";
   }
+  ClearTrustedBwApplication("cruise_start");
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
-  freq_tool_on_ = freq_tool_needed_ && !bbr_stable_ && BaseShouldOscillate();
+  freq_tool_on_ = ShouldOscillate();
   cruise_freq_tool_active_ = freq_tool_on_;
-  cruise_max_drate_ = QuicBandwidth::Zero();
-  cruise_max_drate_valid_ = false;
   min_rtt_warning_logged_ = false;
   current_cruise_windows_.clear();
   ResetCruiseWindowState();
@@ -1127,17 +841,6 @@ void FreqCCv4Sender::UpdateRoundDeliveryRateSample(
     d_round_ = congestion_event.sample_max_bandwidth;
     d_round_valid_ = true;
   }
-  round_max_drate_ = d_round_;
-  round_max_drate_valid_ = d_round_valid_;
-  if (in_cruise_ &&
-      mode_ == Bbr2Mode::PROBE_BW &&
-      GetCurrentProbeBwPhase() ==
-          Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
-      (!cruise_max_drate_valid_ ||
-       congestion_event.sample_max_bandwidth > cruise_max_drate_)) {
-    cruise_max_drate_ = congestion_event.sample_max_bandwidth;
-    cruise_max_drate_valid_ = true;
-  }
 }
 
 void FreqCCv4Sender::FinalizeCompletedRound(
@@ -1186,8 +889,6 @@ void FreqCCv4Sender::FinalizeCompletedRound(
   }
   d_round_ = QuicBandwidth::Zero();
   d_round_valid_ = false;
-  round_max_drate_ = QuicBandwidth::Zero();
-  round_max_drate_valid_ = false;
 }
 
 bool FreqCCv4Sender::CheckExitStable(QuicBandwidth completed_d_round,
@@ -1214,7 +915,6 @@ bool FreqCCv4Sender::CheckExitStable(QuicBandwidth completed_d_round,
   w_freq_ = 1.0;
   ++unstable_episode_id_;
   unstable_episode_active_ = true;
-  ActivateStagedFreqRefForEpisode();
   return true;
 }
 
@@ -1250,7 +950,7 @@ void FreqCCv4Sender::UpdateReconvergenceEvidence(
     freq_tool_needed_ = false;
     w_freq_ = 0.0;
     unstable_episode_active_ = false;
-    ClearActiveFreqRef("stable_closure");
+    ClearTrustedBw("stable_closure");
     freq_tool_on_ = false;
     prev_v_round_ = 0.0;
   }
@@ -1261,8 +961,15 @@ void FreqCCv4Sender::UpdateFreqWeightAndToolState() {
     w_freq_ = 0.0;
     freq_tool_needed_ = false;
     unstable_episode_active_ = false;
-    ClearActiveFreqRef("stable_closure");
-    freq_tool_on_ = false;
+    if (enable_convergence_gate_control_) {
+      ClearTrustedBw("stable_closure");
+      freq_tool_on_ = false;
+    } else {
+      freq_tool_on_ = ShouldOscillate();
+      if (in_cruise_ && freq_tool_on_) {
+        cruise_freq_tool_active_ = true;
+      }
+    }
     return;
   }
 
@@ -1272,7 +979,7 @@ void FreqCCv4Sender::UpdateFreqWeightAndToolState() {
     w_freq_ = 0.0;
     freq_tool_needed_ = false;
     unstable_episode_active_ = false;
-    ClearActiveFreqRef("stable_closure");
+    ClearTrustedBw("stable_closure");
     freq_tool_on_ = false;
     return;
   }
@@ -1281,92 +988,38 @@ void FreqCCv4Sender::UpdateFreqWeightAndToolState() {
       Clamp01(1.0 - static_cast<double>(stable_cnt_) /
                         static_cast<double>(stable_rounds_));
   freq_tool_on_ = freq_tool_needed_ && BaseShouldOscillate();
+  if (in_cruise_ && freq_tool_on_) {
+    cruise_freq_tool_active_ = true;
+  }
 }
 
-void FreqCCv4Sender::ClearActiveFreqRef(const char* reason) {
-  if (trusted_bw_valid_ || f_ref_valid_) {
-    f_ref_invalid_reason_ = reason;
-  }
+void FreqCCv4Sender::ClearTrustedBw(const char* reason) {
   trusted_bw_ = QuicBandwidth::Zero();
   trusted_bw_valid_ = false;
   trusted_bw_conf_ = 0.0;
   trusted_bw_source_ = kTrustedBwSourceNone;
-  f_ref_ = QuicBandwidth::Zero();
-  f_ref_valid_ = false;
-  f_conf_ = 0.0;
-  f_ref_age_cruise_windows_ = 0;
-  raw_effective_bw_ = QuicBandwidth::Zero();
-  effective_bw_ = QuicBandwidth::Zero();
-  effective_bw_valid_ = false;
-  effective_bw_source_ = kEffectiveBwSourceNativeFallback;
-  effective_bw_raw_scale_ = 1.0;
-  effective_bw_clamped_scale_ = 1.0;
-  median_guard_valid_ = false;
-  median_guard_bw_ = QuicBandwidth::Zero();
-  median_guard_iqr_ratio_ = 0.0;
-  median_guard_trend_ratio_ = 0.0;
-  median_guard_weight_ = 0.0;
-  ClearEffectiveBwApplication(reason);
+  trusted_bw_cruise_id_ = 0;
+  trusted_bw_invalid_reason_ = reason == nullptr ? "unknown" : reason;
+  ClearTrustedBwApplication(reason);
 }
 
-void FreqCCv4Sender::ActivateStagedFreqRefForEpisode() {
-  if (!staged_trusted_bw_valid_ ||
-      staged_f_ref_age_cruise_windows_ >
-          kMaxFreqRefAgeCruiseWindows) {
-    return;
-  }
-  trusted_bw_ = staged_trusted_bw_;
-  trusted_bw_conf_ = staged_trusted_bw_conf_;
-  trusted_bw_source_ = staged_trusted_bw_source_;
-  trusted_bw_valid_ = true;
-  f_ref_ = trusted_bw_;
-  f_conf_ = trusted_bw_conf_;
-  f_ref_valid_ = true;
-  f_ref_age_cruise_windows_ = 0;
-  f_ref_invalid_reason_ = "none";
-  staged_trusted_bw_ = QuicBandwidth::Zero();
-  staged_trusted_bw_valid_ = false;
-  staged_trusted_bw_conf_ = 0.0;
-  staged_trusted_bw_source_ = kTrustedBwSourceNone;
-  staged_f_ref_ = QuicBandwidth::Zero();
-  staged_f_ref_valid_ = false;
-  staged_f_conf_ = 0.0;
-  staged_f_ref_age_cruise_windows_ = 0;
-}
-
-void FreqCCv4Sender::AgeFreqRefOnCruiseFinalize(
-    bool refreshed_active_ref,
-    bool refreshed_staged_ref) {
-  if (!bbr_stable_ && unstable_episode_active_ && trusted_bw_valid_ &&
-      !refreshed_active_ref) {
-    ++f_ref_age_cruise_windows_;
-    if (f_ref_age_cruise_windows_ > kMaxFreqRefAgeCruiseWindows) {
-      ClearActiveFreqRef("ttl_expired");
-    }
-  }
-
-  if (bbr_stable_ && staged_trusted_bw_valid_ && !refreshed_staged_ref) {
-    ++staged_f_ref_age_cruise_windows_;
-    if (staged_f_ref_age_cruise_windows_ >
-        kMaxFreqRefAgeCruiseWindows) {
-      staged_trusted_bw_ = QuicBandwidth::Zero();
-      staged_trusted_bw_valid_ = false;
-      staged_trusted_bw_conf_ = 0.0;
-      staged_trusted_bw_source_ = kTrustedBwSourceNone;
-      staged_f_ref_ = QuicBandwidth::Zero();
-      staged_f_ref_valid_ = false;
-      staged_f_conf_ = 0.0;
-      staged_f_ref_age_cruise_windows_ = 0;
-    }
+void FreqCCv4Sender::ClearTrustedBwApplication(const char* reason) const {
+  trusted_bw_fresh_ = false;
+  trusted_bw_application_valid_ = false;
+  trusted_bw_ready_for_post_cruise_ = false;
+  trusted_bw_application_phase_ = "NONE";
+  if (reason != nullptr && std::string(reason) == "cruise_start") {
+    trusted_bw_cleared_on_cruise_start_ = true;
   }
 }
 
 bool FreqCCv4Sender::IsReliableSpectralWindow(
     const CruiseWindowResult& result) const {
-  return result.is_full_load_candidate && !result.low_confidence &&
-         result.spectral_validity_pass &&
+  return result.dual_signal_spectral_gate_pass &&
+         result.is_full_load_candidate && !result.low_confidence &&
          result.full_load_quality_v2 >=
              min_full_load_quality_for_reliable_window_ &&
+         std::isfinite(result.drate_mean_kbps) &&
          result.drate_mean_kbps > 0.0;
 }
 
@@ -1386,6 +1039,9 @@ double FreqCCv4Sender::ComputeRateTrendRatio(QuicTime start,
       start + TimeDelta::FromMicroseconds((end - start).ToMicroseconds() / 2);
   for (const auto& sample : samples) {
     const double kbps = static_cast<double>(sample.rate.ToKBitsPerSecond());
+    if (!std::isfinite(kbps) || kbps <= 0.0) {
+      return std::numeric_limits<double>::infinity();
+    }
     all.push_back(kbps);
     if (sample.time < mid) {
       first.push_back(kbps);
@@ -1403,217 +1059,50 @@ double FreqCCv4Sender::ComputeRateTrendRatio(QuicTime start,
   return std::abs(Median(first) - Median(second)) / median_all;
 }
 
-bool FreqCCv4Sender::TryMedianGuard(
-    QuicTime start,
-    QuicTime end,
-    QuicBandwidth native_bw,
-    EffectiveBwSelectionResult* selection) const {
-  if (!median_guard_enabled_ || selection == nullptr || native_bw.IsZero()) {
-    return false;
-  }
-  const auto samples = SelectRateSamples(delivery_rate_history_, start, end);
-  if (samples.size() < median_guard_min_samples_) {
-    selection->median_guard_iqr_ratio =
-        std::numeric_limits<double>::infinity();
-    selection->median_guard_trend_ratio =
-        std::numeric_limits<double>::infinity();
-    return false;
-  }
-
-  std::vector<double> values;
-  values.reserve(samples.size());
-  for (const auto& sample : samples) {
-    const double bps =
-        static_cast<double>(sample.rate.ToBitsPerSecond());
-    if (bps > 0.0) {
-      values.push_back(bps);
-    }
-  }
-  if (values.size() < median_guard_min_samples_) {
-    return false;
-  }
-
-  const double median_bps = Median(values);
-  if (median_bps <= 1e-9) {
-    return false;
-  }
-  const double q25 = Percentile(values, 0.25);
-  const double q75 = Percentile(values, 0.75);
-  const double iqr_ratio = (q75 - q25) / median_bps;
-  const double trend_ratio = ComputeRateTrendRatio(start, end);
-  selection->median_guard_iqr_ratio = iqr_ratio;
-  selection->median_guard_trend_ratio = trend_ratio;
-  if (iqr_ratio > median_guard_max_iqr_ratio_ ||
-      trend_ratio > median_guard_max_trend_ratio_) {
-    return false;
-  }
-
-  const double native_bps =
-      static_cast<double>(native_bw.ToBitsPerSecond());
-  double guard_bps =
-      std::min(native_bps, median_bps * (1.0 + median_guard_margin_));
-  const double guard_scale =
-      ClampValue(guard_bps / native_bps,
-                 median_guard_scale_min_,
-                 median_guard_scale_max_);
-  guard_bps = native_bps * guard_scale;
-  const double guard_weight =
-      Clamp01(median_guard_weight_alpha_ * w_freq_);
-  const double raw_effective_bps =
-      (1.0 - guard_weight) * native_bps + guard_weight * guard_bps;
-  const double clamped_scale =
-      ClampValue(raw_effective_bps / native_bps,
-                 median_guard_scale_min_,
-                 median_guard_scale_max_);
-
-  selection->trusted_bw = BandwidthFromBps(guard_bps);
-  selection->trusted_bw_valid = true;
-  selection->trusted_bw_conf =
-      Clamp01((1.0 - iqr_ratio / std::max(median_guard_max_iqr_ratio_, 1e-9)) *
-              (1.0 - trend_ratio /
-                         std::max(median_guard_max_trend_ratio_, 1e-9)));
-  selection->trusted_bw_source = kTrustedBwSourceMedianGuard;
-  selection->raw_effective_bw = BandwidthFromBps(raw_effective_bps);
-  selection->effective_bw = native_bw * static_cast<float>(clamped_scale);
-  selection->effective_bw_valid = true;
-  selection->effective_bw_source = kTrustedBwSourceMedianGuard;
-  selection->raw_scale = raw_effective_bps / native_bps;
-  selection->clamped_scale = clamped_scale;
-  selection->median_guard_valid = true;
-  selection->median_guard_bw = selection->trusted_bw;
-  selection->median_guard_weight = guard_weight;
-  return true;
-}
-
-void FreqCCv4Sender::PublishEffectiveBwSelection(
-    const EffectiveBwSelectionResult& selection,
-    bool stage_when_stable) {
-  native_bw_ = selection.native_bw;
-  raw_effective_bw_ = selection.raw_effective_bw;
-  effective_bw_ = selection.effective_bw;
-  effective_bw_valid_ = selection.effective_bw_valid;
-  effective_bw_source_ = selection.effective_bw_source;
-  effective_bw_raw_scale_ = selection.raw_scale;
-  effective_bw_clamped_scale_ = selection.clamped_scale;
-  median_guard_valid_ = selection.median_guard_valid;
-  median_guard_bw_ = selection.median_guard_bw;
-  median_guard_iqr_ratio_ = selection.median_guard_iqr_ratio;
-  median_guard_trend_ratio_ = selection.median_guard_trend_ratio;
-  median_guard_weight_ = selection.median_guard_weight;
+void FreqCCv4Sender::PublishTrustedBwSelection(
+    const TrustedBwSelectionResult& selection) {
+  selection_native_bw_ = selection.native_bw;
+  drate_spectral_integrity_score_ =
+      selection.drate_spectral_integrity_score;
+  srtt_spectral_integrity_score_ =
+      selection.srtt_spectral_integrity_score;
+  joint_spectral_integrity_score_ =
+      selection.joint_spectral_integrity_score;
+  drate_spectral_gate_pass_ = selection.drate_spectral_gate_pass;
+  srtt_spectral_gate_pass_ = selection.srtt_spectral_gate_pass;
+  dual_signal_spectral_gate_pass_ =
+      selection.dual_signal_spectral_gate_pass;
+  limiting_spectral_signal_ = selection.limiting_spectral_signal;
   merged_rescue_attempted_ = selection.merged_rescue_attempted;
   merged_rescue_success_ = selection.merged_rescue_success;
-  effective_bw_selection_compute_us_ =
-      selection.effective_bw_selection_compute_us;
+  trusted_bw_selection_compute_us_ =
+      selection.trusted_bw_selection_compute_us;
   normal_window_count_ = selection.normal_window_count;
   merged_window_count_ = selection.merged_window_count;
   spectral_invalid_count_ = selection.spectral_invalid_count;
-  effective_bw_generation_phase_ = "CRUISE";
-  effective_bw_application_phase_ = "POST_CRUISE_READY";
-  effective_bw_ready_for_post_cruise_ = false;
-  effective_bw_application_valid_ = false;
-  effective_bw_applied_in_refill_ = false;
-  effective_bw_applied_in_up_ = false;
-  effective_bw_applied_in_down_ = false;
-  stale_effective_bw_used_ = false;
 
-  if (!selection.trusted_bw_valid) {
-    if (trusted_bw_valid_ || f_ref_valid_) {
-      f_ref_invalid_reason_ = "native_fallback";
-    }
-    trusted_bw_ = QuicBandwidth::Zero();
-    trusted_bw_valid_ = false;
-    trusted_bw_conf_ = 0.0;
-    trusted_bw_source_ = kTrustedBwSourceNone;
-    f_ref_ = QuicBandwidth::Zero();
-    f_ref_valid_ = false;
-    f_conf_ = 0.0;
-    f_ref_age_cruise_windows_ = 0;
-    ClearEffectiveBwApplication("no_new_effective_bw");
+  const bool valid_selection =
+      selection.trusted_bw_valid &&
+      selection.dual_signal_spectral_gate_pass &&
+      !selection.trusted_bw.IsZero() &&
+      std::isfinite(static_cast<double>(
+          selection.trusted_bw.ToBitsPerSecond()));
+  if (!valid_selection) {
+    ClearTrustedBw("no_dual_signal_trusted_bw");
     return;
   }
 
-  if (!bbr_stable_ && unstable_episode_active_) {
-    trusted_bw_ = selection.trusted_bw;
-    trusted_bw_valid_ = true;
-    trusted_bw_conf_ = selection.trusted_bw_conf;
-    trusted_bw_source_ = selection.trusted_bw_source;
-    f_ref_ = trusted_bw_;
-    f_ref_valid_ = true;
-    f_conf_ = trusted_bw_conf_;
-    f_ref_age_cruise_windows_ = 0;
-    f_ref_invalid_reason_ = "none";
-    const std::string source =
-        selection.effective_bw_source == nullptr
-            ? kEffectiveBwSourceNativeFallback
-            : selection.effective_bw_source;
-    effective_bw_application_valid_ =
-        selection.effective_bw_valid &&
-        source != kEffectiveBwSourceNativeFallback &&
-        source != kTrustedBwSourceNone;
-    effective_bw_ready_for_post_cruise_ = effective_bw_application_valid_;
-    return;
-  }
-
-  if (stage_when_stable) {
-    staged_trusted_bw_ = selection.trusted_bw;
-    staged_trusted_bw_valid_ = true;
-    staged_trusted_bw_conf_ = selection.trusted_bw_conf;
-    staged_trusted_bw_source_ = selection.trusted_bw_source;
-    staged_f_ref_ = selection.trusted_bw;
-    staged_f_ref_valid_ = true;
-    staged_f_conf_ = selection.trusted_bw_conf;
-    staged_f_ref_age_cruise_windows_ = 0;
-    ClearEffectiveBwApplication("stable_staged_ref");
-  }
-}
-
-double FreqCCv4Sender::ApplyFreqRefScaleMode(
-    double raw_scale,
-    double confidence,
-    bool* scale_clamped_low,
-    bool* scale_clamped_high,
-    bool* scale_applied) const {
-  *scale_clamped_low = false;
-  *scale_clamped_high = false;
-  *scale_applied = false;
-
-  double adjusted_scale = raw_scale;
-  double low = effective_bw_scale_min_;
-  double high = effective_bw_scale_max_;
-
-  switch (freq_ref_scale_mode_) {
-    case FreqCCv4ScaleMode::kCurrentBidirectional:
-      break;
-    case FreqCCv4ScaleMode::kDownwardOnly:
-      if (raw_scale >= 1.0) {
-        *scale_clamped_high = raw_scale > 1.0;
-        return 1.0;
-      }
-      high = 1.0;
-      break;
-    case FreqCCv4ScaleMode::kAsymmetric:
-      if (raw_scale > 1.0) {
-        adjusted_scale = 1.0 + freq_ref_up_beta_ * (raw_scale - 1.0);
-      }
-      break;
-    case FreqCCv4ScaleMode::kHighConfidenceOnly:
-      if (confidence < freq_ref_high_conf_threshold_) {
-        return 1.0;
-      }
-      break;
-    case FreqCCv4ScaleMode::kEarlyEpisodeOnly:
-      if (stable_cnt_ > 1) {
-        return 1.0;
-      }
-      break;
-  }
-
-  *scale_clamped_low = adjusted_scale < low;
-  *scale_clamped_high = adjusted_scale > high;
-  const double clamped_scale =
-      std::max(low, std::min(high, adjusted_scale));
-  *scale_applied = std::abs(clamped_scale - 1.0) > 1e-9;
-  return clamped_scale;
+  trusted_bw_ = selection.trusted_bw;
+  trusted_bw_valid_ = true;
+  trusted_bw_conf_ = selection.trusted_bw_conf;
+  trusted_bw_source_ = selection.trusted_bw_source;
+  trusted_bw_cruise_id_ =
+      static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+  trusted_bw_fresh_ = true;
+  trusted_bw_application_valid_ = true;
+  trusted_bw_ready_for_post_cruise_ = true;
+  trusted_bw_application_phase_ = "POST_CRUISE_READY";
+  trusted_bw_invalid_reason_ = "none";
 }
 
 const char* FreqCCv4Sender::PhaseApplicationName(
@@ -1633,166 +1122,28 @@ const char* FreqCCv4Sender::PhaseApplicationName(
   }
 }
 
+const char* FreqCCv4Sender::PacingBaseSourceName(
+    FreqCCv4PacingBaseSource source) {
+  return source == FreqCCv4PacingBaseSource::kTrustedBw
+             ? "TRUSTED_BW"
+             : "NATIVE_BBR";
+}
+
 bool FreqCCv4Sender::IsCruisePhase(
     Bbr2ProbeBwMode::CyclePhase phase) const {
   return mode_ == Bbr2Mode::PROBE_BW &&
          phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
 }
 
-bool FreqCCv4Sender::IsEffectiveBwApplicationPhase(
+bool FreqCCv4Sender::IsTrustedBwApplicationPhase(
     Bbr2ProbeBwMode::CyclePhase phase) const {
   if (mode_ != Bbr2Mode::PROBE_BW) {
     return false;
   }
-  switch (phase) {
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL:
-      return effective_bw_apply_to_refill_;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_UP:
-      return effective_bw_apply_to_up_;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN:
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY:
-      return effective_bw_apply_to_down_;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE:
-      return effective_bw_apply_to_cruise_ &&
-             !effective_bw_cruise_uses_native_bw_;
-    default:
-      return false;
-  }
-}
-
-FreqCCv4Sender::EffectiveBwPhaseApplicationDecision
-FreqCCv4Sender::ComputeEffectiveBwPhaseApplicationDecisionForTest(
-    Bbr2ProbeBwMode::CyclePhase phase,
-    QuicBandwidth native_bw,
-    QuicBandwidth effective_bw,
-    bool effective_bw_valid,
-    const char* effective_bw_source,
-    bool phase_specific_application,
-    bool application_valid,
-    bool allow_stale_effective_bw,
-    bool apply_to_refill,
-    bool apply_to_up,
-    bool apply_to_down,
-    bool apply_to_cruise,
-    double normal_scale_min,
-    double normal_scale_max,
-    double up_beta,
-    double median_scale_min,
-    double median_scale_max) {
-  EffectiveBwPhaseApplicationDecision decision = {
-      1.0, 1.0, 1.0, false, false, false, false, false,
-      PhaseApplicationName(phase)};
-
-  if (!phase_specific_application || native_bw.IsZero() ||
-      !effective_bw_valid || effective_bw.IsZero()) {
-    return decision;
-  }
-
-  bool phase_allowed = false;
-  switch (phase) {
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL:
-      phase_allowed = apply_to_refill;
-      break;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_UP:
-      phase_allowed = apply_to_up;
-      break;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN:
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY:
-      phase_allowed = apply_to_down;
-      break;
-    case Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE:
-      phase_allowed = apply_to_cruise;
-      break;
-    default:
-      phase_allowed = false;
-  }
-  if (!phase_allowed) {
-    return decision;
-  }
-  if (!application_valid && !allow_stale_effective_bw) {
-    return decision;
-  }
-  decision.stale_effective_bw_used = !application_valid &&
-                                     allow_stale_effective_bw;
-
-  const std::string source = effective_bw_source == nullptr
-                                 ? kEffectiveBwSourceNativeFallback
-                                 : effective_bw_source;
-  if (source == kEffectiveBwSourceNativeFallback ||
-      source == kTrustedBwSourceNone) {
-    return decision;
-  }
-
-  decision.raw_scale =
-      static_cast<double>(effective_bw.ToBitsPerSecond()) /
-      static_cast<double>(native_bw.ToBitsPerSecond());
-  decision.adjusted_scale = decision.raw_scale;
-
-  if (source == kTrustedBwSourceNormal ||
-      source == kTrustedBwSourceMerged) {
-    if (decision.raw_scale > 1.0) {
-      decision.adjusted_scale =
-          1.0 + up_beta * (decision.raw_scale - 1.0);
-    }
-    decision.clamped_scale =
-        ClampValue(decision.adjusted_scale,
-                   normal_scale_min,
-                   normal_scale_max);
-  } else if (source == kTrustedBwSourceMedianGuard) {
-    decision.adjusted_scale = std::min(decision.raw_scale, 1.0);
-    decision.clamped_scale =
-        ClampValue(decision.adjusted_scale,
-                   median_scale_min,
-                   std::min(median_scale_max, 1.0));
-  } else {
-    decision.raw_scale = 1.0;
-    decision.adjusted_scale = 1.0;
-    decision.clamped_scale = 1.0;
-    return decision;
-  }
-
-  decision.scale_clamped_low = decision.adjusted_scale < decision.clamped_scale;
-  decision.scale_clamped_high = decision.adjusted_scale > decision.clamped_scale;
-  decision.scale_applied = std::abs(decision.clamped_scale - 1.0) > 1e-9;
-  decision.application_valid = true;
-  return decision;
-}
-
-FreqCCv4Sender::EffectiveBwPhaseApplicationDecision
-FreqCCv4Sender::GetEffectiveBwPhaseApplicationDecision(
-    Bbr2ProbeBwMode::CyclePhase phase,
-    QuicBandwidth native_bw) const {
-  return ComputeEffectiveBwPhaseApplicationDecisionForTest(
-      phase,
-      native_bw,
-      effective_bw_,
-      effective_bw_valid_,
-      effective_bw_source_,
-      effective_bw_phase_specific_application_,
-      effective_bw_application_valid_,
-      effective_bw_allow_stale_effective_bw_,
-      effective_bw_apply_to_refill_,
-      effective_bw_apply_to_up_,
-      effective_bw_apply_to_down_,
-      effective_bw_apply_to_cruise_ && !effective_bw_cruise_uses_native_bw_,
-      effective_bw_scale_min_,
-      effective_bw_scale_max_,
-      freq_ref_up_beta_,
-      median_guard_scale_min_,
-      median_guard_scale_max_);
-}
-
-void FreqCCv4Sender::ClearEffectiveBwApplication(const char* reason) const {
-  effective_bw_application_valid_ = false;
-  effective_bw_ready_for_post_cruise_ = false;
-  effective_bw_application_phase_ = "NONE";
-  effective_bw_applied_in_refill_ = false;
-  effective_bw_applied_in_up_ = false;
-  effective_bw_applied_in_down_ = false;
-  stale_effective_bw_used_ = false;
-  if (reason != nullptr && std::string(reason) == "cruise_start") {
-    effective_bw_cleared_on_cruise_start_ = true;
-  }
+  return phase == Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL ||
+         phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP ||
+         phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN ||
+         phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY;
 }
 
 void FreqCCv4Sender::EmitConvergenceGateTrace(
@@ -1816,38 +1167,24 @@ void FreqCCv4Sender::EmitConvergenceGateTrace(
       << (completed_d_valid ? completed_d_round.ToBitsPerSecond() : 0)
       << " d_prev_bps="
       << (previous_d_valid ? previous_d_round.ToBitsPerSecond() : 0)
-      << " d_round_valid=" << completed_d_valid
-      << " d_prev_valid=" << previous_d_valid
       << " v_round=" << (v_round_valid ? v_round : -1.0)
-      << " prev_v_round=" << previous_v_round
-      << " full_drate_ref_bps="
-      << (full_drate_ref_valid_ ? full_drate_ref_.ToBitsPerSecond() : 0)
       << " stable_cnt=" << stable_cnt_
       << " bbr_stable=" << bbr_stable_
-      << " just_exited=" << just_exited
-      << " freq_tool_needed=" << freq_tool_needed_
       << " freq_tool_on=" << freq_tool_on_
-      << " f_ref_bps=" << (f_ref_valid_ ? f_ref_.ToBitsPerSecond() : 0)
-      << " f_ref_valid=" << f_ref_valid_
-      << " f_conf=" << f_conf_
-      << " f_ref_age_cruise_windows=" << f_ref_age_cruise_windows_
-      << " unstable_episode_id=" << unstable_episode_id_
-      << " unstable_episode_active=" << unstable_episode_active_
-      << " f_ref_invalid_reason=" << f_ref_invalid_reason_
-      << " w_freq=" << w_freq_
-      << " sample_valid=" << congestion_event.sample_valid
-      << " sample_is_app_limited=" << congestion_event.sample_is_app_limited
-      << " sample_max_bandwidth_bps="
-      << congestion_event.sample_max_bandwidth.ToBitsPerSecond()
-      << " bytes_acked=" << congestion_event.bytes_acked
-      << " bytes_lost=" << congestion_event.bytes_lost
-      << " gate_control=" << enable_convergence_gate_control_
-      << " freq_ref_pacing_control=" << enable_freq_ref_pacing_control_;
+      << " trusted_bw_bps="
+      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0)
+      << " trusted_bw_valid=" << trusted_bw_valid_
+      << " trusted_bw_fresh=" << trusted_bw_fresh_
+      << " trusted_bw_application_valid="
+      << trusted_bw_application_valid_
+      << " dual_signal_spectral_gate_pass="
+      << dual_signal_spectral_gate_pass_;
 
   if (gate_trace_mode_ == FreqCCv4GateTraceMode::kOff) {
     return;
   }
-
+  const QuicBandwidth current_native_bw = BandwidthEstimate();
+  const QuicBandwidth native_pacing = Bbr2Sender::PacingRate(0);
   EmitFreqGateCsvRow("round",
                      congestion_event.event_time,
                      completed_d_round,
@@ -1857,89 +1194,54 @@ void FreqCCv4Sender::EmitConvergenceGateTrace(
                      v_round_valid ? v_round : -1.0,
                      previous_v_round,
                      just_exited,
-                     BandwidthEstimate(),
-                     BandwidthEstimate(),
-                     QuicBandwidth::Zero(),
-                     QuicBandwidth::Zero(),
-	                     QuicBandwidth::Zero(),
-	                     1.0,
-	                     1.0,
-                     1.0,
-	                     false,
-	                     false,
-                     false,
-	                     0,
-	                     0,
+                     current_native_bw,
+                     current_native_bw,
+                     FreqCCv4PacingBaseSource::kNativeBbr,
+                     native_pacing,
+                     native_pacing,
+                     static_cast<double>(PacingGain()),
+                     0,
+                     0,
                      0.0,
                      congestion_event.sample_max_bandwidth,
                      congestion_event.sample_is_app_limited,
                      congestion_event.sample_valid);
 }
 
-void FreqCCv4Sender::EmitPacingTrace(QuicBandwidth b_native,
-                                     QuicBandwidth b_target,
-                                     QuicBandwidth effective_base_pacing,
-	                                     QuicBandwidth native_pacing,
-	                                     QuicBandwidth final_pacing,
-	                                     double scale,
-	                                     double raw_scale,
-                                     double adjusted_scale,
-	                                     bool scale_clamped_low,
-	                                     bool scale_clamped_high,
-                                     bool scale_applied,
-	                                     int64_t modulation_amp_bps,
-                                     int64_t modulation_amp_eff_bps,
-                                     double triangle_wave,
-                                     bool actual_modulation_on) const {
+void FreqCCv4Sender::EmitPacingTrace(
+    QuicBandwidth b_native,
+    QuicBandwidth pacing_base_bw,
+    FreqCCv4PacingBaseSource pacing_base_source,
+    QuicBandwidth native_pacing,
+    QuicBandwidth final_pacing,
+    double phase_pacing_gain,
+    int64_t modulation_amp_bps,
+    int64_t modulation_amp_eff_bps,
+    double triangle_wave,
+    bool actual_modulation_on) const {
   if (!enable_convergence_gate_trace_) {
     return;
   }
 
   QUIC_DVLOG(2)
       << "FreqCCv4 pacing_gate"
-      << " round_id=" << model_.RoundTripCount()
-      << " d_round_bps=" << (d_round_valid_ ? d_round_.ToBitsPerSecond() : 0)
-      << " d_prev_bps=" << (d_prev_valid_ ? d_prev_.ToBitsPerSecond() : 0)
-      << " d_round_valid=" << d_round_valid_
-      << " d_prev_valid=" << d_prev_valid_
-      << " prev_v_round=" << prev_v_round_
-      << " full_drate_ref_bps="
-      << (full_drate_ref_valid_ ? full_drate_ref_.ToBitsPerSecond() : 0)
-      << " stable_cnt=" << stable_cnt_
-      << " bbr_stable=" << bbr_stable_
-      << " freq_tool_needed=" << freq_tool_needed_
-      << " freq_tool_on=" << freq_tool_on_
-      << " f_ref_bps=" << (f_ref_valid_ ? f_ref_.ToBitsPerSecond() : 0)
-      << " f_ref_valid=" << f_ref_valid_
-      << " f_conf=" << f_conf_
-      << " f_ref_age_cruise_windows=" << f_ref_age_cruise_windows_
-      << " unstable_episode_id=" << unstable_episode_id_
-      << " unstable_episode_active=" << unstable_episode_active_
-      << " f_ref_invalid_reason=" << f_ref_invalid_reason_
-      << " w_freq=" << w_freq_
-      << " b_native_bps=" << b_native.ToBitsPerSecond()
-      << " b_target_bps=" << b_target.ToBitsPerSecond()
-      << " b_eff_bps=" << effective_base_pacing.ToBitsPerSecond()
-      << " b_eff_valid=" << b_eff_valid_
-      << " raw_scale=" << raw_scale
-      << " adjusted_scale=" << adjusted_scale
-      << " scale=" << scale
-      << " scale_applied=" << scale_applied
-      << " scale_clamped_low=" << scale_clamped_low
-      << " scale_clamped_high=" << scale_clamped_high
+      << " phase=" << PhaseApplicationName(GetCurrentProbeBwPhase())
+      << " current_native_bw_bps=" << b_native.ToBitsPerSecond()
+      << " pacing_base_bw_bps=" << pacing_base_bw.ToBitsPerSecond()
+      << " pacing_base_source=" << PacingBaseSourceName(pacing_base_source)
+      << " phase_pacing_gain=" << phase_pacing_gain
       << " native_pacing_bps=" << native_pacing.ToBitsPerSecond()
-      << " final_pacing_bps=" << final_pacing.ToBitsPerSecond()
-      << " modulation_amp_bps=" << modulation_amp_bps
-      << " modulation_amp_eff_bps=" << modulation_amp_eff_bps
+      << " final_pacing_rate_bps=" << final_pacing.ToBitsPerSecond()
+      << " trusted_bw_bps="
+      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0)
+      << " trusted_bw_fresh=" << trusted_bw_fresh_
+      << " trusted_bw_application_valid="
+      << trusted_bw_application_valid_
       << " triangle_wave=" << triangle_wave
-      << " actual_modulation_on=" << actual_modulation_on
-      << " gate_control=" << enable_convergence_gate_control_
-      << " freq_ref_pacing_control=" << enable_freq_ref_pacing_control_;
+      << " actual_modulation_on=" << actual_modulation_on;
 
-  bool emit_csv = false;
-  if (gate_trace_mode_ == FreqCCv4GateTraceMode::kFull) {
-    emit_csv = true;
-  } else if (gate_trace_mode_ == FreqCCv4GateTraceMode::kSampledPacing) {
+  bool emit_csv = gate_trace_mode_ == FreqCCv4GateTraceMode::kFull;
+  if (gate_trace_mode_ == FreqCCv4GateTraceMode::kSampledPacing) {
     if (!last_pacing_gate_trace_time_.IsInitialized() ||
         current_time_ - last_pacing_gate_trace_time_ >=
             gate_trace_sample_interval_) {
@@ -1961,17 +1263,12 @@ void FreqCCv4Sender::EmitPacingTrace(QuicBandwidth b_native,
                      prev_v_round_,
                      false,
                      b_native,
-                     b_target,
-                     effective_base_pacing,
+                     pacing_base_bw,
+                     pacing_base_source,
                      native_pacing,
-	                     final_pacing,
-	                     scale,
-	                     raw_scale,
-                     adjusted_scale,
-	                     scale_clamped_low,
-	                     scale_clamped_high,
-                     scale_applied,
-	                     modulation_amp_bps,
+                     final_pacing,
+                     phase_pacing_gain,
+                     modulation_amp_bps,
                      modulation_amp_eff_bps,
                      triangle_wave,
                      DeliveryRateLatest(),
@@ -1990,16 +1287,11 @@ void FreqCCv4Sender::EmitFreqGateCsvRow(
     double previous_v_round,
     bool just_exited,
     QuicBandwidth b_native,
-    QuicBandwidth b_target,
-    QuicBandwidth effective_base_pacing,
+    QuicBandwidth pacing_base_bw,
+    FreqCCv4PacingBaseSource pacing_base_source,
     QuicBandwidth native_pacing,
     QuicBandwidth final_pacing,
-    double scale,
-    double raw_scale,
-    double adjusted_scale,
-    bool scale_clamped_low,
-    bool scale_clamped_high,
-    bool scale_applied,
+    double phase_pacing_gain,
     int64_t modulation_amp_bps,
     int64_t modulation_amp_eff_bps,
     double triangle_wave,
@@ -2010,53 +1302,18 @@ void FreqCCv4Sender::EmitFreqGateCsvRow(
     return;
   }
 
-	  const double time_s =
-	      static_cast<double>((event_time - QuicTime::Zero()).ToMicroseconds()) /
-	      1000000.0;
-  const bool trace_native_fallback =
-      !effective_bw_valid_ ||
-      std::string(effective_bw_source_) == kEffectiveBwSourceNativeFallback;
-  const QuicBandwidth trace_raw_effective_bw =
-      (!trace_native_fallback && !raw_effective_bw_.IsZero())
-          ? raw_effective_bw_
-          : b_native;
-  const QuicBandwidth trace_effective_bw =
-      (!trace_native_fallback && !effective_bw_.IsZero())
-          ? effective_bw_
-          : b_native;
-  const char* trace_effective_source =
-      trace_native_fallback ? kEffectiveBwSourceNativeFallback
-                            : effective_bw_source_;
-  const double trace_raw_scale =
-      trace_native_fallback ? 1.0 : effective_bw_raw_scale_;
-  const double trace_clamped_scale =
-      trace_native_fallback ? 1.0 : effective_bw_clamped_scale_;
-  const Bbr2ProbeBwMode::CyclePhase trace_phase = GetCurrentProbeBwPhase();
-  const bool trace_is_probe_bw = mode_ == Bbr2Mode::PROBE_BW;
-  const bool trace_is_refill =
-      trace_is_probe_bw &&
-      trace_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL;
-  const bool trace_is_up =
-      trace_is_probe_bw &&
-      trace_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP;
-  const bool trace_is_down =
-      trace_is_probe_bw &&
-      (trace_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN ||
-       trace_phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY);
-	  std::ostringstream row;
+  const double time_s =
+      static_cast<double>((event_time - QuicTime::Zero()).ToMicroseconds()) /
+      1000000.0;
+  const Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
+  std::ostringstream row;
   row << time_s << ","
       << trace_flow_id_ << ","
       << row_type << ","
       << model_.RoundTripCount() << ","
       << GetCurrentBbrModeIndex() << ","
-      << static_cast<int>(GetCurrentProbeBwPhase()) << ","
-      << ((mode_ == Bbr2Mode::PROBE_BW &&
-           GetCurrentProbeBwPhase() ==
-               Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
-           in_cruise_ && cruise_start_time_ != QuicTime::Zero())
-              ? "true"
-              : "false")
-      << ","
+      << static_cast<int>(phase) << ","
+      << (IsCruisePhase(phase) ? "true" : "false") << ","
       << (completed_d_valid ? completed_d_round.ToBitsPerSecond() : 0) << ","
       << (previous_d_valid ? previous_d_round.ToBitsPerSecond() : 0) << ","
       << (completed_d_valid ? "true" : "false") << ","
@@ -2069,74 +1326,46 @@ void FreqCCv4Sender::EmitFreqGateCsvRow(
       << (just_exited ? "true" : "false") << ","
       << (freq_tool_needed_ ? "true" : "false") << ","
       << (freq_tool_on_ ? "true" : "false") << ","
-      << (f_ref_valid_ ? f_ref_.ToBitsPerSecond() : 0) << ","
-      << (f_ref_valid_ ? "true" : "false") << ","
-      << f_conf_ << ","
-      << f_ref_age_cruise_windows_ << ","
+      << w_freq_ << ","
       << unstable_episode_id_ << ","
       << (unstable_episode_active_ ? "true" : "false") << ","
-      << f_ref_invalid_reason_ << ","
-      << w_freq_ << ","
+      << selection_native_bw_.ToBitsPerSecond() << ","
       << b_native.ToBitsPerSecond() << ","
-      << b_target.ToBitsPerSecond() << ","
-      << effective_base_pacing.ToBitsPerSecond() << ","
-      << scale << ","
-      << raw_scale << ","
-      << scale << ","
-      << (scale_clamped_low ? "true" : "false") << ","
-      << (scale_clamped_high ? "true" : "false") << ","
+      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
+      << (trusted_bw_valid_ ? "true" : "false") << ","
+      << trusted_bw_conf_ << ","
+      << trusted_bw_source_ << ","
+      << trusted_bw_cruise_id_ << ","
+      << (trusted_bw_fresh_ ? "true" : "false") << ","
+      << (trusted_bw_application_valid_ ? "true" : "false") << ","
+      << (trusted_bw_ready_for_post_cruise_ ? "true" : "false") << ","
+      << trusted_bw_application_phase_ << ","
+      << trusted_bw_invalid_reason_ << ","
+      << drate_spectral_integrity_score_ << ","
+      << srtt_spectral_integrity_score_ << ","
+      << joint_spectral_integrity_score_ << ","
+      << (drate_spectral_gate_pass_ ? "true" : "false") << ","
+      << (srtt_spectral_gate_pass_ ? "true" : "false") << ","
+      << (dual_signal_spectral_gate_pass_ ? "true" : "false") << ","
+      << limiting_spectral_signal_ << ","
+      << pacing_base_bw.ToBitsPerSecond() << ","
+      << PacingBaseSourceName(pacing_base_source) << ","
+      << phase_pacing_gain << ","
       << native_pacing.ToBitsPerSecond() << ","
       << final_pacing.ToBitsPerSecond() << ","
       << modulation_amp_bps << ","
       << modulation_amp_eff_bps << ","
-	      << triangle_wave << ","
-	      << current_delivery_rate.ToBitsPerSecond() << ","
-	      << (sample_is_app_limited ? "true" : "false") << ","
-	      << (sample_valid ? "true" : "false") << ","
-	      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
-	      << (trusted_bw_valid_ ? "true" : "false") << ","
-	      << trusted_bw_conf_ << ","
-	      << trusted_bw_source_ << ","
-	      << (cruise_max_drate_valid_ ? cruise_max_drate_.ToBitsPerSecond()
-	                                  : (completed_d_valid
-	                                         ? completed_d_round.ToBitsPerSecond()
-	                                         : 0))
-	      << ","
-	      << b_native.ToBitsPerSecond() << ","
-	      << trace_raw_effective_bw.ToBitsPerSecond()
-	      << ","
-	      << trace_effective_bw.ToBitsPerSecond() << ","
-	      << trace_effective_source << ","
-	      << trace_raw_scale << ","
-	      << trace_clamped_scale << ","
-	      << (median_guard_valid_ ? "true" : "false") << ","
-	      << (median_guard_valid_ ? median_guard_bw_.ToBitsPerSecond() : 0) << ","
-	      << median_guard_iqr_ratio_ << ","
-	      << median_guard_trend_ratio_ << ","
-	      << median_guard_weight_ << ","
-	      << (merged_rescue_attempted_ ? "true" : "false") << ","
-	      << (merged_rescue_success_ ? "true" : "false") << ","
-	      << effective_bw_selection_compute_us_ << ","
-	      << normal_window_count_ << ","
-	      << merged_window_count_ << ","
-	      << spectral_invalid_count_ << ","
-	      << GetCurrentBbrModeIndex() << ","
-	      << (trace_is_refill ? "true" : "false") << ","
-	      << (trace_is_up ? "true" : "false") << ","
-	      << (trace_is_down ? "true" : "false") << ","
-	      << (effective_bw_valid_ ? "true" : "false") << ","
-	      << (effective_bw_application_valid_ ? "true" : "false") << ","
-	      << adjusted_scale << ","
-	      << (scale_applied ? "true" : "false") << ","
-	      << effective_bw_application_phase_ << ","
-	      << (effective_bw_cruise_uses_native_bw_ ? "true" : "false") << ","
-	      << (effective_bw_cleared_on_cruise_start_ ? "true" : "false") << ","
-	      << (stale_effective_bw_used_ ? "true" : "false") << ","
-	      << effective_bw_generation_phase_ << ","
-	      << (effective_bw_ready_for_post_cruise_ ? "true" : "false") << ","
-	      << (effective_bw_applied_in_refill_ ? "true" : "false") << ","
-	      << (effective_bw_applied_in_up_ ? "true" : "false") << ","
-	      << (effective_bw_applied_in_down_ ? "true" : "false");
+      << triangle_wave << ","
+      << current_delivery_rate.ToBitsPerSecond() << ","
+      << (sample_is_app_limited ? "true" : "false") << ","
+      << (sample_valid ? "true" : "false") << ","
+      << (merged_rescue_attempted_ ? "true" : "false") << ","
+      << (merged_rescue_success_ ? "true" : "false") << ","
+      << trusted_bw_selection_compute_us_ << ","
+      << normal_window_count_ << ","
+      << merged_window_count_ << ","
+      << spectral_invalid_count_ << ","
+      << (trusted_bw_cleared_on_cruise_start_ ? "true" : "false");
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -2147,7 +1376,6 @@ void FreqCCv4Sender::EmitFreqGateCsvRow(
                         false,
                         row.str());
 }
-
 void FreqCCv4Sender::OnPacketSent(QuicTime sent_time,
                                   QuicByteCount bytes_in_flight,
                                   QuicPacketNumber packet_number,
@@ -2186,9 +1414,9 @@ void FreqCCv4Sender::OnCongestionEvent(
                                 lost_packets);
 
   if (mode_ != Bbr2Mode::PROBE_BW) {
-    ClearActiveFreqRef("non_probe_bw");
-  } else if (bbr_stable_ && effective_bw_clear_on_stable_closure_) {
-    ClearActiveFreqRef("stable_closure");
+    ClearTrustedBw("non_probe_bw");
+  } else if (enable_convergence_gate_control_ && bbr_stable_) {
+    ClearTrustedBw("stable_closure");
   }
 
   if (!drain_completed_ && mode_ == Bbr2Mode::PROBE_BW) {
@@ -2233,116 +1461,82 @@ void FreqCCv4Sender::OnCongestionEvent(
   }
 }
 
-QuicBandwidth FreqCCv4Sender::PacingRate(QuicByteCount bytes_in_flight) const {
+QuicBandwidth FreqCCv4Sender::PacingRate(
+    QuicByteCount bytes_in_flight) const {
   const QuicBandwidth native_pacing =
       Bbr2Sender::PacingRate(bytes_in_flight);
-  const QuicBandwidth b_native = BandwidthEstimate();
-  QuicBandwidth b_target = b_native;
-  double scale = 1.0;
-  double raw_scale = 1.0;
-  double adjusted_scale = 1.0;
-  bool scale_clamped_low = false;
-  bool scale_clamped_high = false;
-  bool freq_ref_scale_applied = false;
-  bool scale_applied = false;
+  const QuicBandwidth native_bw = BandwidthEstimate();
   const Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
-  const bool is_probe_bw = mode_ == Bbr2Mode::PROBE_BW;
-  const bool is_cruise_phase =
-      is_probe_bw && phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
+  const double phase_gain = static_cast<double>(PacingGain());
 
-  if (bbr_stable_ || !effective_bw_valid_) {
-    ClearEffectiveBwApplication(bbr_stable_ ? "stable_closure"
-                                            : "no_effective_bw");
-    native_bw_ = b_native;
-    raw_effective_bw_ = b_native;
-    effective_bw_ = b_native;
-    effective_bw_valid_ = true;
-    effective_bw_source_ = kEffectiveBwSourceNativeFallback;
-    effective_bw_raw_scale_ = 1.0;
-    effective_bw_clamped_scale_ = 1.0;
-  }
+  QuicBandwidth pacing_base_bw = native_bw;
+  FreqCCv4PacingBaseSource pacing_base_source =
+      FreqCCv4PacingBaseSource::kNativeBbr;
+  const bool trusted_value_is_usable =
+      trusted_bw_valid_ && !trusted_bw_.IsZero() &&
+      std::isfinite(static_cast<double>(trusted_bw_.ToBitsPerSecond()));
+  const bool trusted_result_is_fresh =
+      trusted_bw_fresh_ &&
+      trusted_bw_cruise_id_ ==
+          static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+  const bool stable_allows_application =
+      !enable_convergence_gate_control_ || !bbr_stable_;
+  const bool use_trusted_bw =
+      IsTrustedBwApplicationPhase(phase) &&
+      trusted_bw_application_valid_ &&
+      trusted_bw_ready_for_post_cruise_ &&
+      trusted_result_is_fresh &&
+      trusted_value_is_usable &&
+      stable_allows_application;
 
-  if (!is_probe_bw ||
-      (!is_cruise_phase && !IsEffectiveBwApplicationPhase(phase))) {
-    ClearEffectiveBwApplication("non_probe_bw_application_phase");
-  }
-
-  if (enable_freq_ref_pacing_control_ && !bbr_stable_ &&
-      !b_native.IsZero() && !is_cruise_phase) {
-    const EffectiveBwPhaseApplicationDecision decision =
-        GetEffectiveBwPhaseApplicationDecision(phase, b_native);
-    raw_scale = decision.raw_scale;
-    adjusted_scale = decision.adjusted_scale;
-    scale = decision.clamped_scale;
-    scale_clamped_low = decision.scale_clamped_low;
-    scale_clamped_high = decision.scale_clamped_high;
-    scale_applied = decision.scale_applied;
-    freq_ref_scale_applied = decision.application_valid &&
-                             decision.scale_applied;
-    stale_effective_bw_used_ = decision.stale_effective_bw_used;
-    effective_bw_application_phase_ = decision.application_phase;
-    if (decision.application_valid) {
-      b_target = b_native * static_cast<float>(scale);
-      native_bw_ = b_native;
-      effective_bw_raw_scale_ = raw_scale;
-      effective_bw_clamped_scale_ = scale;
-      if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_REFILL) {
-        effective_bw_applied_in_refill_ = true;
-      } else if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_UP) {
-        effective_bw_applied_in_up_ = true;
-      } else if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN ||
-                 phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN_SLIGHTLY) {
-        effective_bw_applied_in_down_ = true;
-      }
-    }
+  if (use_trusted_bw) {
+    pacing_base_bw = trusted_bw_;
+    pacing_base_source = FreqCCv4PacingBaseSource::kTrustedBw;
+    trusted_bw_application_phase_ = PhaseApplicationName(phase);
   } else {
-    stale_effective_bw_used_ = false;
-    effective_bw_application_phase_ = PhaseApplicationName(phase);
+    trusted_bw_application_phase_ = PhaseApplicationName(phase);
   }
 
-  const QuicBandwidth effective_base_pacing = native_pacing * scale;
-  b_eff_ = effective_base_pacing;
-  b_eff_valid_ = true;
+  QuicBandwidth baseline_pacing = native_pacing;
+  if (use_trusted_bw) {
+    baseline_pacing =
+        static_cast<float>(phase_gain) * pacing_base_bw;
+  }
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
+      cruise_baseline_cap_bps_ > 0 &&
+      baseline_pacing.ToBitsPerSecond() > cruise_baseline_cap_bps_) {
+    baseline_pacing =
+        QuicBandwidth::FromBitsPerSecond(cruise_baseline_cap_bps_);
+  }
 
   const bool base_should_oscillate = BaseShouldOscillate();
-  freq_tool_on_ =
-      freq_tool_needed_ && !bbr_stable_ && base_should_oscillate;
   const bool should_oscillate =
       enable_convergence_gate_control_
           ? (base_should_oscillate && !bbr_stable_)
           : base_should_oscillate;
+  freq_tool_on_ = should_oscillate;
   const int64_t amplitude_bps =
       should_oscillate ? static_cast<int64_t>(GetCurrentAmplitudeBps()) : 0;
-  const int64_t amplitude_bps_eff = amplitude_bps;
   const double triangle_wave =
       should_oscillate ? TriangleWave(current_time_) : 0.0;
   const int64_t offset_bps =
-      static_cast<int64_t>(amplitude_bps_eff * triangle_wave);
+      static_cast<int64_t>(amplitude_bps * triangle_wave);
   int64_t final_bps =
-      static_cast<int64_t>(effective_base_pacing.ToBitsPerSecond()) +
-      offset_bps;
-  const int64_t min_rate_bps = 1000;
-  if (final_bps < min_rate_bps) {
-    final_bps = min_rate_bps;
-  }
-  const QuicBandwidth final_pacing = QuicBandwidth::FromBitsPerSecond(
-      static_cast<uint64_t>(final_bps));
+      static_cast<int64_t>(baseline_pacing.ToBitsPerSecond()) + offset_bps;
+  final_bps = std::max<int64_t>(1000, final_bps);
+  const QuicBandwidth final_pacing =
+      QuicBandwidth::FromBitsPerSecond(static_cast<uint64_t>(final_bps));
   const QuicBandwidth returned_pacing =
-      (!should_oscillate && !freq_ref_scale_applied) ? native_pacing
-                                                     : final_pacing;
-  EmitPacingTrace(b_native,
-                  b_target,
-                  effective_base_pacing,
+      (!should_oscillate && !use_trusted_bw) ? native_pacing : final_pacing;
+
+  EmitPacingTrace(native_bw,
+                  pacing_base_bw,
+                  pacing_base_source,
                   native_pacing,
                   returned_pacing,
-                  scale,
-                  raw_scale,
-                  adjusted_scale,
-                  scale_clamped_low,
-                  scale_clamped_high,
-                  scale_applied,
+                  phase_gain,
                   amplitude_bps,
-                  amplitude_bps_eff,
+                  amplitude_bps,
                   triangle_wave,
                   should_oscillate);
   if (pacing_audit_trace_cb_) {
@@ -2354,17 +1548,15 @@ QuicBandwidth FreqCCv4Sender::PacingRate(QuicByteCount bytes_in_flight) const {
         time_s,
         native_pacing.ToBitsPerSecond(),
         returned_pacing.ToBitsPerSecond(),
-        b_native.ToBitsPerSecond(),
-        b_target.ToBitsPerSecond(),
-        raw_scale,
-        scale,
-	        freq_ref_scale_applied,
-	        should_oscillate,
-	        trusted_bw_valid_);
+        native_bw.ToBitsPerSecond(),
+        pacing_base_bw.ToBitsPerSecond(),
+        PacingBaseSourceName(pacing_base_source),
+        phase_gain,
+        should_oscillate,
+        trusted_bw_valid_);
   }
   return returned_pacing;
 }
-
 int32_t FreqCCv4Sender::GetCurrentBbrModeIndex() const {
   return Bbr2Sender::GetCurrentBbrModeIndex();
 }
@@ -2455,6 +1647,12 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
   WindowSignalResult srtt =
       AnalyzeRttSeries(srtt_samples, window_start, window_end, reference_freq,
                        true);
+  const bool drate_input_valid = HasValidRateCoverage(
+      drate_samples, window_start, window_end, reference_freq);
+  const bool srtt_input_valid = HasValidRttCoverage(
+      srtt_samples, window_start, window_end, reference_freq);
+  drate.valid = drate.valid && drate_input_valid;
+  srtt.valid = srtt.valid && srtt_input_valid;
 
   CruiseWindowResult result = {cruise_id_, window_start, window_end};
   result.window_source = window_source;
@@ -2488,7 +1686,7 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
                                     freq_tolerance)
                  : 0.0;
   result.freq_quality =
-      0.5 * result.drate_freq_score + 0.5 * result.srtt_freq_score;
+      std::min(result.drate_freq_score, result.srtt_freq_score);
 
   const double epsilon = 1e-9;
   result.srate_target_amp = srate.valid ? srate.profile.target_amp : 0.0;
@@ -2573,15 +1771,19 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
       drate.valid ? drate.profile.peak_width_hz : 0.0;
   result.srtt_peak_width_hz =
       srtt.valid ? srtt.profile.peak_width_hz : 0.0;
-  const double width_denom = std::max(
-      std::max(result.srate_peak_width_hz,
-               srate.valid ? srate.profile.freq_step_hz : 0.0),
-      std::max(1e-9, 1.0 / std::max(window_duration_s, 1e-9)));
+  const double minimum_resolvable_width =
+      std::max(1e-9, 1.0 / std::max(window_duration_s, 1e-9));
+  const double drate_width_denom =
+      std::max(drate.valid ? drate.profile.freq_step_hz : 0.0,
+               minimum_resolvable_width);
+  const double srtt_width_denom =
+      std::max(srtt.valid ? srtt.profile.freq_step_hz : 0.0,
+               minimum_resolvable_width);
   result.drate_width_ratio =
-      drate.valid ? result.drate_peak_width_hz / width_denom
+      drate.valid ? result.drate_peak_width_hz / drate_width_denom
                   : std::numeric_limits<double>::infinity();
   result.srtt_width_ratio =
-      srtt.valid ? result.srtt_peak_width_hz / width_denom
+      srtt.valid ? result.srtt_peak_width_hz / srtt_width_denom
                  : std::numeric_limits<double>::infinity();
   bool drate_phase_valid = false;
   bool srtt_phase_valid = false;
@@ -2592,19 +1794,7 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
       ComputePhaseCoherence(srtt.values, kSampleStepSec, reference_freq,
                             &srtt_phase_valid);
 
-  result.is_full_load_candidate =
-      result.drate_valid && result.srtt_valid &&
-      result.drate_freq_score >= kMinDrateFreqScoreForCandidate &&
-      result.srtt_freq_score >= kMinSrttFreqScoreForCandidate;
-  const double base_quality =
-      Clamp01(0.35 * result.freq_quality +
-              0.25 * result.waveform_quality +
-              0.20 * result.amplitude_quality +
-              0.20 * result.consistency_quality);
-  result.full_load_quality_v1 = base_quality;
-  result.full_load_quality = result.full_load_quality_v1;
-
-  const double sigma_f = std::max(freq_sigma_ratio_ * reference_freq,
+const double sigma_f = std::max(freq_sigma_ratio_ * reference_freq,
                                   0.5 / std::max(window_duration_s, 1e-9));
   const double q_freq_drate =
       drate.valid ? ExpFreqScore(std::abs(result.drate_peak_freq_hz -
@@ -2638,26 +1828,67 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
       drate_phase_valid ? Clamp01(result.drate_phase_coherence) : 0.0;
   const double q_phase_srtt =
       srtt_phase_valid ? Clamp01(result.srtt_phase_coherence) : 0.0;
-  const double q_drate = std::pow(std::max(0.0, q_freq_drate * q_snr_drate *
-                                                   q_energy_drate *
-                                                   q_width_drate *
-                                                   q_phase_drate),
-                                  1.0 / 5.0);
-  const double q_srtt = std::pow(std::max(0.0, q_freq_srtt * q_snr_srtt *
-                                                  q_energy_srtt *
-                                                  q_width_srtt *
-                                                  q_phase_srtt),
-                                 1.0 / 5.0);
-  result.spectral_validity_score =
-      std::sqrt(std::max(0.0, q_drate * q_srtt));
-  result.full_load_quality_v2 =
-      Clamp01(result.spectral_validity_score * base_quality);
+
+  const double drate_product =
+      q_freq_drate * q_snr_drate * q_energy_drate *
+      q_width_drate * q_phase_drate;
+  const double srtt_product =
+      q_freq_srtt * q_snr_srtt * q_energy_srtt *
+      q_width_srtt * q_phase_srtt;
+  result.drate_spectral_integrity_score =
+      drate.valid && std::isfinite(drate_product)
+          ? Clamp01(std::pow(std::max(0.0, drate_product), 1.0 / 5.0))
+          : 0.0;
+  result.srtt_spectral_integrity_score =
+      srtt.valid && std::isfinite(srtt_product)
+          ? Clamp01(std::pow(std::max(0.0, srtt_product), 1.0 / 5.0))
+          : 0.0;
+  result.joint_spectral_integrity_score =
+      std::min(result.drate_spectral_integrity_score,
+               result.srtt_spectral_integrity_score);
+  if (result.drate_spectral_integrity_score <
+      result.srtt_spectral_integrity_score) {
+    result.limiting_spectral_signal = kLimitingSpectralSignalDrate;
+  } else if (result.srtt_spectral_integrity_score <
+             result.drate_spectral_integrity_score) {
+    result.limiting_spectral_signal = kLimitingSpectralSignalSrtt;
+  } else {
+    result.limiting_spectral_signal = kLimitingSpectralSignalEqual;
+  }
+
+  result.drate_spectral_gate_pass =
+      result.drate_valid && drate_input_valid &&
+      drate.profile.noise_floor_valid && drate_phase_valid &&
+      std::isfinite(result.drate_snr) &&
+      result.drate_snr >= min_drate_snr_ &&
+      std::isfinite(result.drate_width_ratio) &&
+      result.drate_width_ratio <= max_drate_width_ratio_ &&
+      std::isfinite(result.drate_phase_coherence) &&
+      result.drate_phase_coherence >= min_drate_phase_coherence_ &&
+      std::isfinite(result.drate_spectral_integrity_score) &&
+      result.drate_spectral_integrity_score >=
+          drate_spectral_integrity_threshold_;
+  result.srtt_spectral_gate_pass =
+      result.srtt_valid && srtt_input_valid &&
+      srtt.profile.noise_floor_valid && srtt_phase_valid &&
+      std::isfinite(result.srtt_snr) &&
+      result.srtt_snr >= min_srtt_snr_ &&
+      std::isfinite(result.srtt_width_ratio) &&
+      result.srtt_width_ratio <= max_srtt_width_ratio_ &&
+      std::isfinite(result.srtt_phase_coherence) &&
+      result.srtt_phase_coherence >= min_srtt_phase_coherence_ &&
+      std::isfinite(result.srtt_spectral_integrity_score) &&
+      result.srtt_spectral_integrity_score >=
+          srtt_spectral_integrity_threshold_;
+  result.dual_signal_spectral_gate_pass =
+      result.drate_spectral_gate_pass &&
+      result.srtt_spectral_gate_pass;
 
   std::string invalid_reason = "none";
-  if (!result.drate_valid) {
+  if (!result.drate_valid || !drate_input_valid) {
     invalid_reason = AppendReason(invalid_reason, "drate_invalid");
   }
-  if (!result.srtt_valid) {
+  if (!result.srtt_valid || !srtt_input_valid) {
     invalid_reason = AppendReason(invalid_reason, "srtt_invalid");
   }
   if (!drate.profile.noise_floor_valid) {
@@ -2666,42 +1897,63 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
   if (!srtt.profile.noise_floor_valid) {
     invalid_reason = AppendReason(invalid_reason, "srtt_noise_invalid");
   }
-  if (result.drate_snr < min_drate_snr_) {
+  if (!std::isfinite(result.drate_snr) ||
+      result.drate_snr < min_drate_snr_) {
     invalid_reason = AppendReason(invalid_reason, "drate_snr_low");
   }
-  if (result.srtt_snr < min_srtt_snr_) {
+  if (!std::isfinite(result.srtt_snr) ||
+      result.srtt_snr < min_srtt_snr_) {
     invalid_reason = AppendReason(invalid_reason, "srtt_snr_low");
   }
-  if (result.drate_width_ratio > max_drate_width_ratio_) {
+  if (!std::isfinite(result.drate_width_ratio) ||
+      result.drate_width_ratio > max_drate_width_ratio_) {
     invalid_reason = AppendReason(invalid_reason, "drate_peak_broad");
   }
-  if (result.srtt_width_ratio > max_srtt_width_ratio_) {
+  if (!std::isfinite(result.srtt_width_ratio) ||
+      result.srtt_width_ratio > max_srtt_width_ratio_) {
     invalid_reason = AppendReason(invalid_reason, "srtt_peak_broad");
   }
-  if (!drate_phase_valid) {
+  if (!drate_phase_valid ||
+      result.drate_phase_coherence < min_drate_phase_coherence_) {
     invalid_reason = AppendReason(invalid_reason, "drate_phase_invalid");
-  } else if (result.drate_phase_coherence < min_drate_phase_coherence_) {
-    invalid_reason = AppendReason(invalid_reason, "drate_phase_low");
   }
-  if (!srtt_phase_valid) {
+  if (!srtt_phase_valid ||
+      result.srtt_phase_coherence < min_srtt_phase_coherence_) {
     invalid_reason = AppendReason(invalid_reason, "srtt_phase_invalid");
-  } else if (result.srtt_phase_coherence < min_srtt_phase_coherence_) {
-    invalid_reason = AppendReason(invalid_reason, "srtt_phase_low");
   }
-  if (result.spectral_validity_score < min_spectral_validity_) {
-    invalid_reason = AppendReason(invalid_reason, "spectral_score_low");
+  if (result.drate_spectral_integrity_score <
+      drate_spectral_integrity_threshold_) {
+    invalid_reason =
+        AppendReason(invalid_reason, "drate_integrity_score_low");
+  }
+  if (result.srtt_spectral_integrity_score <
+      srtt_spectral_integrity_threshold_) {
+    invalid_reason =
+        AppendReason(invalid_reason, "srtt_integrity_score_low");
   }
   result.spectral_invalid_reason = invalid_reason;
-  result.spectral_validity_pass =
-      invalid_reason == "none" &&
-      result.spectral_validity_score >= min_spectral_validity_;
+
+  result.is_full_load_candidate =
+      result.dual_signal_spectral_gate_pass &&
+      result.drate_freq_score >= kMinDrateFreqScoreForCandidate &&
+      result.srtt_freq_score >= kMinSrttFreqScoreForCandidate &&
+      std::isfinite(result.drate_mean_kbps) &&
+      result.drate_mean_kbps > 0.0;
+  const double base_quality =
+      Clamp01(0.35 * result.freq_quality +
+              0.25 * result.waveform_quality +
+              0.20 * result.amplitude_quality +
+              0.20 * result.consistency_quality);
+  result.full_load_quality_v1 = base_quality;
+  result.full_load_quality = base_quality;
+  result.full_load_quality_v2 =
+      result.dual_signal_spectral_gate_pass
+          ? Clamp01(result.joint_spectral_integrity_score * base_quality)
+          : 0.0;
   result.label = result.is_full_load_candidate
                      ? "FULL_LOAD_CANDIDATE"
                      : "NOT_FULL_LOAD_CANDIDATE";
 
-  const bool frequency_match =
-      result.drate_freq_score >= kMinDrateFreqScoreForCandidate &&
-      result.srtt_freq_score >= kMinSrttFreqScoreForCandidate;
   const bool srate_unstable =
       !result.srate_valid ||
       result.srate_freq_score < kMinDrateFreqScoreForCandidate;
@@ -2711,12 +1963,10 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
       static_cast<int>(std::floor(window_duration_s * reference_freq));
   const bool cycles_insufficient =
       expected_cycles < 2 || result.valid_cycle_count < 2;
-  const bool low_confidence_v1 =
-      frequency_match &&
-      (srate_unstable || samples_insufficient || cycles_insufficient ||
-       !srtt.profile.noise_floor_valid ||
-       result.full_load_quality < min_full_load_quality_for_reliable_window_);
-  result.low_confidence = low_confidence_v1 || !result.spectral_validity_pass;
+  result.low_confidence =
+      !result.dual_signal_spectral_gate_pass ||
+      srate_unstable || samples_insufficient || cycles_insufficient ||
+      result.full_load_quality < min_full_load_quality_for_reliable_window_;
 
   QUIC_DVLOG(2) << "FreqCCv4: CRUISE full-load window ["
                 << (window_start - QuicTime::Zero()).ToMicroseconds() / 1000000.0
@@ -2733,28 +1983,22 @@ FreqCCv4Sender::CruiseWindowResult FreqCCv4Sender::BuildCruiseWindowResult(
   return result;
 }
 
-FreqCCv4Sender::EffectiveBwSelectionResult
-FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
+FreqCCv4Sender::TrustedBwSelectionResult
+FreqCCv4Sender::RunTrustedBwSelection(QuicTime now) {
   const auto compute_start = std::chrono::steady_clock::now();
-  EffectiveBwSelectionResult selection = {
+  TrustedBwSelectionResult selection = {
       BandwidthEstimate(),
       QuicBandwidth::Zero(),
       false,
       0.0,
       kTrustedBwSourceNone,
-      QuicBandwidth::Zero(),
+      0.0,
+      0.0,
+      0.0,
       false,
-      BandwidthEstimate(),
-      BandwidthEstimate(),
-      true,
-      kEffectiveBwSourceNativeFallback,
-      1.0,
-      1.0,
       false,
-      QuicBandwidth::Zero(),
-      0.0,
-      0.0,
-      0.0,
+      false,
+      kLimitingSpectralSignalEqual,
       false,
       false,
       0,
@@ -2768,30 +2012,14 @@ FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
     } else if (result.window_source == "MERGED") {
       ++selection.merged_window_count;
     }
-    if (result.is_full_load_candidate && !result.spectral_validity_pass) {
+    if (!result.dual_signal_spectral_gate_pass) {
       ++selection.spectral_invalid_count;
-    }
-  }
-
-  selection.max_drate = cruise_max_drate_;
-  selection.max_drate_valid = cruise_max_drate_valid_;
-  if (!selection.max_drate_valid) {
-    // Prefer fresh non-app-limited CRUISE samples. If none were observed, fall
-    // back to delivery_rate_history_, which may include app-limited samples in
-    // this ns-3 tree and is used only to avoid an empty MaxDRate trace.
-    const auto drate_samples =
-        SelectRateSamples(delivery_rate_history_, cruise_start_time_, now);
-    for (const auto& sample : drate_samples) {
-      if (!selection.max_drate_valid || sample.rate > selection.max_drate) {
-        selection.max_drate = sample.rate;
-        selection.max_drate_valid = true;
-      }
     }
   }
 
   auto finish = [&selection, compute_start]() {
     const auto compute_end = std::chrono::steady_clock::now();
-    selection.effective_bw_selection_compute_us =
+    selection.trusted_bw_selection_compute_us =
         static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 compute_end - compute_start)
@@ -2799,16 +2027,17 @@ FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
     return selection;
   };
 
-  if (selection.native_bw.IsZero() || bbr_stable_ || !cruise_freq_tool_active_) {
-    selection.raw_effective_bw = selection.native_bw;
-    selection.effective_bw = selection.native_bw;
+  if (!cruise_freq_tool_active_ ||
+      (enable_convergence_gate_control_ && bbr_stable_)) {
     return finish();
   }
 
   auto pick_best = [this](const std::string& source) -> CruiseWindowResult* {
     CruiseWindowResult* best = nullptr;
     for (CruiseWindowResult& result : current_cruise_windows_) {
-      if (result.window_source != source || !IsReliableSpectralWindow(result)) {
+      if (result.window_source != source ||
+          !result.dual_signal_spectral_gate_pass ||
+          !IsReliableSpectralWindow(result)) {
         continue;
       }
       if (best == nullptr ||
@@ -2836,7 +2065,8 @@ FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
         if (normal.window_source != "NORMAL") {
           continue;
         }
-        const TimeDelta normal_duration = normal.window_end - normal.window_start;
+        const TimeDelta normal_duration =
+            normal.window_end - normal.window_start;
         if (normal_duration.ToMicroseconds() <= 0) {
           continue;
         }
@@ -2856,19 +2086,23 @@ FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
                                     .ToMicroseconds()) /
             1000000.0;
         CruiseWindowResult merged = BuildCruiseWindowResult(
-            normal.window_start, merged_end, min_rtt, merged_duration_s,
+            normal.window_start,
+            merged_end,
+            min_rtt,
+            merged_duration_s,
             "MERGED");
         const double trend_ratio =
             ComputeRateTrendRatio(merged.window_start, merged.window_end);
-        if (trend_ratio > merged_window_max_trend_ratio_) {
+        if (!std::isfinite(trend_ratio) ||
+            trend_ratio > merged_window_max_trend_ratio_) {
           merged.low_confidence = true;
-          merged.spectral_validity_pass = false;
+          merged.is_full_load_candidate = false;
           merged.spectral_invalid_reason =
               AppendReason(merged.spectral_invalid_reason,
                            "merged_trend_high");
           merged.full_load_quality_v2 = 0.0;
         }
-        if (merged.is_full_load_candidate && !merged.spectral_validity_pass) {
+        if (!merged.dual_signal_spectral_gate_pass) {
           ++selection.spectral_invalid_count;
         }
         current_cruise_windows_.push_back(merged);
@@ -2883,45 +2117,42 @@ FreqCCv4Sender::RunEffectiveBwSelection(QuicTime now) {
     }
   }
 
-  if (best != nullptr) {
-    const double native_bps =
-        static_cast<double>(selection.native_bw.ToBitsPerSecond());
-    const double trusted_bps = best->drate_mean_kbps * 1000.0;
-    const double max_drate_bps =
-        selection.max_drate_valid
-            ? static_cast<double>(selection.max_drate.ToBitsPerSecond())
-            : native_bps;
-    const double raw_effective_bps =
-        (1.0 - w_freq_) * max_drate_bps + w_freq_ * trusted_bps;
-    const double raw_scale = raw_effective_bps / native_bps;
-    const double confidence =
-        Clamp01(confidence_discount * best->full_load_quality_v2);
-    selection.trusted_bw = BandwidthFromBps(trusted_bps);
-    selection.trusted_bw_valid = true;
-    selection.trusted_bw_conf = confidence;
-    selection.trusted_bw_source = source;
-    selection.raw_effective_bw = BandwidthFromBps(raw_effective_bps);
-    selection.effective_bw = selection.raw_effective_bw;
-    selection.effective_bw_valid = true;
-    selection.effective_bw_source = source;
-    selection.raw_scale = raw_scale;
-    selection.clamped_scale = raw_scale;
+  if (best == nullptr || !best->dual_signal_spectral_gate_pass) {
     return finish();
   }
 
-  if (TryMedianGuard(cruise_start_time_, now, selection.native_bw,
-                     &selection)) {
+  const double trusted_bps = best->drate_mean_kbps * 1000.0;
+  if (!std::isfinite(trusted_bps) || trusted_bps <= 0.0) {
     return finish();
   }
-
-  selection.raw_effective_bw = selection.native_bw;
-  selection.effective_bw = selection.native_bw;
-  selection.effective_bw_source = kEffectiveBwSourceNativeFallback;
-  selection.raw_scale = 1.0;
-  selection.clamped_scale = 1.0;
+  selection.trusted_bw = BandwidthFromBps(trusted_bps);
+  selection.trusted_bw_valid = !selection.trusted_bw.IsZero();
+  selection.trusted_bw_conf =
+      Clamp01(confidence_discount * best->full_load_quality_v2);
+  selection.trusted_bw_source = source;
+  selection.drate_spectral_integrity_score =
+      best->drate_spectral_integrity_score;
+  selection.srtt_spectral_integrity_score =
+      best->srtt_spectral_integrity_score;
+  selection.joint_spectral_integrity_score =
+      std::min(selection.drate_spectral_integrity_score,
+               selection.srtt_spectral_integrity_score);
+  selection.drate_spectral_gate_pass =
+      best->drate_spectral_gate_pass;
+  selection.srtt_spectral_gate_pass =
+      best->srtt_spectral_gate_pass;
+  selection.dual_signal_spectral_gate_pass =
+      selection.drate_spectral_gate_pass &&
+      selection.srtt_spectral_gate_pass;
+  selection.limiting_spectral_signal =
+      best->limiting_spectral_signal;
+  if (!selection.dual_signal_spectral_gate_pass) {
+    selection.trusted_bw = QuicBandwidth::Zero();
+    selection.trusted_bw_valid = false;
+    selection.trusted_bw_source = kTrustedBwSourceNone;
+  }
   return finish();
 }
-
 void FreqCCv4Sender::RankCruiseWindows(
     const CruiseWindowResult* selected_window) {
   (void)selected_window;
@@ -2954,15 +2185,9 @@ void FreqCCv4Sender::RankCruiseWindows(
 
 void FreqCCv4Sender::FinalizeCruise(QuicTime now) {
   RunDueCruiseWindowAnalysis(now);
-  const EffectiveBwSelectionResult selection =
-      RunEffectiveBwSelection(now);
-  const bool was_unstable_episode =
-      !bbr_stable_ && unstable_episode_active_;
-  PublishEffectiveBwSelection(selection, !was_unstable_episode);
-  AgeFreqRefOnCruiseFinalize(selection.trusted_bw_valid &&
-                                 was_unstable_episode,
-                             selection.trusted_bw_valid &&
-                                 !was_unstable_episode);
+  const TrustedBwSelectionResult selection =
+      RunTrustedBwSelection(now);
+  PublishTrustedBwSelection(selection);
   RankCruiseWindows(nullptr);
 
   for (const CruiseWindowResult& result : current_cruise_windows_) {
@@ -3021,11 +2246,15 @@ void FreqCCv4Sender::EmitCruiseWindowTrace(
 	      << result.label << ","
 	      << result.full_load_quality_v1 << ","
 	      << result.full_load_quality_v2 << ","
-	      << result.spectral_validity_score << ","
-	      << (result.spectral_validity_pass ? "true" : "false") << ","
+	      << result.drate_spectral_integrity_score << ","
+	      << result.srtt_spectral_integrity_score << ","
+	      << result.joint_spectral_integrity_score << ","
+	      << (result.drate_spectral_gate_pass ? "true" : "false") << ","
+	      << (result.srtt_spectral_gate_pass ? "true" : "false") << ","
+	      << (result.dual_signal_spectral_gate_pass ? "true" : "false") << ","
+	      << result.limiting_spectral_signal << ","
 	      << result.spectral_invalid_reason << ","
 	      << result.drate_snr << ","
-	      << result.srtt_snr << ","
 	      << result.drate_band_energy_rel << ","
 	      << result.srtt_band_energy_rel << ","
 	      << result.drate_band_peak_rel << ","
@@ -3091,8 +2320,11 @@ void FreqCCv4Sender::EmitCruiseSummaryTrace(QuicTime now) const {
           : static_cast<double>((best->window_end - QuicTime::Zero())
                                     .ToMicroseconds()) /
                 1000000.0;
-  const uint64_t cruise_end_max_bandwidth_kbps =
+  const uint64_t cruise_end_native_bw_kbps =
       BandwidthEstimate().ToKBitsPerSecond();
+  const QuicBandwidth summary_selection_native_bw =
+      !selection_native_bw_.IsZero() ? selection_native_bw_
+                                     : BandwidthEstimate();
   const double fair_share_bandwidth_kbps =
       static_cast<double>(fair_share_bandwidth_bps_) / 1000.0;
 
@@ -3109,19 +2341,28 @@ void FreqCCv4Sender::EmitCruiseSummaryTrace(QuicTime now) const {
       << (best != nullptr ? best->srtt_freq_score : 0.0) << ","
       << (best != nullptr ? best->srtt_waveform_quality : 0.0) << ","
       << (best != nullptr ? best->drate_amplitude_score : 0.0) << ","
-      << (best != nullptr ? best->srtt_amplitude_score : 0.0) << ","
+	      << (best != nullptr ? best->srtt_amplitude_score : 0.0) << ","
 	      << (best != nullptr ? best->drate_mean_kbps : 0.0) << ","
-	      << cruise_end_max_bandwidth_kbps << ","
+	      << cruise_end_native_bw_kbps << ","
 	      << fair_share_bandwidth_kbps << ","
 	      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
 	      << trusted_bw_source_ << ","
 	      << (best != nullptr ? best->full_load_quality_v1 : 0.0) << ","
 	      << (best != nullptr ? best->full_load_quality_v2 : 0.0) << ","
-	      << (best != nullptr ? best->spectral_validity_score : 0.0) << ","
-	      << (best != nullptr && best->spectral_validity_pass ? "true" : "false") << ","
+	      << (best != nullptr ? best->drate_spectral_integrity_score : 0.0) << ","
+	      << (best != nullptr ? best->srtt_spectral_integrity_score : 0.0) << ","
+	      << (best != nullptr ? best->joint_spectral_integrity_score : 0.0) << ","
+	      << (best != nullptr && best->drate_spectral_gate_pass ? "true" : "false") << ","
+	      << (best != nullptr && best->srtt_spectral_gate_pass ? "true" : "false") << ","
+	      << (best != nullptr && best->dual_signal_spectral_gate_pass ? "true" : "false") << ","
+	      << (best != nullptr ? best->limiting_spectral_signal
+	                          : kLimitingSpectralSignalEqual) << ","
 	      << (best != nullptr ? best->spectral_invalid_reason : "none") << ","
-	      << (cruise_max_drate_valid_ ? cruise_max_drate_.ToBitsPerSecond() : 0) << ","
-	      << (effective_bw_valid_ ? effective_bw_.ToBitsPerSecond() : 0);
+	      << summary_selection_native_bw.ToBitsPerSecond() << ","
+	      << (trusted_bw_valid_ ? "true" : "false") << ","
+	      << trusted_bw_cruise_id_ << ","
+	      << (trusted_bw_fresh_ ? "true" : "false") << ","
+	      << (trusted_bw_application_valid_ ? "true" : "false");
   cruise_load_trace_cb_(cruise_start_s,
                         cruise_end_s,
                         0.0,
@@ -3336,7 +2577,14 @@ FreqCCv4Sender::SpectrumProfile FreqCCv4Sender::BuildSpectrumProfile(
     double ref_freq_hz) const {
   SpectrumProfile profile{
       0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0, 0.0, {}, false};
-  if (values.size() < 8 || sample_step_s <= 0.0 || ref_freq_hz <= 0.0) {
+  if (values.size() < 8 || !std::isfinite(sample_step_s) ||
+      sample_step_s <= 0.0 || !std::isfinite(ref_freq_hz) ||
+      ref_freq_hz <= 0.0 ||
+      ref_freq_hz >= 0.5 / sample_step_s ||
+      static_cast<double>(values.size()) * sample_step_s * ref_freq_hz < 2.0 ||
+      std::any_of(values.begin(), values.end(), [](double value) {
+        return !std::isfinite(value);
+      })) {
     return profile;
   }
 
@@ -3366,6 +2614,11 @@ FreqCCv4Sender::SpectrumProfile FreqCCv4Sender::BuildSpectrumProfile(
   }
 
   fftw_plan plan = fftw_plan_dft_r2c_1d(nfft, in, out, FFTW_ESTIMATE);
+  if (plan == nullptr) {
+    fftw_free(in);
+    fftw_free(out);
+    return profile;
+  }
   fftw_execute(plan);
 
 	  const double fs = 1.0 / sample_step_s;
@@ -3378,6 +2631,12 @@ FreqCCv4Sender::SpectrumProfile FreqCCv4Sender::BuildSpectrumProfile(
   for (int k = k_min; k <= k_max; ++k) {
     const double mag =
         std::sqrt(out[k][0] * out[k][0] + out[k][1] * out[k][1]);
+    if (!std::isfinite(mag)) {
+      fftw_destroy_plan(plan);
+      fftw_free(in);
+      fftw_free(out);
+      return profile;
+    }
     magnitudes[k] = mag;
     total_energy += mag;
   }
@@ -3414,7 +2673,8 @@ FreqCCv4Sender::SpectrumProfile FreqCCv4Sender::BuildSpectrumProfile(
                        noise_magnitudes.begin() + mid,
                        noise_magnitudes.end());
       profile.noise_floor = noise_magnitudes[mid];
-      profile.noise_floor_valid = profile.noise_floor > 1e-12;
+      profile.noise_floor_valid = std::isfinite(profile.noise_floor) &&
+                                  profile.noise_floor >= 0.0;
     }
 	    profile.peak_freq_hz = peak_k * freq_step;
     profile.peak_width_hz = band_high_hz - band_low_hz;
@@ -3806,6 +3066,7 @@ double FreqCCv4Sender::ComputeCongestionScore(QuicTime window_start,
 }
 
 double FreqCCv4Sender::Clamp01(double value) {
+  if (!std::isfinite(value)) return 0.0;
   if (value < 0.0) return 0.0;
   if (value > 1.0) return 1.0;
   return value;

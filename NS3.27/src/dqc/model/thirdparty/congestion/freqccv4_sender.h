@@ -47,12 +47,9 @@ enum class FreqCCv4GateTraceMode {
   kFull,
 };
 
-enum class FreqCCv4ScaleMode {
-  kCurrentBidirectional,
-  kDownwardOnly,
-  kAsymmetric,
-  kHighConfidenceOnly,
-  kEarlyEpisodeOnly,
+enum class FreqCCv4PacingBaseSource {
+  kNativeBbr,
+  kTrustedBw,
 };
 
 struct FreqBbrFlowConfig {
@@ -73,7 +70,8 @@ struct FreqBbrConfig {
   uint32_t stability_stable_rounds = 3;
   double stability_full_pipe_growth_threshold = 1.25;
 
-  double spectral_min_validity = 0.25;
+  double spectral_drate_integrity_threshold = 0.25;
+  double spectral_srtt_integrity_threshold = 0.25;
   double spectral_min_drate_snr = 1.5;
   double spectral_min_srtt_snr = 1.5;
   double spectral_max_drate_width_ratio = 2.0;
@@ -94,34 +92,12 @@ struct FreqBbrConfig {
   double merged_rescue_max_trend_ratio = 0.20;
   double merged_rescue_confidence_discount = 0.8;
 
-  bool median_guard_enable = true;
-  uint32_t median_guard_min_samples = 16;
-  double median_guard_max_iqr_ratio = 0.35;
-  double median_guard_max_trend_ratio = 0.20;
-  double median_guard_margin = 0.05;
-  double median_guard_scale_min = 0.85;
-  double median_guard_scale_max = 1.0;
-  double median_guard_weight_alpha = 0.30;
-
-  std::string effective_bw_scale_mode = "asymmetric";
-  double effective_bw_up_beta = 0.25;
-  double effective_bw_scale_min = 0.75;
-  double effective_bw_scale_max = 1.05;
-  double effective_bw_high_conf_threshold = 0.8;
-  bool effective_bw_phase_specific_application = true;
-  bool effective_bw_cruise_uses_native_bw = true;
-  bool effective_bw_allow_stale_effective_bw = false;
-  bool effective_bw_apply_to_refill = true;
-  bool effective_bw_apply_to_up = true;
-  bool effective_bw_apply_to_down = true;
-  bool effective_bw_apply_to_cruise = false;
-  bool effective_bw_clear_on_cruise_start = true;
-  bool effective_bw_clear_on_stable_closure = true;
+  bool trusted_bw_clear_on_cruise_start = true;
 
   std::string trace_gate_trace_mode = "round_only";
   uint64_t trace_gate_trace_sample_interval_us = 10000;
   bool trace_enable_cruise_window_trace = true;
-  bool trace_enable_effective_bw_selection_trace = true;
+  bool trace_enable_trusted_bw_selection_trace = true;
 };
 
 class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
@@ -143,20 +119,16 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   void SetCruiseWindowConfig(double min_cycles_per_window,
                              double window_step_ratio);
   void SetFairShareBandwidthBps(uint64_t fair_share_bps);
+  void SetCruiseBaselineCapBps(uint64_t cap_bps);
   void SetConvergenceGateTraceEnabled(bool enabled);
   void SetConvergenceGateControlEnabled(bool enabled);
-  void SetFreqRefPacingControlEnabled(bool enabled);
-  void SetFreqRefScaleMode(FreqCCv4ScaleMode mode);
-  void SetFreqRefHighConfidenceThreshold(double threshold);
-  void SetFreqRefUpBeta(double beta);
-  void SetEffectiveBwScaleBounds(double scale_min, double scale_max);
   void ConfigureFreqBbr(const FreqBbrConfig& config);
   void SetTraceFlowId(uint32_t flow_id);
   void SetGateTraceMode(FreqCCv4GateTraceMode mode,
                         uint64_t sample_interval_us);
   static bool RunConvergenceGateStateMachineSelfTest(std::ostream& os);
-  static bool RunEffectiveBwSelectionSelfTest(std::ostream& os);
-  static bool RunEffectiveBwPhaseApplicationSelfTest(std::ostream& os);
+  static bool RunTrustedBwSelectionSelfTest(std::ostream& os);
+  static bool RunTrustedBwPacingSelfTest(std::ostream& os);
 
   CongestionControlType GetCongestionControlType() const override {
     return kFreqCCv4;
@@ -194,13 +166,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   typedef std::function<void(double time_s,
                              uint64_t native_pacing_bps,
                              uint64_t final_pacing_bps,
-                             uint64_t b_native_bps,
-                             uint64_t b_target_bps,
-                             double raw_scale,
-                             double clamped_scale,
-                             bool scale_applied,
+                             uint64_t current_native_bw_bps,
+                             uint64_t pacing_base_bw_bps,
+                             const std::string& pacing_base_source,
+                             double phase_pacing_gain,
                              bool should_oscillate,
-                             bool f_ref_valid)> PacingAuditTraceCallback;
+                             bool trusted_bw_valid)> PacingAuditTraceCallback;
   void SetPacingAuditTraceCallback(PacingAuditTraceCallback cb) {
     pacing_audit_trace_cb_ = cb;
   }
@@ -298,8 +269,13 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     double srtt_width_ratio;
     double drate_phase_coherence;
     double srtt_phase_coherence;
-    double spectral_validity_score;
-    bool spectral_validity_pass;
+    double drate_spectral_integrity_score;
+    double srtt_spectral_integrity_score;
+    double joint_spectral_integrity_score;
+    bool drate_spectral_gate_pass;
+    bool srtt_spectral_gate_pass;
+    bool dual_signal_spectral_gate_pass;
+    const char* limiting_spectral_signal;
     std::string spectral_invalid_reason;
     std::string window_source;
     int full_load_rank_in_cruise;
@@ -308,28 +284,22 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     std::string label;
   };
 
-  struct EffectiveBwSelectionResult {
+  struct TrustedBwSelectionResult {
     QuicBandwidth native_bw;
     QuicBandwidth trusted_bw;
     bool trusted_bw_valid;
     double trusted_bw_conf;
     const char* trusted_bw_source;
-    QuicBandwidth max_drate;
-    bool max_drate_valid;
-    QuicBandwidth raw_effective_bw;
-    QuicBandwidth effective_bw;
-    bool effective_bw_valid;
-    const char* effective_bw_source;
-    double raw_scale;
-    double clamped_scale;
-    bool median_guard_valid;
-    QuicBandwidth median_guard_bw;
-    double median_guard_iqr_ratio;
-    double median_guard_trend_ratio;
-    double median_guard_weight;
+    double drate_spectral_integrity_score;
+    double srtt_spectral_integrity_score;
+    double joint_spectral_integrity_score;
+    bool drate_spectral_gate_pass;
+    bool srtt_spectral_gate_pass;
+    bool dual_signal_spectral_gate_pass;
+    const char* limiting_spectral_signal;
     bool merged_rescue_attempted;
     bool merged_rescue_success;
-    uint64_t effective_bw_selection_compute_us;
+    uint64_t trusted_bw_selection_compute_us;
     size_t normal_window_count;
     size_t merged_window_count;
     size_t spectral_invalid_count;
@@ -360,9 +330,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
                                              double window_duration_s,
                                              const std::string& window_source);
   void FinalizeCruise(QuicTime now);
-  EffectiveBwSelectionResult RunEffectiveBwSelection(QuicTime now);
-  void PublishEffectiveBwSelection(const EffectiveBwSelectionResult& selection,
-                                   bool stage_when_stable);
+  TrustedBwSelectionResult RunTrustedBwSelection(QuicTime now);
+  void PublishTrustedBwSelection(const TrustedBwSelectionResult& selection);
   void RankCruiseWindows(const CruiseWindowResult* selected_window);
   void EmitCruiseWindowTrace(const CruiseWindowResult& result);
   void EmitCruiseSummaryTrace(QuicTime now) const;
@@ -376,58 +345,14 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   void UpdateReconvergenceEvidence(QuicBandwidth completed_d_round,
                                    bool completed_d_valid);
   void UpdateFreqWeightAndToolState();
-  void ClearActiveFreqRef(const char* reason);
-  void ActivateStagedFreqRefForEpisode();
-  void AgeFreqRefOnCruiseFinalize(bool refreshed_active_ref,
-                                  bool refreshed_staged_ref);
+  void ClearTrustedBw(const char* reason);
+  void ClearTrustedBwApplication(const char* reason) const;
   bool IsReliableSpectralWindow(const CruiseWindowResult& result) const;
-  bool TryMedianGuard(QuicTime start,
-                      QuicTime end,
-                      QuicBandwidth native_bw,
-                      EffectiveBwSelectionResult* selection) const;
   double ComputeRateTrendRatio(QuicTime start, QuicTime end) const;
-  double ApplyFreqRefScaleMode(double raw_scale,
-                               double confidence,
-                               bool* scale_clamped_low,
-                               bool* scale_clamped_high,
-                               bool* scale_applied) const;
-  struct EffectiveBwPhaseApplicationDecision {
-    double raw_scale;
-    double adjusted_scale;
-    double clamped_scale;
-    bool scale_clamped_low;
-    bool scale_clamped_high;
-    bool scale_applied;
-    bool application_valid;
-    bool stale_effective_bw_used;
-    const char* application_phase;
-  };
-  EffectiveBwPhaseApplicationDecision GetEffectiveBwPhaseApplicationDecision(
-      Bbr2ProbeBwMode::CyclePhase phase,
-      QuicBandwidth native_bw) const;
-  static EffectiveBwPhaseApplicationDecision
-  ComputeEffectiveBwPhaseApplicationDecisionForTest(
-      Bbr2ProbeBwMode::CyclePhase phase,
-      QuicBandwidth native_bw,
-      QuicBandwidth effective_bw,
-      bool effective_bw_valid,
-      const char* effective_bw_source,
-      bool phase_specific_application,
-      bool application_valid,
-      bool allow_stale_effective_bw,
-      bool apply_to_refill,
-      bool apply_to_up,
-      bool apply_to_down,
-      bool apply_to_cruise,
-      double normal_scale_min,
-      double normal_scale_max,
-      double up_beta,
-      double median_scale_min,
-      double median_scale_max);
-  void ClearEffectiveBwApplication(const char* reason) const;
-  bool IsEffectiveBwApplicationPhase(Bbr2ProbeBwMode::CyclePhase phase) const;
+  bool IsTrustedBwApplicationPhase(Bbr2ProbeBwMode::CyclePhase phase) const;
   bool IsCruisePhase(Bbr2ProbeBwMode::CyclePhase phase) const;
   static const char* PhaseApplicationName(Bbr2ProbeBwMode::CyclePhase phase);
+  static const char* PacingBaseSourceName(FreqCCv4PacingBaseSource source);
   double ComputePhaseCoherence(const std::vector<double>& values,
                                double sample_step_s,
                                double ref_freq_hz,
@@ -443,16 +368,11 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
       double previous_v_round,
       bool just_exited) const;
   void EmitPacingTrace(QuicBandwidth b_native,
-                       QuicBandwidth b_target,
-                       QuicBandwidth effective_base_pacing,
+                       QuicBandwidth pacing_base_bw,
+                       FreqCCv4PacingBaseSource pacing_base_source,
 	                       QuicBandwidth native_pacing,
 	                       QuicBandwidth final_pacing,
-	                       double scale,
-	                       double raw_scale,
-                       double adjusted_scale,
-	                       bool scale_clamped_low,
-	                       bool scale_clamped_high,
-                       bool scale_applied,
+	                       double phase_pacing_gain,
 	                       int64_t modulation_amp_bps,
 	                       int64_t modulation_amp_eff_bps,
                        double triangle_wave,
@@ -467,16 +387,11 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
                           double previous_v_round,
                           bool just_exited,
                           QuicBandwidth b_native,
-                          QuicBandwidth b_target,
-                          QuicBandwidth effective_base_pacing,
+	                          QuicBandwidth pacing_base_bw,
+	                          FreqCCv4PacingBaseSource pacing_base_source,
 	                          QuicBandwidth native_pacing,
 	                          QuicBandwidth final_pacing,
-	                          double scale,
-	                          double raw_scale,
-                          double adjusted_scale,
-	                          bool scale_clamped_low,
-	                          bool scale_clamped_high,
-                          bool scale_applied,
+	                          double phase_pacing_gain,
 	                          int64_t modulation_amp_bps,
                           int64_t modulation_amp_eff_bps,
                           double triangle_wave,
@@ -558,6 +473,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   double min_full_load_quality_for_reliable_window_;
   double default_ecn_congestion_ratio_;
   uint64_t fair_share_bandwidth_bps_;
+  uint64_t cruise_baseline_cap_bps_;
 
   std::deque<FreqCCv4RateSample> sender_rate_history_;
   std::deque<FreqCCv4RateSample> delivery_rate_history_;
@@ -565,10 +481,6 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   std::deque<AckWindowSample> ack_window_history_;
   std::vector<CruiseWindowResult> current_cruise_windows_;
   bool cruise_freq_tool_active_;
-  QuicBandwidth cruise_max_drate_;
-  bool cruise_max_drate_valid_;
-  QuicBandwidth round_max_drate_;
-  bool round_max_drate_valid_;
 
   CruiseLoadTraceCallback cruise_load_trace_cb_;
   PacingAuditTraceCallback pacing_audit_trace_cb_;
@@ -588,73 +500,39 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   bool trusted_bw_valid_;
   double trusted_bw_conf_;
   const char* trusted_bw_source_;
-  QuicBandwidth f_ref_;
-  bool f_ref_valid_;
-  double f_conf_;
-  uint32_t f_ref_age_cruise_windows_;
-  QuicBandwidth staged_trusted_bw_;
-  bool staged_trusted_bw_valid_;
-  double staged_trusted_bw_conf_;
-  const char* staged_trusted_bw_source_;
-  QuicBandwidth staged_f_ref_;
-  bool staged_f_ref_valid_;
-  double staged_f_conf_;
-  uint32_t staged_f_ref_age_cruise_windows_;
+  uint64_t trusted_bw_cruise_id_;
+  mutable bool trusted_bw_fresh_;
+  mutable bool trusted_bw_application_valid_;
+  mutable bool trusted_bw_ready_for_post_cruise_;
+  mutable const char* trusted_bw_application_phase_;
+  mutable bool trusted_bw_cleared_on_cruise_start_;
+  mutable const char* trusted_bw_invalid_reason_;
   uint64_t unstable_episode_id_;
   bool unstable_episode_active_;
-  const char* f_ref_invalid_reason_;
   double w_freq_;
-  mutable QuicBandwidth native_bw_;
-  mutable QuicBandwidth raw_effective_bw_;
-  mutable QuicBandwidth effective_bw_;
-  mutable bool effective_bw_valid_;
-  mutable const char* effective_bw_source_;
-  mutable double effective_bw_raw_scale_;
-  mutable double effective_bw_clamped_scale_;
-  mutable bool effective_bw_application_valid_;
-  mutable const char* effective_bw_generation_phase_;
-  mutable const char* effective_bw_application_phase_;
-  mutable bool effective_bw_ready_for_post_cruise_;
-  mutable bool effective_bw_applied_in_refill_;
-  mutable bool effective_bw_applied_in_up_;
-  mutable bool effective_bw_applied_in_down_;
-  mutable bool effective_bw_cleared_on_cruise_start_;
-  mutable bool stale_effective_bw_used_;
-  mutable QuicBandwidth b_eff_;
-  mutable bool b_eff_valid_;
-  mutable bool median_guard_valid_;
-  mutable QuicBandwidth median_guard_bw_;
-  mutable double median_guard_iqr_ratio_;
-  mutable double median_guard_trend_ratio_;
-  mutable double median_guard_weight_;
+  mutable QuicBandwidth selection_native_bw_;
+  mutable double drate_spectral_integrity_score_;
+  mutable double srtt_spectral_integrity_score_;
+  mutable double joint_spectral_integrity_score_;
+  mutable bool drate_spectral_gate_pass_;
+  mutable bool srtt_spectral_gate_pass_;
+  mutable bool dual_signal_spectral_gate_pass_;
+  mutable const char* limiting_spectral_signal_;
   mutable bool merged_rescue_attempted_;
   mutable bool merged_rescue_success_;
-  mutable uint64_t effective_bw_selection_compute_us_;
+  mutable uint64_t trusted_bw_selection_compute_us_;
   mutable size_t normal_window_count_;
   mutable size_t merged_window_count_;
   mutable size_t spectral_invalid_count_;
   bool enable_convergence_gate_trace_;
   bool enable_convergence_gate_control_;
-  bool enable_freq_ref_pacing_control_;
-  FreqCCv4ScaleMode freq_ref_scale_mode_;
-  double freq_ref_high_conf_threshold_;
-  double freq_ref_up_beta_;
-  double effective_bw_scale_min_;
-  double effective_bw_scale_max_;
-  bool effective_bw_phase_specific_application_;
-  bool effective_bw_cruise_uses_native_bw_;
-  bool effective_bw_allow_stale_effective_bw_;
-  bool effective_bw_apply_to_refill_;
-  bool effective_bw_apply_to_up_;
-  bool effective_bw_apply_to_down_;
-  bool effective_bw_apply_to_cruise_;
-  bool effective_bw_clear_on_cruise_start_;
-  bool effective_bw_clear_on_stable_closure_;
+  bool trusted_bw_clear_on_cruise_start_;
   double stable_single_round_exit_threshold_;
   double stable_consecutive_exit_threshold_;
   uint32_t stable_rounds_;
   double stable_full_pipe_growth_threshold_;
-  double min_spectral_validity_;
+  double drate_spectral_integrity_threshold_;
+  double srtt_spectral_integrity_threshold_;
   double min_drate_snr_;
   double min_srtt_snr_;
   double max_drate_width_ratio_;
@@ -673,14 +551,6 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   uint32_t max_merged_passes_;
   double merged_window_max_trend_ratio_;
   double merged_confidence_discount_;
-  bool median_guard_enabled_;
-  uint32_t median_guard_min_samples_;
-  double median_guard_max_iqr_ratio_;
-  double median_guard_max_trend_ratio_;
-  double median_guard_margin_;
-  double median_guard_scale_min_;
-  double median_guard_scale_max_;
-  double median_guard_weight_alpha_;
   uint32_t trace_flow_id_;
   FreqCCv4GateTraceMode gate_trace_mode_;
   TimeDelta gate_trace_sample_interval_;
@@ -688,7 +558,6 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
 
   static constexpr size_t kMaxHistorySamples = 20000;
   static constexpr uint32_t kStableRounds = 3;
-  static constexpr uint32_t kMaxFreqRefAgeCruiseWindows = 2;
   static constexpr double kDefaultOscillationFreqHz = 1.0;
   static constexpr double kSampleStepSec = 0.001;
   static constexpr double kMinDrateFreqScoreForCandidate = 0.60;
