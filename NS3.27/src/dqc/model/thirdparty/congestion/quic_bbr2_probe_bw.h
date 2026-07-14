@@ -63,6 +63,7 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeBwMode final : public Bbr2ModeBase {
  private:
   const Bbr2Params& Params() const;
   float PacingGainForPhase(CyclePhase phase) const;
+  float CwndGainForPhase(CyclePhase phase) const;
 
   void UpdateProbeUp(QuicByteCount prior_in_flight,
                      const Bbr2CongestionEvent& congestion_event);

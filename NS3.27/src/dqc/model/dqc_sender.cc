@@ -1015,7 +1015,8 @@ void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
         }
     }
 
-    ConfigureFreqCC(freq_hz, config.default_amplitude_mode, fixed_mbps);
+    ConfigureFreqCC(freq_hz, config.default_amplitude_mode, fixed_mbps,
+                    "after_drain", config.waveform_recv_signal_mode);
 
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();

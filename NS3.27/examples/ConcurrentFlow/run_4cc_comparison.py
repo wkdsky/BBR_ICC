@@ -192,6 +192,8 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
     print(f"共享 bottleneck 出口 buffer：{cfg.switch_buffer_bytes} bytes；0 表示按 {cfg.switch_buffer_bdp} BDP 自动计算")
     print(f"端侧/access 队列：{cfg.endpoint_queue_bytes} bytes")
     print(f"仿真时长：{cfg.sim_time} s")
+    print(f"heavy trace：{cfg.enable_heavy_trace}")
+    print(f"FreqCCv4 gate trace：{cfg.enable_convergence_gate_trace}, mode={cfg.gate_trace_mode}")
     print(f"log 根目录：{cfg.log_root}")
     print(f"本次实验目录：{cfg.trace_path}")
     print("本次实验目录内会保存：run.log、command.txt、config.json、ns-3 trace 文件")
@@ -331,6 +333,12 @@ ALGORITHM_PARAMS = {
         "operating_point_identifier": "OPIv2",
         "notes": "F-BBR 的兼容源文件名仍为 freqccv4_sender.cc；默认使用 coded-sine OPIv2。",
     },
+    "FreqCCv4": {
+        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
+        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
+        "algorithm": "FreqCCv4",
+        "notes": "FreqCCv4 使用当前 freqccv4_default.conf，默认 CRUISE detector 为 time_waveform。",
+    },
 }
 
 
@@ -385,6 +393,8 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.enable_trace = True
     cfg.enable_heavy_trace = args.enable_heavy_trace
     cfg.enable_queue_trace = True
+    cfg.enable_convergence_gate_trace = args.enable_convergence_gate_trace
+    cfg.gate_trace_mode = args.gate_trace_mode
     cfg.data_generator_batch = args.data_generator_batch
     cfg.stream_buffer_bytes = args.stream_buffer_bytes
     cfg.freqccv4_config = args.freqccv4_config
@@ -396,10 +406,10 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     return cfg
 
 
-def scenario_metadata(args: argparse.Namespace) -> Dict[str, object]:
+def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str, object]:
     return {
         "topology": "n sender/receiver pairs in a dumbbell topology; every flow shares one left-switch -> right-switch bottleneck link.",
-        "ccs": list(CCS),
+        "ccs": list(ccs),
         "n_flows_per_subexperiment": args.n_flows,
         "sim_time_s": args.sim_time,
         "start_times_s": args.start_times,
@@ -408,13 +418,15 @@ def scenario_metadata(args: argparse.Namespace) -> Dict[str, object]:
         "freqccv4_cruise_base_caps": args.freqccv4_cruise_base_caps,
         "data_generator_batch": args.data_generator_batch,
         "stream_buffer_bytes": args.stream_buffer_bytes,
+        "enable_convergence_gate_trace": args.enable_convergence_gate_trace,
+        "gate_trace_mode": args.gate_trace_mode,
         "access_rate": args.access_rate,
         "shared_bottleneck_rate": args.service_rate,
         "rtt_design": f"RTT ~= 2 * (2 * {args.access_delay_ms}ms + {args.service_delay_ms}ms)",
         "switch_buffer": {
             "bytes": args.switch_buffer_bytes,
             "bdp_multiplier_when_bytes_is_zero": args.switch_buffer_bdp,
-            "note": "0.5 BDP follows the shallow-buffer style used by oBBR; endpoint queues remain large.",
+            "note": f"Switch buffer is configured as {args.switch_buffer_bdp} BDP; endpoint queues remain large.",
         },
         "metrics": [
             "aggregate throughput over time from *_good.txt",
@@ -430,13 +442,18 @@ def scenario_metadata(args: argparse.Namespace) -> Dict[str, object]:
     }
 
 
-def write_metadata(root: Path, args: argparse.Namespace) -> None:
-    params = dict(ALGORITHM_PARAMS)
-    params["F-BBR"] = dict(params["F-BBR"])
-    params["F-BBR"]["config_file"] = args.freqccv4_config
+def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> None:
+    selected = list(ccs)
+    params = {
+        cc: dict(ALGORITHM_PARAMS.get(cc, {"algorithm": cc}))
+        for cc in selected
+    }
+    for cc in ("F-BBR", "FreqCCv4"):
+        if cc in params:
+            params[cc]["config_file"] = args.freqccv4_config
 
     (root / "comparison_config.json").write_text(
-        json.dumps(scenario_metadata(args), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(scenario_metadata(args, selected), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (root / "algorithm_params.json").write_text(
@@ -448,10 +465,7 @@ def write_metadata(root: Path, args: argparse.Namespace) -> None:
         "",
         "## 目录结构",
         "",
-        "- `BBRv2/`：原始 BBRv2 四流子实验",
-        "- `oBBR/`：oBBR 四流子实验，本地代码参数对应 `oBBR-0.5`",
-        "- `BBRv2plus/`：BBRv2plus 四流子实验",
-        "- `F-BBR/`：F-BBR 四流子实验，使用 coded-sine OPIv2 配置",
+        *[f"- `{cc}/`：{cc} 四流子实验" for cc in selected],
         "- `compare/`：汇总 CSV 和对比图",
         "",
         "## 默认场景",
@@ -473,9 +487,10 @@ def write_metadata(root: Path, args: argparse.Namespace) -> None:
     (root / "README_4cc_comparison.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_plot(root: Path, args: argparse.Namespace) -> int:
+def run_plot(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> int:
     compare_dir = root / "compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
+    selected = list(ccs)
     cmd = [
         sys.executable,
         str(PLOT_SCRIPT),
@@ -486,9 +501,9 @@ def run_plot(root: Path, args: argparse.Namespace) -> int:
         "--n-flows",
         str(args.n_flows),
         "--ccs",
-        ",".join(CCS),
+        ",".join(selected),
         "--trace-names",
-        ",".join(CCS),
+        ",".join(selected),
         "--sample-step-s",
         str(args.sample_step_s),
         "--warmup-s",
@@ -535,7 +550,7 @@ def load_return_codes(root: Path) -> Dict[str, int]:
                     results[key] = value
         except Exception:
             pass
-    for cc in CCS:
+    for cc in SELECTABLE_CCS:
         rc_file = root / cc / "return_code.txt"
         if not rc_file.exists():
             continue
@@ -610,6 +625,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-buffer-bytes", type=int, default=0, help="DQC stream send buffer；0 保持核心默认值。")
     parser.add_argument("--use-engine-timer", action=argparse.BooleanOptionalAction, default=True, help="是否使用 DQC engine timer。默认启用。")
     parser.add_argument("--enable-heavy-trace", action=argparse.BooleanOptionalAction, default=False, help="是否开启 RTT/BW/sendrate 等重 trace。默认关闭。")
+    parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FreqCCv4 gate trace；绘制 Delivery Rate/TrustedBw 细节图时应开启。")
+    parser.add_argument("--gate-trace-mode", choices=("off", "round_only", "sampled_pacing", "full"), default="round_only", help="FreqCCv4 gate trace 粒度。细节图建议 sampled_pacing。")
     parser.add_argument("--freqccv4-config", default=str(DEFAULT_FREQCCV4_CONFIG), help="freqccv4 配置文件路径；默认保持现有 freqccv4_default.conf。")
     parser.add_argument("--seed", type=int, default=1, help="ns-3 RNG seed。默认 1。")
     parser.add_argument("--run-id", type=int, default=1, help="ns-3 RNG run id。默认 1。")
@@ -640,13 +657,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     print("\n4CC 复合实验目录：", root)
-    print("子目录：BBRv2 / oBBR / BBRv2plus / F-BBR / compare")
+    print("子目录：" + " / ".join([*ccs_to_run, "compare"]))
     print("默认指标：aggregate throughput、mean per-flow throughput、mean/P95 queueing delay")
     if args.only_cc:
         print("本次只运行：", ", ".join(ccs_to_run))
 
     if not args.dry_run:
-        write_metadata(root, args)
+        write_metadata(root, args, ccs_to_run)
 
     results: Dict[str, int] = {} if args.dry_run else load_return_codes(root)
     if not args.skip_run:
@@ -672,7 +689,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.no_plot:
         print("\n" + "=" * 88)
         print("开始生成 compare 对比图")
-        plot_rc = run_plot(root, args)
+        plot_rc = run_plot(root, args, ccs_to_run)
         results["plot"] = plot_rc
         if plot_rc != 0:
             return plot_rc

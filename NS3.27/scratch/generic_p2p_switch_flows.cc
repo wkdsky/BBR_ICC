@@ -321,8 +321,8 @@ SetCommonFrequencyConfigValue(Config* config,
 {
     double d = 0.0;
     uint32_t u32 = 0;
-    uint64_t u64 = 0;
     bool b = false;
+    uint64_t u64 = 0;
 
     if (key.rfind("flow.", 0) == 0)
     {
@@ -496,6 +496,136 @@ SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
                       const std::string& path,
                       uint32_t line_no)
 {
+    double d = 0.0;
+    uint32_t u32 = 0;
+    bool b = false;
+
+    if (key == "cruise_detector.mode")
+    {
+        config->cruise_detector_mode = value;
+        return true;
+    }
+    if (key == "waveform.recv_signal_mode")
+    {
+        config->waveform_recv_signal_mode = value;
+        return true;
+    }
+    if (key == "waveform.negative_half_first")
+    {
+        if (!ParseBoolValue(value, &b))
+        {
+            WarnConfigLine(path, line_no, "invalid bool for " + key);
+            return false;
+        }
+        config->waveform_negative_half_first = b;
+        return true;
+    }
+    if (key == "pacing.minimum_rate_mbps")
+    {
+        if (!ParseDoubleValue(value, &d))
+        {
+            WarnConfigLine(path, line_no, "invalid double for " + key);
+            return false;
+        }
+        config->pacing_minimum_rate_mbps = d;
+        return true;
+    }
+
+#define SET_WAVEFORM_DOUBLE(KEY, FIELD)                                        \
+    if (key == KEY)                                                           \
+    {                                                                         \
+        if (!ParseDoubleValue(value, &d))                                     \
+        {                                                                     \
+            WarnConfigLine(path, line_no, "invalid double for " + key);       \
+            return false;                                                     \
+        }                                                                     \
+        config->FIELD = d;                                                    \
+        return true;                                                          \
+    }
+#define SET_WAVEFORM_U32(KEY, FIELD)                                           \
+    if (key == KEY)                                                           \
+    {                                                                         \
+        if (!ParseUintValue(value, &u32))                                     \
+        {                                                                     \
+            WarnConfigLine(path, line_no, "invalid uint for " + key);         \
+            return false;                                                     \
+        }                                                                     \
+        config->FIELD = u32;                                                  \
+        return true;                                                          \
+    }
+
+    SET_WAVEFORM_DOUBLE("waveform.initial_settle_rtt_mult",
+                        waveform_initial_settle_rtt_mult)
+    SET_WAVEFORM_DOUBLE("waveform.post_adjust_settle_rtt_mult",
+                        waveform_post_adjust_settle_rtt_mult)
+    SET_WAVEFORM_DOUBLE("waveform.initial_window_periods",
+                        waveform_initial_window_periods)
+    SET_WAVEFORM_DOUBLE("waveform.extended_window_periods",
+                        waveform_extended_window_periods)
+    SET_WAVEFORM_DOUBLE("waveform.max_window_periods",
+                        waveform_max_window_periods)
+    SET_WAVEFORM_DOUBLE("waveform.period_tolerance_ratio",
+                        waveform_period_tolerance_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.min_periodicity_correlation",
+                        waveform_min_periodicity_correlation)
+    SET_WAVEFORM_DOUBLE("waveform.min_cycle_coverage_ratio",
+                        waveform_min_cycle_coverage_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.min_completeness_score",
+                        waveform_min_completeness_score)
+    SET_WAVEFORM_DOUBLE("waveform.min_rising_duration_ratio",
+                        waveform_min_rising_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.min_falling_duration_ratio",
+                        waveform_min_falling_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.min_shape_ncc", waveform_min_shape_ncc)
+    SET_WAVEFORM_DOUBLE("waveform.min_slope_direction_agreement",
+                        waveform_min_slope_direction_agreement)
+    SET_WAVEFORM_DOUBLE("waveform.min_drate_ncc", waveform_min_drate_ncc)
+    SET_WAVEFORM_DOUBLE("waveform.min_srtt_integral_ncc",
+                        waveform_min_srtt_integral_ncc)
+    SET_WAVEFORM_DOUBLE("waveform.min_srtt_derivative_ncc",
+                        waveform_min_srtt_derivative_ncc)
+    SET_WAVEFORM_DOUBLE("waveform.min_response_snr",
+                        waveform_min_response_snr)
+    SET_WAVEFORM_DOUBLE("waveform.local_slope_window_period_ratio",
+                        waveform_local_slope_window_period_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.min_local_slope_window_ms",
+                        waveform_min_local_slope_window_ms)
+    SET_WAVEFORM_DOUBLE("waveform.clip_min_duration_ratio",
+                        waveform_clip_min_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.clip_min_half_overlap_ratio",
+                        waveform_clip_min_half_overlap_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.clip_max_slope_ratio",
+                        waveform_clip_max_slope_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.delta_drate_amplitude_ratio",
+                        waveform_delta_drate_amplitude_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.delta_fallback_baseline_ratio",
+                        waveform_delta_fallback_baseline_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.plateau_min_duration_ratio",
+                        waveform_plateau_min_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.plateau_max_slope_ratio",
+                        waveform_plateau_max_slope_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.plateau_max_level_span_ratio",
+                        waveform_plateau_max_level_span_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.plateau_extreme_distance_ratio",
+                        waveform_plateau_extreme_distance_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.baseline_step_ratio",
+                        waveform_baseline_step_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.amplitude_floor_ratio",
+                        waveform_amplitude_floor_ratio)
+    SET_WAVEFORM_U32("waveform.clip_floor_confirmations",
+                     waveform_clip_floor_confirmations)
+    SET_WAVEFORM_U32("waveform.max_baseline_adjustments",
+                     waveform_max_baseline_adjustments)
+    SET_WAVEFORM_U32("waveform.max_inconclusive_extensions",
+                     waveform_max_inconclusive_extensions)
+    SET_WAVEFORM_DOUBLE("waveform.max_app_limited_sample_ratio",
+                        waveform_max_app_limited_sample_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.max_interpolation_gap_period_ratio",
+                        waveform_max_interpolation_gap_period_ratio)
+
+#undef SET_WAVEFORM_DOUBLE
+#undef SET_WAVEFORM_U32
+
     return SetCommonFrequencyConfigValue(
         config, key, value, path, line_no);
 }

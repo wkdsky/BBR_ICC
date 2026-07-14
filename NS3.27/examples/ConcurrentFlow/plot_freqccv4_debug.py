@@ -1013,6 +1013,90 @@ def plot_queue_delay(
     return path
 
 
+def plot_queue_delay_per_flow(
+    output_dir: Path,
+    run_dir: Path,
+    sample_step_s: float,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    files = sorted(run_dir.glob("*_flow*_*_qdelay.txt"))
+    by_flow = {
+        flow_id_from_path(path): read_two_column_trace(path)
+        for path in files
+    }
+    by_flow = {
+        flow_id: rows
+        for flow_id, rows in by_flow.items()
+        if flow_id > 0 and rows
+    }
+    if not by_flow:
+        return None, None
+
+    max_time = max(rows[-1][0] for rows in by_flow.values())
+    grid = build_grid(max_time, sample_step_s)
+    sampled = {
+        flow_id: sample_previous(rows, grid, fill=math.nan)
+        for flow_id, rows in by_flow.items()
+    }
+    flow_ids = sorted(sampled)
+    aggregate_mean: List[float] = []
+    aggregate_p95: List[float] = []
+    aggregate_max: List[float] = []
+    csv_rows = []
+    for idx, time_s in enumerate(grid):
+        values = finite_values([sampled[flow_id][idx] for flow_id in flow_ids])
+        mean_value = sum(values) / len(values) if values else math.nan
+        p95_value = percentile(values, 95.0) if values else math.nan
+        max_value = max(values) if values else math.nan
+        aggregate_mean.append(mean_value)
+        aggregate_p95.append(p95_value)
+        aggregate_max.append(max_value)
+        csv_rows.append(
+            [time_s, mean_value, p95_value, max_value,
+             *[sampled[flow_id][idx] for flow_id in flow_ids]]
+        )
+    write_csv(
+        output_dir / "queue_delay_per_flow_timeseries.csv",
+        ["time_s", "mean_across_flows_ms", "p95_across_flows_ms",
+         "max_across_flows_ms",
+         *[f"flow{flow_id}_queue_delay_ms" for flow_id in flow_ids]],
+        csv_rows,
+    )
+
+    fig, axes = plt.subplots(
+        len(flow_ids), 1,
+        figsize=(12.0, max(4.0, 2.5 * len(flow_ids))),
+        sharex=True,
+        squeeze=False,
+    )
+    for ax, flow_id in zip(axes[:, 0], flow_ids):
+        add_phase_background(ax, run_dir, flow_id, max_time)
+        ax.plot(grid, sampled[flow_id], linewidth=1.0, color="#1f77b4")
+        ax.set_ylabel(f"Flow {flow_id}\nms")
+        ax.grid(True, alpha=0.25)
+    axes[-1, 0].set_xlabel("Time (s)")
+    fig.suptitle("FreqCCv4 queueing delay per flow", y=0.995)
+    fig.tight_layout()
+    per_flow_path = output_dir / "queue_delay_per_flow.png"
+    fig.savefig(per_flow_path, dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(12.0, 5.8))
+    add_phase_background(ax, run_dir, first_flow_id_with_modes(run_dir), max_time)
+    ax.plot(grid, aggregate_mean, label="mean across flows", linewidth=1.3)
+    ax.plot(grid, aggregate_p95, label="p95 across flows", linewidth=1.1)
+    ax.plot(grid, aggregate_max, label="max across flows", linewidth=0.9)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Queueing delay (ms)")
+    ax.set_title("Aggregate FreqCCv4 per-flow queueing delay")
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    aggregate_path = output_dir / "queue_delay_aggregate_flows.png"
+    fig.savefig(aggregate_path, dpi=180)
+    plt.close(fig)
+    return per_flow_path, aggregate_path
+
+
 def find_mode_files(run_dir: Path) -> List[Path]:
     return sorted(run_dir.glob("*_flow*_*_bbrmode.txt"))
 
@@ -1249,6 +1333,8 @@ def load_gate_trusted_bw(path: Path) -> List[Dict[str, float]]:
 
 def _trusted_source_color(source: str) -> str:
     s = source.upper()
+    if s == "TIME_WAVEFORM_SRTT_SEARCH":
+        return TRUSTEDBW_STATE_COLOR
     if s == "NORMAL":
         return "#1f77b4"
     if s == "MERGED":
@@ -1398,7 +1484,12 @@ def plot_trusted_bw_per_flow(
             # Per-source segment lines: connect two adjacent valid points only
             # when they share the same source, so the colour encodes the
             # source without fabricating cross-source segments.
-            for source in ("NORMAL", "MERGED", "FALLBACK"):
+            sources = sorted({
+                str(r["trusted_source"]).upper()
+                for r in rounds
+                if r["trusted_valid"] and str(r["trusted_source"]).upper() != "NONE"
+            })
+            for source in sources:
                 seg_t: List[float] = []
                 seg_v: List[float] = []
                 for r in rounds:
@@ -1722,6 +1813,79 @@ def plot_delivery_rate_first_window(
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return path
+
+
+def plot_delivery_rate_per_flow_and_aggregate(
+    output_dir: Path,
+    run_dir: Path,
+    service_rate_bps: float,
+    sample_step_s: float,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    by_flow: Dict[int, List[Tuple[float, float]]] = {}
+    for path in find_gate_files(run_dir):
+        flow_id = flow_id_from_path(path)
+        rows = load_gate_delivery_rate(path, math.inf)
+        if flow_id > 0 and rows:
+            by_flow[flow_id] = rows
+    if not by_flow:
+        return None, None
+
+    max_time = max(rows[-1][0] for rows in by_flow.values())
+    grid = build_grid(max_time, sample_step_s)
+    sampled = {
+        flow_id: sample_previous(rows, grid, fill=0.0)
+        for flow_id, rows in by_flow.items()
+    }
+    flow_ids = sorted(sampled)
+    aggregate = [
+        sum(sampled[flow_id][idx] for flow_id in flow_ids)
+        for idx in range(len(grid))
+    ]
+    write_csv(
+        output_dir / "delivery_rate_timeseries.csv",
+        ["time_s", "aggregate_delivery_rate_mbps",
+         *[f"flow{flow_id}_delivery_rate_mbps" for flow_id in flow_ids]],
+        ([time_s, aggregate[idx],
+          *[sampled[flow_id][idx] for flow_id in flow_ids]]
+         for idx, time_s in enumerate(grid)),
+    )
+
+    fig, axes = plt.subplots(
+        len(flow_ids), 1,
+        figsize=(12.0, max(4.0, 2.5 * len(flow_ids))),
+        sharex=True,
+        squeeze=False,
+    )
+    for ax, flow_id in zip(axes[:, 0], flow_ids):
+        add_phase_background(ax, run_dir, flow_id, max_time)
+        ax.plot(grid, sampled[flow_id], linewidth=1.0, color="#1f77b4")
+        ax.axhline(service_rate_bps / 1e6 / len(flow_ids),
+                   color="#777777", linestyle="--", linewidth=0.8)
+        ax.set_ylabel(f"Flow {flow_id}\nMbps")
+        ax.grid(True, alpha=0.25)
+    axes[-1, 0].set_xlabel("Time (s)")
+    fig.suptitle("FreqCCv4 Delivery Rate per flow", y=0.995)
+    fig.tight_layout()
+    per_flow_path = output_dir / "delivery_rate_per_flow.png"
+    fig.savefig(per_flow_path, dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(12.0, 5.8))
+    add_phase_background(ax, run_dir, first_flow_id_with_modes(run_dir), max_time)
+    ax.plot(grid, aggregate, color=LINE_COLORS["aggregate"], linewidth=1.3,
+            label="sum Delivery Rate")
+    ax.axhline(service_rate_bps / 1e6, color="#555555", linestyle="--",
+               linewidth=1.0, label="bottleneck capacity")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Mbps")
+    ax.set_title("Aggregate FreqCCv4 Delivery Rate")
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    aggregate_path = output_dir / "delivery_rate_aggregate.png"
+    fig.savefig(aggregate_path, dpi=180)
+    plt.close(fig)
+    return per_flow_path, aggregate_path
 
 
 def find_raw_delivery_files(run_dir: Path) -> List[Path]:
@@ -2804,6 +2968,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if path:
             generated.append(path)
 
+    queue_per_flow, queue_aggregate = plot_queue_delay_per_flow(
+        output_dir, run_dir, args.sample_step_s
+    )
+    if queue_per_flow:
+        generated.append(queue_per_flow)
+    if queue_aggregate:
+        generated.append(queue_aggregate)
+
     pacing_per_flow, pacing_aggregate = plot_pacing_from_gate(
         output_dir, run_dir, service_rate_bps, args.sample_step_s
     )
@@ -2831,6 +3003,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     delivery_path = plot_delivery_rate_first_window(output_dir, run_dir, 10.0)
     if delivery_path:
         generated.append(delivery_path)
+    delivery_per_flow, delivery_aggregate = plot_delivery_rate_per_flow_and_aggregate(
+        output_dir, run_dir, service_rate_bps, args.sample_step_s
+    )
+    if delivery_per_flow:
+        generated.append(delivery_per_flow)
+    if delivery_aggregate:
+        generated.append(delivery_aggregate)
 
     srtt_per_flow, srtt_aggregate = plot_rtt(output_dir, run_dir, args.sample_step_s)
     if srtt_per_flow:

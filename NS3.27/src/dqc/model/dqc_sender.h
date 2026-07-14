@@ -97,7 +97,7 @@ public:
     void SetCongestionId(uint32_t cid);
 	void SetNumEmulatedConnections(int num_connections);
     // FreqCC configuration methods
-	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="bandwidth_latest");
+	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="delivery_rate_latest");
 	    void ConfigureFreqBbr(const dqc::FreqBbrConfig& config, uint32_t flow_id);
 	    void ConfigureFBBR(const dqc::FBBRConfig& config, uint32_t flow_id);
 	    void ConfigureFreqCCv4ConvergenceGate(bool enable_trace,

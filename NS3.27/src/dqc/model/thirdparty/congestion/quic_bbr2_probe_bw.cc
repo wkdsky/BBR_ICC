@@ -53,7 +53,7 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
     if (cycle_.phase != CyclePhase::PROBE_UP) {
       ForceEnterProbeUp(event_time);
       model_->set_pacing_gain(PacingGainForPhase(cycle_.phase));
-      model_->set_cwnd_gain(Params().probe_bw_cwnd_gain);
+      model_->set_cwnd_gain(CwndGainForPhase(cycle_.phase));
       return Bbr2Mode::PROBE_BW;
     }
     sender_->MarkExperimentalForcedProbeUpStarted(event_time);
@@ -94,7 +94,7 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
   // when Bbr2ProbeRttMode::Enter is called.
   if (!switch_to_probe_rtt) {
     model_->set_pacing_gain(PacingGainForPhase(cycle_.phase));
-    model_->set_cwnd_gain(Params().probe_bw_cwnd_gain);
+    model_->set_cwnd_gain(CwndGainForPhase(cycle_.phase));
   }
 
   return switch_to_probe_rtt ? Bbr2Mode::PROBE_RTT : Bbr2Mode::PROBE_BW;
@@ -906,6 +906,11 @@ float Bbr2ProbeBwMode::PacingGainForPhase(
   }
   return sender_->GetProbeBwPacingGain(phase,
                                        Params().probe_bw_default_pacing_gain);
+}
+
+float Bbr2ProbeBwMode::CwndGainForPhase(
+    Bbr2ProbeBwMode::CyclePhase phase) const {
+  return sender_->GetProbeBwCwndGain(phase, Params().probe_bw_cwnd_gain);
 }
 
 }  // namespace quic

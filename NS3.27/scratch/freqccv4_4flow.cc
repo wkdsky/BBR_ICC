@@ -140,6 +140,7 @@ bool g_enable_heavy_trace = false;
 bool g_gate_state_machine_self_test = false;
 bool g_trusted_bw_selection_self_test = false;
 bool g_trusted_bw_pacing_self_test = false;
+bool g_waveform_cruise_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
@@ -322,6 +323,7 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
         return true;
     }
     SET_DOUBLE("default_fixed_amplitude_mbps", default_fixed_amplitude_mbps)
+    SET_DOUBLE("pacing.minimum_rate_mbps", pacing_minimum_rate_mbps)
     SET_DOUBLE("stability.single_round_exit_threshold", stability_single_round_exit_threshold)
     SET_DOUBLE("stability.consecutive_exit_threshold", stability_consecutive_exit_threshold)
     SET_U32("stability.stable_rounds", stability_stable_rounds)
@@ -347,6 +349,50 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_DOUBLE("merged_rescue.max_trend_ratio", merged_rescue_max_trend_ratio)
     SET_DOUBLE("merged_rescue.confidence_discount", merged_rescue_confidence_discount)
     SET_BOOL("trusted_bw.clear_on_cruise_start", trusted_bw_clear_on_cruise_start)
+    if(key == "cruise_detector.mode"){
+        config->cruise_detector_mode = value;
+        return true;
+    }
+    if(key == "waveform.recv_signal_mode"){
+        config->waveform_recv_signal_mode = value;
+        return true;
+    }
+    SET_DOUBLE("waveform.initial_settle_rtt_mult", waveform_initial_settle_rtt_mult)
+    SET_DOUBLE("waveform.post_adjust_settle_rtt_mult", waveform_post_adjust_settle_rtt_mult)
+    SET_BOOL("waveform.negative_half_first", waveform_negative_half_first)
+    SET_DOUBLE("waveform.initial_window_periods", waveform_initial_window_periods)
+    SET_DOUBLE("waveform.extended_window_periods", waveform_extended_window_periods)
+    SET_DOUBLE("waveform.max_window_periods", waveform_max_window_periods)
+    SET_DOUBLE("waveform.period_tolerance_ratio", waveform_period_tolerance_ratio)
+    SET_DOUBLE("waveform.min_periodicity_correlation", waveform_min_periodicity_correlation)
+    SET_DOUBLE("waveform.min_cycle_coverage_ratio", waveform_min_cycle_coverage_ratio)
+    SET_DOUBLE("waveform.min_completeness_score", waveform_min_completeness_score)
+    SET_DOUBLE("waveform.min_rising_duration_ratio", waveform_min_rising_duration_ratio)
+    SET_DOUBLE("waveform.min_falling_duration_ratio", waveform_min_falling_duration_ratio)
+    SET_DOUBLE("waveform.min_shape_ncc", waveform_min_shape_ncc)
+    SET_DOUBLE("waveform.min_slope_direction_agreement", waveform_min_slope_direction_agreement)
+    SET_DOUBLE("waveform.min_drate_ncc", waveform_min_drate_ncc)
+    SET_DOUBLE("waveform.min_srtt_integral_ncc", waveform_min_srtt_integral_ncc)
+    SET_DOUBLE("waveform.min_srtt_derivative_ncc", waveform_min_srtt_derivative_ncc)
+    SET_DOUBLE("waveform.min_response_snr", waveform_min_response_snr)
+    SET_DOUBLE("waveform.local_slope_window_period_ratio", waveform_local_slope_window_period_ratio)
+    SET_DOUBLE("waveform.min_local_slope_window_ms", waveform_min_local_slope_window_ms)
+    SET_DOUBLE("waveform.clip_min_duration_ratio", waveform_clip_min_duration_ratio)
+    SET_DOUBLE("waveform.clip_min_half_overlap_ratio", waveform_clip_min_half_overlap_ratio)
+    SET_DOUBLE("waveform.clip_max_slope_ratio", waveform_clip_max_slope_ratio)
+    SET_DOUBLE("waveform.delta_drate_amplitude_ratio", waveform_delta_drate_amplitude_ratio)
+    SET_DOUBLE("waveform.delta_fallback_baseline_ratio", waveform_delta_fallback_baseline_ratio)
+    SET_DOUBLE("waveform.plateau_min_duration_ratio", waveform_plateau_min_duration_ratio)
+    SET_DOUBLE("waveform.plateau_max_slope_ratio", waveform_plateau_max_slope_ratio)
+    SET_DOUBLE("waveform.plateau_max_level_span_ratio", waveform_plateau_max_level_span_ratio)
+    SET_DOUBLE("waveform.plateau_extreme_distance_ratio", waveform_plateau_extreme_distance_ratio)
+    SET_DOUBLE("waveform.baseline_step_ratio", waveform_baseline_step_ratio)
+    SET_DOUBLE("waveform.amplitude_floor_ratio", waveform_amplitude_floor_ratio)
+    SET_U32("waveform.clip_floor_confirmations", waveform_clip_floor_confirmations)
+    SET_U32("waveform.max_baseline_adjustments", waveform_max_baseline_adjustments)
+    SET_U32("waveform.max_inconclusive_extensions", waveform_max_inconclusive_extensions)
+    SET_DOUBLE("waveform.max_app_limited_sample_ratio", waveform_max_app_limited_sample_ratio)
+    SET_DOUBLE("waveform.max_interpolation_gap_period_ratio", waveform_max_interpolation_gap_period_ratio)
     if(key == "trace.gate_trace_mode"){
         config->trace_gate_trace_mode = value;
         return true;
@@ -603,7 +649,6 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
 	    // Configure FreqCCv4 oscillation parameters
 	    if(cc_type == kFreqCCv4){
 	        sendApp->ConfigureFreqBbr(g_freq_bbr_config, flow_index);
-	        sendApp->ConfigureFreqCC(freq_hz, amp_mode, fixed_mbps);
 	        sendApp->ConfigureFreqCCv4ConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
 	                                                  g_gate_trace_mode,
@@ -893,6 +938,44 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("gateStateMachineSelfTest", "Run synthetic convergence-gate state-machine self-test and exit", g_gate_state_machine_self_test);
 	    cmd.AddValue("trustedBwSelectionSelfTest", "Run TrustedBw dual-signal selection self-test and exit", g_trusted_bw_selection_self_test);
 	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
+	    cmd.AddValue("waveformCruiseSelfTest", "Run deterministic time-waveform CRUISE self-test and exit", g_waveform_cruise_self_test);
+	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_freq_bbr_config.cruise_detector_mode);
+	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_freq_bbr_config.waveform_recv_signal_mode);
+	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_freq_bbr_config.waveform_initial_settle_rtt_mult);
+	    cmd.AddValue("waveformPostAdjustSettleRttMult", "Post-adjust waveform settle RTT multiplier", g_freq_bbr_config.waveform_post_adjust_settle_rtt_mult);
+	    cmd.AddValue("waveformNegativeHalfFirst", "Start time waveform with the negative half-cycle", g_freq_bbr_config.waveform_negative_half_first);
+	    cmd.AddValue("waveformInitialWindowPeriods", "Initial waveform analysis periods", g_freq_bbr_config.waveform_initial_window_periods);
+	    cmd.AddValue("waveformExtendedWindowPeriods", "Extended waveform analysis periods", g_freq_bbr_config.waveform_extended_window_periods);
+	    cmd.AddValue("waveformMaxWindowPeriods", "Maximum waveform analysis periods", g_freq_bbr_config.waveform_max_window_periods);
+	    cmd.AddValue("waveformPeriodToleranceRatio", "Waveform period error tolerance", g_freq_bbr_config.waveform_period_tolerance_ratio);
+	    cmd.AddValue("waveformMinCycleCoverageRatio", "Minimum waveform cycle coverage", g_freq_bbr_config.waveform_min_cycle_coverage_ratio);
+	    cmd.AddValue("waveformMinCompletenessScore", "Minimum waveform completeness score", g_freq_bbr_config.waveform_min_completeness_score);
+	    cmd.AddValue("waveformMinRisingDurationRatio", "Minimum rising duration ratio", g_freq_bbr_config.waveform_min_rising_duration_ratio);
+	    cmd.AddValue("waveformMinFallingDurationRatio", "Minimum falling duration ratio", g_freq_bbr_config.waveform_min_falling_duration_ratio);
+	    cmd.AddValue("waveformMinShapeNcc", "Minimum auxiliary waveform NCC", g_freq_bbr_config.waveform_min_shape_ncc);
+	    cmd.AddValue("waveformMinSlopeDirectionAgreement", "Minimum waveform slope-direction agreement", g_freq_bbr_config.waveform_min_slope_direction_agreement);
+	    cmd.AddValue("waveformMinDrateNcc", "Minimum Delivery Rate ZNCC", g_freq_bbr_config.waveform_min_drate_ncc);
+	    cmd.AddValue("waveformMinSrttIntegralNcc", "Minimum SRTT integral-template ZNCC", g_freq_bbr_config.waveform_min_srtt_integral_ncc);
+	    cmd.AddValue("waveformMinSrttDerivativeNcc", "Minimum SRTT derivative-template ZNCC", g_freq_bbr_config.waveform_min_srtt_derivative_ncc);
+	    cmd.AddValue("waveformMinResponseSnr", "Minimum robust fitted response SNR", g_freq_bbr_config.waveform_min_response_snr);
+	    cmd.AddValue("waveformLocalSlopeWindowPeriodRatio", "SRTT local slope window as period ratio", g_freq_bbr_config.waveform_local_slope_window_period_ratio);
+	    cmd.AddValue("waveformMinLocalSlopeWindowMs", "Minimum SRTT local slope window in ms", g_freq_bbr_config.waveform_min_local_slope_window_ms);
+	    cmd.AddValue("waveformClipMinDurationRatio", "Minimum half-cycle clipping duration ratio", g_freq_bbr_config.waveform_clip_min_duration_ratio);
+	    cmd.AddValue("waveformClipMinHalfOverlapRatio", "Minimum clipping overlap with one sender half-cycle", g_freq_bbr_config.waveform_clip_min_half_overlap_ratio);
+	    cmd.AddValue("waveformClipMaxSlopeRatio", "Maximum clipping slope ratio", g_freq_bbr_config.waveform_clip_max_slope_ratio);
+	    cmd.AddValue("waveformDeltaDrateAmplitudeRatio", "Search delta ratio of recent Delivery Rate amplitude", g_freq_bbr_config.waveform_delta_drate_amplitude_ratio);
+	    cmd.AddValue("waveformDeltaFallbackBaselineRatio", "Fallback search delta ratio of injection baseline", g_freq_bbr_config.waveform_delta_fallback_baseline_ratio);
+	    cmd.AddValue("waveformPlateauMinDurationRatio", "Minimum plateau duration ratio", g_freq_bbr_config.waveform_plateau_min_duration_ratio);
+	    cmd.AddValue("waveformPlateauMaxSlopeRatio", "Maximum plateau slope ratio", g_freq_bbr_config.waveform_plateau_max_slope_ratio);
+	    cmd.AddValue("waveformPlateauMaxLevelSpanRatio", "Maximum plateau level span ratio", g_freq_bbr_config.waveform_plateau_max_level_span_ratio);
+	    cmd.AddValue("waveformPlateauExtremeDistanceRatio", "Plateau distance from cycle extreme", g_freq_bbr_config.waveform_plateau_extreme_distance_ratio);
+	    cmd.AddValue("waveformBaselineStepRatio", "Waveform baseline multiplicative step", g_freq_bbr_config.waveform_baseline_step_ratio);
+	    cmd.AddValue("waveformAmplitudeFloorRatio", "Waveform amplitude floor reference ratio", g_freq_bbr_config.waveform_amplitude_floor_ratio);
+	    cmd.AddValue("waveformClipFloorConfirmations", "Valid clip windows required at amplitude floor", g_freq_bbr_config.waveform_clip_floor_confirmations);
+	    cmd.AddValue("waveformMaxBaselineAdjustments", "Maximum waveform baseline adjustments", g_freq_bbr_config.waveform_max_baseline_adjustments);
+	    cmd.AddValue("waveformMaxInconclusiveExtensions", "Maximum incomplete-cycle extensions", g_freq_bbr_config.waveform_max_inconclusive_extensions);
+	    cmd.AddValue("waveformMaxAppLimitedSampleRatio", "Maximum app-limited sample ratio", g_freq_bbr_config.waveform_max_app_limited_sample_ratio);
+	    cmd.AddValue("waveformMaxInterpolationGapPeriodRatio", "Maximum interpolation gap as period ratio", g_freq_bbr_config.waveform_max_interpolation_gap_period_ratio);
 	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
 	    cmd.AddValue("enableEquivalenceAuditTrace", "Enable packet/ACK/pacing audit traces for B/C equivalence checks", g_enable_equivalence_audit_trace);
 	    cmd.AddValue("stabilitySingleRoundExitThreshold", "TrustedBw selection MaxDRate single-round exit threshold", g_freq_bbr_config.stability_single_round_exit_threshold);
@@ -937,6 +1020,9 @@ int main (int argc, char *argv[]){
 	    if(g_trusted_bw_pacing_self_test){
 	        return FreqCCv4Sender::RunTrustedBwPacingSelfTest(std::cout) ? 0 : 1;
 	    }
+	    if(g_waveform_cruise_self_test){
+	        return FreqCCv4Sender::RunWaveformCruiseSelfTest(std::cout) ? 0 : 1;
+	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);
         if(g_flow_size_bytes == 0 || g_flow_size_bytes > 20000ULL){
@@ -972,6 +1058,13 @@ int main (int argc, char *argv[]){
     std::cout << "Congestion control: " << algo << std::endl;
 	    std::cout << "Run id / seed: " << run_id << " / " << seed << std::endl;
 	    std::cout << "FreqBBR config: " << g_freq_bbr_config_path << std::endl;
+	    std::cout << "CRUISE detector / receive signal: "
+	              << g_freq_bbr_config.cruise_detector_mode << " / "
+	              << (g_freq_bbr_config.cruise_detector_mode ==
+	                          "legacy_spectral"
+	                      ? "bandwidth_latest (legacy)"
+	                      : g_freq_bbr_config.waveform_recv_signal_mode)
+	              << std::endl;
 	    std::cout << "Flow start mode: " << g_flow_start_mode << std::endl;
     std::cout << "Flow size bytes: " << g_flow_size_bytes << std::endl;
     std::cout << "Process interval us: " << g_process_interval_us << std::endl;

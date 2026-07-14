@@ -83,6 +83,7 @@ private:
     void OpenFreqCCv4LoadFile();
     void OpenFreqCCv4CruiseSummaryFile();
     void OpenFreqCCv4GateFile();
+    void OpenFreqCCv4WaveformSearchFile();
     void OpenFbbrGateFile();
     void OpenFbbrTriggerCycleFile();
     void OpenFbbrBinFile();
@@ -108,6 +109,7 @@ private:
     void CloseFreqCCv4LoadFile();
     void CloseFreqCCv4CruiseSummaryFile();
     void CloseFreqCCv4GateFile();
+    void CloseFreqCCv4WaveformSearchFile();
     void CloseFbbrGateFile();
     void CloseFbbrTriggerCycleFile();
     void CloseFbbrBinFile();
@@ -138,6 +140,7 @@ private:
     std::fstream m_freqccv4Load;
     std::fstream m_freqccv4CruiseSummary;
     std::fstream m_freqccv4Gate;
+    std::fstream m_freqccv4WaveformSearch;
     std::fstream m_fbbrGate;
     std::fstream m_fbbrTriggerCycle;
     std::fstream m_fbbrBin;

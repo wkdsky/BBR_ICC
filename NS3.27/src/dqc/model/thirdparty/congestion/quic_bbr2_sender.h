@@ -222,6 +222,8 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   virtual bool ShouldDelayProbeBwCruiseExit(QuicTime now) const;
   virtual float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
                                      float pacing_gain) const;
+  virtual float GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase phase,
+                                   float cwnd_gain) const;
   virtual void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                                      QuicTime now);
 

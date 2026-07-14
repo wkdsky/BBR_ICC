@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 DEFAULT_CCS = ("BBRv2", "oBBR", "BBRv2plus", "F-BBR")
 PLOT_COLORS = {
     "BBRv2": "#1f77b4",
+    "FreqCCv4": "#ff7f0e",
     "oBBR": "#2ca02c",
     "BBRv2plus": "#d62728",
     "F-BBR": "#9467bd",

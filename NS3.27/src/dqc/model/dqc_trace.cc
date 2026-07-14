@@ -21,6 +21,9 @@ void DqcTrace::SetCongestionControlType(uint32_t type){
 void DqcTrace::Log(std::string name,uint32_t enable){
     m_name = name;
     m_enable = enable;
+    if(m_enable & E_DQC_FREQCCV4_LOAD){
+        OpenFreqCCv4WaveformSearchFile();
+    }
     // Validation consumers require schema-bearing files even when a flow has
     // no eligible block (for example the forced-underload control).
     if(m_enable & E_DQC_FBBR_LOAD){
@@ -387,6 +390,11 @@ void DqcTrace::OnFreqCCv4Load(double window_start_s, double window_end_s,
         if(m_freqccv4Gate.is_open()){
             m_freqccv4Gate<<diagnostics<<"\n";
         }
+    }else if(label == "WAVEFORM_SEARCH"){
+        OpenFreqCCv4WaveformSearchFile();
+        if(m_freqccv4WaveformSearch.is_open()){
+            m_freqccv4WaveformSearch<<diagnostics<<"\n";
+        }
     }else if(label == "CRUISE_SUMMARY"){
         OpenFreqCCv4CruiseSummaryFile();
         if(m_freqccv4CruiseSummary.is_open()){
@@ -471,6 +479,7 @@ void DqcTrace::Close(){
     CloseFreqCCv4LoadFile();
     CloseFreqCCv4CruiseSummaryFile();
     CloseFreqCCv4GateFile();
+    CloseFreqCCv4WaveformSearchFile();
     CloseFbbrGateFile();
     CloseFbbrTriggerCycleFile();
     CloseFbbrBinFile();
@@ -577,6 +586,12 @@ void DqcTrace::CloseFreqCCv4GateFile(){
     if(m_freqccv4Gate.is_open()){
         m_freqccv4Gate.flush();
         m_freqccv4Gate.close();
+    }
+}
+void DqcTrace::CloseFreqCCv4WaveformSearchFile(){
+    if(m_freqccv4WaveformSearch.is_open()){
+        m_freqccv4WaveformSearch.flush();
+        m_freqccv4WaveformSearch.close();
     }
 }
 void DqcTrace::CloseFbbrGateFile(){
@@ -730,7 +745,78 @@ void DqcTrace::OpenFreqCCv4CruiseSummaryFile(){
 	                                <<",selection_native_bw_bps,trusted_bw_valid"
 	                                <<",trusted_bw_cruise_id,trusted_bw_fresh"
 	                                <<",trusted_bw_application_valid"
+	                                <<",detector_mode,waveform_final_state"
+	                                <<",waveform_decision_count"
+	                                <<",waveform_baseline_adjustments"
+	                                <<",waveform_amplitude_reductions"
+	                                <<",waveform_underload_located"
+	                                <<",waveform_trusted_source"
 	                                <<std::endl;
+    }
+}
+void DqcTrace::OpenFreqCCv4WaveformSearchFile(){
+    if(!(m_enable & E_DQC_FREQCCV4_LOAD) ||
+       m_freqccv4WaveformSearch.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
+            +std::to_string(m_id)+"_cruise_waveform_search.csv";
+    }else{
+        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
+            +"_cruise_waveform_search.csv";
+    }
+    m_freqccv4WaveformSearch.open(path.c_str(), std::fstream::out);
+    if(m_freqccv4WaveformSearch.is_open()){
+        m_freqccv4WaveformSearch
+            <<"time_s,cruise_id,decision_id,waveform_state,detector_mode"
+            <<",cruise_cwnd_gain"
+            <<",probe_epoch_start_s,probe_epoch_rtt_s"
+            <<",response_window_start_s,response_window_end_s"
+            <<",negative_half_first,window_periods,extended_window"
+            <<",analysis_cycle_start_s,analysis_cycle_end_s"
+            <<",analysis_cycle_periods,analysis_uses_later_cycle"
+            <<",prior_cycle_srtt_input_valid,prior_cycle_srtt_similar"
+            <<",prior_cycle_drate_input_valid,prior_cycle_drate_similar"
+            <<",prior_cycle_classification"
+            <<",sender_sample_count,drate_sample_count,srtt_sample_count"
+            <<",coverage_ratio,app_limited_ratio,sender_waveform_valid"
+            <<",best_lag_s"
+            <<",srtt_input_valid,srtt_similar_frequency,srtt_similar"
+            <<",srtt_cycle_complete,srtt_positive_half_clipped"
+            <<",srtt_negative_half_clipped,srtt_clip_ambiguous"
+            <<",srtt_direct_ncc,srtt_integral_ncc,srtt_derivative_ncc"
+            <<",srtt_slope_direction_agreement,srtt_period_s"
+            <<",srtt_period_error_ratio,srtt_periodicity_correlation"
+            <<",srtt_fitted_amplitude"
+            <<",srtt_noise_sigma,srtt_response_snr"
+            <<",srtt_completeness_score"
+            <<",drate_input_valid,drate_similar,drate_ncc"
+            <<",drate_slope_direction_agreement,drate_period_s"
+            <<",drate_period_error_ratio,drate_periodicity_correlation"
+            <<",current_drate_response_amplitude_bps,drate_noise_sigma"
+            <<",drate_response_snr,drate_completeness_score"
+            <<",has_last_similar_drate_amplitude"
+            <<",last_similar_drate_amplitude_bps"
+            <<",delta_source,raw_delta_bw_bps,applied_delta_bw_bps"
+            <<",underload_located,classification,action"
+            <<",baseline_before_bps"
+            <<",baseline_after_bps,amplitude_before_bps"
+            <<",amplitude_after_bps,trusted_baseline_locked"
+            <<",trusted_bw_candidate_update_count"
+            <<",search_continues_after_full_load"
+            <<",trusted_bw_candidate_bps,trusted_bw_candidate_source"
+            <<",invalid_reason"
+            <<",top_clip,bottom_clip,clip_shoulders_opposite"
+            <<",clip_shoulder_slope_before,clip_shoulder_slope_after"
+            <<",clip_shoulder_change_before,clip_shoulder_change_after"
+            <<",clip_minimum_shoulder_change"
+            <<",clip_duration_ratio,clip_level_span_ratio"
+            <<",clip_half_overlap_ratio,clip_extreme_distance_ratio"
+            <<",boundary_lift_time_s"
+            <<",boundary_delta_bps,amplitude_reduction"
+            <<",clip_floor_confirmation\n";
     }
 }
 void DqcTrace::OpenFreqCCv4GateFile(){

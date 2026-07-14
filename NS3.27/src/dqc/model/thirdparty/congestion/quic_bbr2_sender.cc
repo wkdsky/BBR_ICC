@@ -638,6 +638,11 @@ float Bbr2Sender::GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
   return pacing_gain;
 }
 
+float Bbr2Sender::GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
+                                     float cwnd_gain) const {
+  return cwnd_gain;
+}
+
 void Bbr2Sender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase /*phase*/,
                                        QuicTime /*now*/) {}
 
