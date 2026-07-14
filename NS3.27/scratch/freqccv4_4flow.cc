@@ -384,6 +384,17 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_DOUBLE("waveform.clip_max_slope_ratio", waveform_clip_max_slope_ratio)
     SET_DOUBLE("waveform.delta_drate_amplitude_ratio", waveform_delta_drate_amplitude_ratio)
     SET_DOUBLE("waveform.delta_fallback_baseline_ratio", waveform_delta_fallback_baseline_ratio)
+    SET_DOUBLE("waveform.adaptive_delta_fallback_baseline_ratio", waveform_adaptive_delta_fallback_baseline_ratio)
+    SET_DOUBLE("waveform.delta_ewma_alpha", waveform_delta_ewma_alpha)
+    SET_DOUBLE("waveform.delta_min_baseline_ratio", waveform_delta_min_baseline_ratio)
+    SET_DOUBLE("waveform.delta_max_baseline_ratio", waveform_delta_max_baseline_ratio)
+    SET_DOUBLE("waveform.overload_max_delta_multiplier", waveform_overload_max_delta_multiplier)
+    SET_DOUBLE("waveform.underload_max_delta_multiplier", waveform_underload_max_delta_multiplier)
+    SET_U32("waveform.overload_confirmations", waveform_overload_confirmations)
+    SET_BOOL("waveform.queue_guard_enabled", waveform_queue_guard_enabled)
+    SET_DOUBLE("waveform.queue_low_min_rtt_ratio", waveform_queue_low_min_rtt_ratio)
+    SET_DOUBLE("waveform.queue_target_min_rtt_ratio", waveform_queue_target_min_rtt_ratio)
+    SET_DOUBLE("waveform.queue_high_min_rtt_ratio", waveform_queue_high_min_rtt_ratio)
     SET_DOUBLE("waveform.plateau_min_duration_ratio", waveform_plateau_min_duration_ratio)
     SET_DOUBLE("waveform.plateau_max_slope_ratio", waveform_plateau_max_slope_ratio)
     SET_DOUBLE("waveform.plateau_max_level_span_ratio", waveform_plateau_max_level_span_ratio)
@@ -649,7 +660,8 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         }
     }
 	    // Configure FreqCCv4 oscillation parameters
-	    if(cc_type == kFreqCCv4 || cc_type == kFreqCCv4Hybrid){
+	    if(cc_type == kFreqCCv4 || cc_type == kFreqCCv4Adaptive ||
+	       cc_type == kFreqCCv4Hybrid){
 	        sendApp->ConfigureFreqBbr(g_freq_bbr_config, flow_index);
 	        sendApp->ConfigureFreqCCv4ConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
@@ -781,6 +793,9 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, double sim_tim
     dqc::CongestionControlType cc = kFreqCCv4;
     if(algo == "bbrv2" || algo == "BBRv2" || algo == "bbr2"){
         cc = kBBRv2;
+    } else if(algo == "freqccv4-adaptive" || algo == "freqccv4_adaptive" ||
+              algo == "freqccv4adaptive"){
+        cc = kFreqCCv4Adaptive;
     } else if(algo == "freqccv4-hybrid" || algo == "freqccv4_hybrid" ||
               algo == "freqccv4hybrid"){
         cc = kFreqCCv4Hybrid;
@@ -972,6 +987,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformClipMaxSlopeRatio", "Maximum clipping slope ratio", g_freq_bbr_config.waveform_clip_max_slope_ratio);
 	    cmd.AddValue("waveformDeltaDrateAmplitudeRatio", "Search delta ratio of recent Delivery Rate amplitude", g_freq_bbr_config.waveform_delta_drate_amplitude_ratio);
 	    cmd.AddValue("waveformDeltaFallbackBaselineRatio", "Fallback search delta ratio of injection baseline", g_freq_bbr_config.waveform_delta_fallback_baseline_ratio);
+	    cmd.AddValue("waveformAdaptiveDeltaFallbackBaselineRatio", "Adaptive Guard fallback delta ratio of injection baseline", g_freq_bbr_config.waveform_adaptive_delta_fallback_baseline_ratio);
 	    cmd.AddValue("waveformPlateauMinDurationRatio", "Minimum plateau duration ratio", g_freq_bbr_config.waveform_plateau_min_duration_ratio);
 	    cmd.AddValue("waveformPlateauMaxSlopeRatio", "Maximum plateau slope ratio", g_freq_bbr_config.waveform_plateau_max_slope_ratio);
 	    cmd.AddValue("waveformPlateauMaxLevelSpanRatio", "Maximum plateau level span ratio", g_freq_bbr_config.waveform_plateau_max_level_span_ratio);

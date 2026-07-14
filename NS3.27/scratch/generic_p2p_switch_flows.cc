@@ -520,6 +520,16 @@ SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
         config->waveform_negative_half_first = b;
         return true;
     }
+    if (key == "waveform.queue_guard_enabled")
+    {
+        if (!ParseBoolValue(value, &b))
+        {
+            WarnConfigLine(path, line_no, "invalid bool for " + key);
+            return false;
+        }
+        config->waveform_queue_guard_enabled = b;
+        return true;
+    }
     if (key == "pacing.minimum_rate_mbps")
     {
         if (!ParseDoubleValue(value, &d))
@@ -602,6 +612,26 @@ SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
                         waveform_delta_drate_amplitude_ratio)
     SET_WAVEFORM_DOUBLE("waveform.delta_fallback_baseline_ratio",
                         waveform_delta_fallback_baseline_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.adaptive_delta_fallback_baseline_ratio",
+                        waveform_adaptive_delta_fallback_baseline_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.delta_ewma_alpha",
+                        waveform_delta_ewma_alpha)
+    SET_WAVEFORM_DOUBLE("waveform.delta_min_baseline_ratio",
+                        waveform_delta_min_baseline_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.delta_max_baseline_ratio",
+                        waveform_delta_max_baseline_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.overload_max_delta_multiplier",
+                        waveform_overload_max_delta_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.underload_max_delta_multiplier",
+                        waveform_underload_max_delta_multiplier)
+    SET_WAVEFORM_U32("waveform.overload_confirmations",
+                     waveform_overload_confirmations)
+    SET_WAVEFORM_DOUBLE("waveform.queue_low_min_rtt_ratio",
+                        waveform_queue_low_min_rtt_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.queue_target_min_rtt_ratio",
+                        waveform_queue_target_min_rtt_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.queue_high_min_rtt_ratio",
+                        waveform_queue_high_min_rtt_ratio)
     SET_WAVEFORM_DOUBLE("waveform.plateau_min_duration_ratio",
                         waveform_plateau_min_duration_ratio)
     SET_WAVEFORM_DOUBLE("waveform.plateau_max_slope_ratio",
@@ -1186,6 +1216,10 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFreqCCv4, "FreqCCv4", false, true, false};
     }
+    if (key == "freqccv4adaptive")
+    {
+        return {dqc::kFreqCCv4Adaptive, "FreqCCv4-adaptive", false, true, false};
+    }
     if (key == "freqccv4hybrid")
     {
         return {dqc::kFreqCCv4Hybrid, "FreqCCv4-hybrid", false, true, false};
@@ -1200,7 +1234,8 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: oBBR, BBRv2plus, "
-                                              "FreqCCv4, FreqCCv4-hybrid, "
+                                              "FreqCCv4, FreqCCv4-adaptive, "
+                                              "FreqCCv4-hybrid, "
                                               "F-BBR, BBRv2)");
 }
 
@@ -1972,7 +2007,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FreqCCv4, F-BBR, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FreqCCv4, FreqCCv4-adaptive, FreqCCv4-hybrid, F-BBR, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",

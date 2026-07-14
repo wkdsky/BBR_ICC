@@ -148,6 +148,17 @@ struct FreqBbrConfig {
   double waveform_clip_max_slope_ratio = 0.10;
   double waveform_delta_drate_amplitude_ratio = 0.50;
   double waveform_delta_fallback_baseline_ratio = 0.25;
+  double waveform_adaptive_delta_fallback_baseline_ratio = 0.10;
+  double waveform_delta_ewma_alpha = 0.125;
+  double waveform_delta_min_baseline_ratio = 0.02;
+  double waveform_delta_max_baseline_ratio = 0.15;
+  double waveform_overload_max_delta_multiplier = 6.0;
+  double waveform_underload_max_delta_multiplier = 2.0;
+  uint32_t waveform_overload_confirmations = 2;
+  bool waveform_queue_guard_enabled = true;
+  double waveform_queue_low_min_rtt_ratio = 0.10;
+  double waveform_queue_target_min_rtt_ratio = 0.25;
+  double waveform_queue_high_min_rtt_ratio = 0.75;
 
   // Parsed for configuration compatibility only unless noted otherwise.
   double waveform_min_drate_ncc = 0.50;
@@ -182,7 +193,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
                  Random* random,
                  QuicConnectionStats* stats,
                  bool enable_ecn = false,
-                 bool hybrid_window_baseline = false);
+                 bool hybrid_window_baseline = false,
+                 bool adaptive_guard = false);
   ~FreqCCv4Sender() override = default;
 
   void SetOscillationFrequency(double freq_hz);
@@ -206,7 +218,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   static bool RunHybridBaselineSelfTest(std::ostream& os);
 
   CongestionControlType GetCongestionControlType() const override {
-    return hybrid_window_baseline_enabled_ ? kFreqCCv4Hybrid : kFreqCCv4;
+    return hybrid_window_baseline_enabled_
+               ? kFreqCCv4Hybrid
+               : (adaptive_guard_enabled_ ? kFreqCCv4Adaptive : kFreqCCv4);
   }
 
   void OnPacketSent(QuicTime sent_time,
@@ -520,6 +534,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     const char* delta_source = "NONE";
     double raw_delta_bw_bps = 0.0;
     double applied_delta_bw_bps = 0.0;
+    double delta_reference_bps = 0.0;
+    double window_extreme_gap_bps = 0.0;
+    double actuator_step_multiplier = 1.0;
+    double queue_delay_ms = 0.0;
+    double queue_delay_min_rtt_ratio = -1.0;
+    uint32_t overload_confirmation_count = 0;
     WaveformClassification classification =
         WaveformClassification::kInconclusive;
     const char* decision_rule = "R6";
@@ -826,6 +846,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   static const char* LabelToString(int label);
 
   const bool hybrid_window_baseline_enabled_;
+  const bool adaptive_guard_enabled_;
   double configured_modulation_freq_hz_;
   FreqCCv4AmplitudeMode amplitude_mode_;
   uint64_t fixed_amplitude_bps_;
@@ -858,6 +879,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   bool trusted_baseline_locked_;
   bool has_last_similar_drate_amplitude_;
   double last_similar_drate_amplitude_bps_;
+  bool waveform_delta_reference_valid_;
+  double waveform_delta_reference_bps_;
+  uint32_t consecutive_overload_count_;
   const char* waveform_last_delta_source_;
   double waveform_last_raw_delta_bw_bps_;
   double waveform_last_applied_delta_bw_bps_;
@@ -902,6 +926,17 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   double waveform_clip_max_slope_ratio_;
   double waveform_delta_drate_amplitude_ratio_;
   double waveform_delta_fallback_baseline_ratio_;
+  double waveform_adaptive_delta_fallback_baseline_ratio_;
+  double waveform_delta_ewma_alpha_;
+  double waveform_delta_min_baseline_ratio_;
+  double waveform_delta_max_baseline_ratio_;
+  double waveform_overload_max_delta_multiplier_;
+  double waveform_underload_max_delta_multiplier_;
+  uint32_t waveform_overload_confirmations_;
+  bool waveform_queue_guard_enabled_;
+  double waveform_queue_low_min_rtt_ratio_;
+  double waveform_queue_target_min_rtt_ratio_;
+  double waveform_queue_high_min_rtt_ratio_;
   double waveform_plateau_min_duration_ratio_;
   double waveform_plateau_max_slope_ratio_;
   double waveform_plateau_max_level_span_ratio_;

@@ -30,7 +30,12 @@ DEFAULT_FREQCCV4_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "freqccv4_default
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
 CCS = ("BBRv2", "oBBR", "BBRv2plus", "F-BBR")
-SELECTABLE_CCS = (*CCS, "FreqCCv4")
+SELECTABLE_CCS = (
+    *CCS,
+    "FreqCCv4",
+    "FreqCCv4-adaptive",
+    "FreqCCv4-hybrid",
+)
 PLOT_SCRIPT = Path(__file__).with_name("plot_4cc_comparison.py")
 
 
@@ -337,7 +342,19 @@ ALGORITHM_PARAMS = {
         "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
         "config_file": str(DEFAULT_FREQCCV4_CONFIG),
         "algorithm": "FreqCCv4",
-        "notes": "FreqCCv4 使用当前 freqccv4_default.conf，默认 CRUISE detector 为 time_waveform。",
+        "notes": "FreqCCv4 原版使用固定 Δ 上升/下降基线。",
+    },
+    "FreqCCv4-adaptive": {
+        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
+        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
+        "algorithm": "FreqCCv4-adaptive",
+        "notes": "Adaptive Guard 分支使用平滑 Δ、窗口边界、过载确认和队列守卫。",
+    },
+    "FreqCCv4-hybrid": {
+        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
+        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
+        "algorithm": "FreqCCv4-hybrid",
+        "notes": "Hybrid 分支使用窗口极值调整基线，并平滑 FULL_LOAD 窗口均值。",
     },
 }
 
@@ -448,7 +465,12 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         cc: dict(ALGORITHM_PARAMS.get(cc, {"algorithm": cc}))
         for cc in selected
     }
-    for cc in ("F-BBR", "FreqCCv4"):
+    for cc in (
+        "F-BBR",
+        "FreqCCv4",
+        "FreqCCv4-adaptive",
+        "FreqCCv4-hybrid",
+    ):
         if cc in params:
             params[cc]["config_file"] = args.freqccv4_config
 
@@ -588,7 +610,10 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--only-cc",
         default="",
-        help="只运行指定 CC，可用逗号分隔。额外支持单独运行 FreqCCv4。",
+        help=(
+            "只运行指定 CC，可用逗号分隔。额外支持 FreqCCv4、"
+            "FreqCCv4-adaptive 和 FreqCCv4-hybrid。"
+        ),
     )
 
     parser.add_argument("--n-flows", type=int, default=4, help="每个子实验流数量。该复合方案默认 4。")
