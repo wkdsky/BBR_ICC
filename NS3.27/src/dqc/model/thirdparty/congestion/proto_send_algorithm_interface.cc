@@ -391,6 +391,17 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                random,
                                stats);
         }
+        case kFreqCCv4Hybrid:{
+            return new FreqCCv4Sender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+                               stats,
+                               false,
+                               true);
+        }
         case kFBBR:{
             return new FBBRSender(clock,
                                clock->Now(),

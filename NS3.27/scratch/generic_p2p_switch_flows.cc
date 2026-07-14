@@ -570,6 +570,8 @@ SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
                         waveform_min_periodicity_correlation)
     SET_WAVEFORM_DOUBLE("waveform.min_cycle_coverage_ratio",
                         waveform_min_cycle_coverage_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.masked_min_cycle_coverage_ratio",
+                        waveform_masked_min_cycle_coverage_ratio)
     SET_WAVEFORM_DOUBLE("waveform.min_completeness_score",
                         waveform_min_completeness_score)
     SET_WAVEFORM_DOUBLE("waveform.min_rising_duration_ratio",
@@ -1184,6 +1186,10 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFreqCCv4, "FreqCCv4", false, true, false};
     }
+    if (key == "freqccv4hybrid")
+    {
+        return {dqc::kFreqCCv4Hybrid, "FreqCCv4-hybrid", false, true, false};
+    }
     if (key == "fbbr")
     {
         return {dqc::kFBBR, "F-BBR", false, false, true};
@@ -1194,7 +1200,8 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: oBBR, BBRv2plus, "
-                                              "FreqCCv4, F-BBR, BBRv2)");
+                                              "FreqCCv4, FreqCCv4-hybrid, "
+                                              "F-BBR, BBRv2)");
 }
 
 std::string

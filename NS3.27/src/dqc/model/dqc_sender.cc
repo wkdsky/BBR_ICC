@@ -50,7 +50,14 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
-           type == kFreqCCv3 || type == kFreqCCv4 || type == kFBBR;
+           type == kFreqCCv3 || type == kFreqCCv4 ||
+           type == kFreqCCv4Hybrid || type == kFBBR;
+}
+
+bool
+IsFreqCCv4Algorithm(CongestionControlType type)
+{
+    return type == kFreqCCv4 || type == kFreqCCv4Hybrid;
 }
 
 std::string
@@ -458,7 +465,7 @@ void DqcSender::Bind(uint16_t port){
                 m_traceRttFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, rtt_peak_freq_hz, avg_smoothed_rtt_ms);
             }
         });
-    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    } else if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetTraceFlowId(m_id);
         freqccv4->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
@@ -874,7 +881,7 @@ void DqcSender::SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier){
 void DqcSender::SetFreqCCFairShareBandwidth(uint64_t fair_share_bps){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetFairShareBandwidthBps(fair_share_bps);
     } else if(algo && algo->GetCongestionControlType() == kFBBR){
@@ -886,7 +893,7 @@ void DqcSender::SetFreqCCFairShareBandwidth(uint64_t fair_share_bps){
 void DqcSender::SetFreqCCv4CruiseBaselineCap(uint64_t cap_bps){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetCruiseBaselineCapBps(cap_bps);
     }
@@ -1020,7 +1027,7 @@ void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
 
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->ConfigureFreqBbr(config);
     }
@@ -1049,7 +1056,7 @@ void DqcSender::ConfigureFreqCCv4ConvergenceGate(
     uint64_t gate_trace_sample_interval_us){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetTraceFlowId(m_id);
         freqccv4->SetConvergenceGateTraceEnabled(enable_trace);
@@ -1230,7 +1237,7 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
             recv_signal_mode == "raw_delivery" ||
             recv_signal_mode == "recvrate_raw";
         freqccv3->SetRecvSignalMode(use_delivery_rate_latest);
-    } else if(algo && algo->GetCongestionControlType() == kFreqCCv4){
+    } else if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
         FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
         freqccv4->SetOscillationFrequency(freq_hz);
 

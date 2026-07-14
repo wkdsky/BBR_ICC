@@ -141,6 +141,7 @@ bool g_gate_state_machine_self_test = false;
 bool g_trusted_bw_selection_self_test = false;
 bool g_trusted_bw_pacing_self_test = false;
 bool g_waveform_cruise_self_test = false;
+bool g_hybrid_baseline_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
@@ -366,6 +367,7 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_DOUBLE("waveform.period_tolerance_ratio", waveform_period_tolerance_ratio)
     SET_DOUBLE("waveform.min_periodicity_correlation", waveform_min_periodicity_correlation)
     SET_DOUBLE("waveform.min_cycle_coverage_ratio", waveform_min_cycle_coverage_ratio)
+    SET_DOUBLE("waveform.masked_min_cycle_coverage_ratio", waveform_masked_min_cycle_coverage_ratio)
     SET_DOUBLE("waveform.min_completeness_score", waveform_min_completeness_score)
     SET_DOUBLE("waveform.min_rising_duration_ratio", waveform_min_rising_duration_ratio)
     SET_DOUBLE("waveform.min_falling_duration_ratio", waveform_min_falling_duration_ratio)
@@ -647,7 +649,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         }
     }
 	    // Configure FreqCCv4 oscillation parameters
-	    if(cc_type == kFreqCCv4){
+	    if(cc_type == kFreqCCv4 || cc_type == kFreqCCv4Hybrid){
 	        sendApp->ConfigureFreqBbr(g_freq_bbr_config, flow_index);
 	        sendApp->ConfigureFreqCCv4ConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
@@ -779,6 +781,9 @@ void ns3_freqccv4(int ins, std::string algo, DqcTraceState *stat, double sim_tim
     dqc::CongestionControlType cc = kFreqCCv4;
     if(algo == "bbrv2" || algo == "BBRv2" || algo == "bbr2"){
         cc = kBBRv2;
+    } else if(algo == "freqccv4-hybrid" || algo == "freqccv4_hybrid" ||
+              algo == "freqccv4hybrid"){
+        cc = kFreqCCv4Hybrid;
     }
 
     uint32_t max_bps=0;
@@ -922,7 +927,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.AddValue("outputDir", "Output trace directory path", output_dir);
-    cmd.AddValue("algo", "Congestion control: freqccv4 or bbrv2", algo);
+    cmd.AddValue("algo", "Congestion control: freqccv4, freqccv4-hybrid, or bbrv2", algo);
     cmd.AddValue("runId", "ns-3 RNG run id", run_id);
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FreqCCv4 convergence-gate CSV trace", g_enable_convergence_gate_trace);
@@ -939,6 +944,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("trustedBwSelectionSelfTest", "Run TrustedBw dual-signal selection self-test and exit", g_trusted_bw_selection_self_test);
 	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
 	    cmd.AddValue("waveformCruiseSelfTest", "Run deterministic time-waveform CRUISE self-test and exit", g_waveform_cruise_self_test);
+	    cmd.AddValue("hybridBaselineSelfTest", "Run FreqCCv4-hybrid window-baseline self-test and exit", g_hybrid_baseline_self_test);
 	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_freq_bbr_config.cruise_detector_mode);
 	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_freq_bbr_config.waveform_recv_signal_mode);
 	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_freq_bbr_config.waveform_initial_settle_rtt_mult);
@@ -949,6 +955,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformMaxWindowPeriods", "Maximum waveform analysis periods", g_freq_bbr_config.waveform_max_window_periods);
 	    cmd.AddValue("waveformPeriodToleranceRatio", "Waveform period error tolerance", g_freq_bbr_config.waveform_period_tolerance_ratio);
 	    cmd.AddValue("waveformMinCycleCoverageRatio", "Minimum waveform cycle coverage", g_freq_bbr_config.waveform_min_cycle_coverage_ratio);
+	    cmd.AddValue("waveformMaskedMinCycleCoverageRatio", "Minimum coverage after masking sequential middle plateaus", g_freq_bbr_config.waveform_masked_min_cycle_coverage_ratio);
 	    cmd.AddValue("waveformMinCompletenessScore", "Minimum waveform completeness score", g_freq_bbr_config.waveform_min_completeness_score);
 	    cmd.AddValue("waveformMinRisingDurationRatio", "Minimum rising duration ratio", g_freq_bbr_config.waveform_min_rising_duration_ratio);
 	    cmd.AddValue("waveformMinFallingDurationRatio", "Minimum falling duration ratio", g_freq_bbr_config.waveform_min_falling_duration_ratio);
@@ -973,7 +980,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformAmplitudeFloorRatio", "Waveform amplitude floor reference ratio", g_freq_bbr_config.waveform_amplitude_floor_ratio);
 	    cmd.AddValue("waveformClipFloorConfirmations", "Valid clip windows required at amplitude floor", g_freq_bbr_config.waveform_clip_floor_confirmations);
 	    cmd.AddValue("waveformMaxBaselineAdjustments", "Maximum waveform baseline adjustments", g_freq_bbr_config.waveform_max_baseline_adjustments);
-	    cmd.AddValue("waveformMaxInconclusiveExtensions", "Maximum incomplete-cycle extensions", g_freq_bbr_config.waveform_max_inconclusive_extensions);
+	    cmd.AddValue("waveformMaxInconclusiveExtensions", "Maximum one-period extensions after an inconclusive decision", g_freq_bbr_config.waveform_max_inconclusive_extensions);
 	    cmd.AddValue("waveformMaxAppLimitedSampleRatio", "Maximum app-limited sample ratio", g_freq_bbr_config.waveform_max_app_limited_sample_ratio);
 	    cmd.AddValue("waveformMaxInterpolationGapPeriodRatio", "Maximum interpolation gap as period ratio", g_freq_bbr_config.waveform_max_interpolation_gap_period_ratio);
 	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
@@ -1022,6 +1029,9 @@ int main (int argc, char *argv[]){
 	    }
 	    if(g_waveform_cruise_self_test){
 	        return FreqCCv4Sender::RunWaveformCruiseSelfTest(std::cout) ? 0 : 1;
+	    }
+	    if(g_hybrid_baseline_self_test){
+	        return FreqCCv4Sender::RunHybridBaselineSelfTest(std::cout) ? 0 : 1;
 	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);

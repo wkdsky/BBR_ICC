@@ -129,11 +129,12 @@ struct FreqBbrConfig {
   double waveform_post_adjust_settle_rtt_mult = 1.0;
   bool waveform_negative_half_first = true;
   double waveform_initial_window_periods = 2.0;
-  double waveform_extended_window_periods = 2.0;
-  double waveform_max_window_periods = 2.0;
+  double waveform_extended_window_periods = 3.0;
+  double waveform_max_window_periods = 3.0;
   double waveform_period_tolerance_ratio = 0.15;
   double waveform_min_periodicity_correlation = 0.50;
   double waveform_min_cycle_coverage_ratio = 0.85;
+  double waveform_masked_min_cycle_coverage_ratio = 0.50;
   double waveform_min_completeness_score = 0.60;
   double waveform_min_rising_duration_ratio = 0.15;
   double waveform_min_falling_duration_ratio = 0.15;
@@ -180,7 +181,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
                  QuicPacketCount max_cwnd_in_packets,
                  Random* random,
                  QuicConnectionStats* stats,
-                 bool enable_ecn = false);
+                 bool enable_ecn = false,
+                 bool hybrid_window_baseline = false);
   ~FreqCCv4Sender() override = default;
 
   void SetOscillationFrequency(double freq_hz);
@@ -201,9 +203,10 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   static bool RunTrustedBwSelectionSelfTest(std::ostream& os);
   static bool RunTrustedBwPacingSelfTest(std::ostream& os);
   static bool RunWaveformCruiseSelfTest(std::ostream& os);
+  static bool RunHybridBaselineSelfTest(std::ostream& os);
 
   CongestionControlType GetCongestionControlType() const override {
-    return kFreqCCv4;
+    return hybrid_window_baseline_enabled_ ? kFreqCCv4Hybrid : kFreqCCv4;
   }
 
   void OnPacketSent(QuicTime sent_time,
@@ -415,6 +418,18 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     bool top_clip = false;
     bool bottom_clip = false;
     bool ambiguous = false;
+    bool drate_positive_half_clipped = false;
+    bool drate_negative_half_clipped = false;
+    bool drate_clip_ambiguous = false;
+    bool positive_half_clips_simultaneous = false;
+    bool srtt_middle_sequential_plateau = false;
+    bool drate_middle_sequential_plateau = false;
+    bool drate_middle_any_plateau = false;
+    bool drate_has_waveform = false;
+    size_t plateau_candidate_count = 0;
+    size_t middle_sequential_candidate_count = 0;
+    std::vector<bool> srtt_middle_sequential_mask;
+    std::vector<bool> drate_middle_sequential_mask;
     double plateau_start = 0.0;
     double plateau_end = 0.0;
     double plateau_duration_ratio = 0.0;
@@ -424,6 +439,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     double plateau_abs_slope = 0.0;
     double shoulder_slope_before = 0.0;
     double shoulder_slope_after = 0.0;
+    double other_shoulder_slope_before = 0.0;
+    double other_shoulder_slope_after = 0.0;
     bool shoulders_opposite = false;
     double shoulder_change_before = 0.0;
     double shoulder_change_after = 0.0;
@@ -454,6 +471,13 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     size_t sender_sample_count = 0;
     size_t drate_sample_count = 0;
     size_t srtt_sample_count = 0;
+    size_t delivery_rate_stat_sample_count = 0;
+    bool delivery_rate_stats_valid = false;
+    double delivery_rate_min_bps = 0.0;
+    double delivery_rate_max_bps = 0.0;
+    double delivery_rate_mean_bps = 0.0;
+    double latest_trusted_bw_bps = 0.0;
+    double smoothed_trusted_bw_bps = 0.0;
     double coverage_ratio = 0.0;
     double app_limited_ratio = 0.0;
     bool sender_waveform_valid = false;
@@ -464,6 +488,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     CycleCompletenessResult drate_completeness;
     TemplateFitResult drate_fit;
     bool drate_similar = false;
+    bool drate_similar_without_middle = false;
+    bool drate_effective_similar = false;
     bool drate_match = false;
     bool srtt_input_valid = false;
     double srtt_direct_ncc = 0.0;
@@ -474,12 +500,16 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     TemplateFitResult srtt_fit;
     bool srtt_similar_frequency = false;
     bool srtt_similar = false;
+    bool srtt_similar_without_middle = false;
+    bool srtt_effective_similar = false;
     bool srtt_cycle_complete = false;
     bool srtt_positive_half_clipped = false;
     bool srtt_negative_half_clipped = false;
     bool srtt_clip_ambiguous = false;
     bool srtt_match = false;
     PlateauDetectionResult plateau;
+    CycleCompletenessResult drate_without_middle_completeness;
+    CycleCompletenessResult srtt_without_middle_completeness;
     double boundary_lift_time_s = 0.0;
     double boundary_sender_phase = 0.0;
     double boundary_rate_bps = 0.0;
@@ -492,6 +522,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     double applied_delta_bw_bps = 0.0;
     WaveformClassification classification =
         WaveformClassification::kInconclusive;
+    const char* decision_rule = "R6";
     std::string invalid_reason = "none";
   };
 
@@ -658,6 +689,18 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
       double shoulder_duration_s,
       double minimum_abs_slope,
       double minimum_signal_change);
+  static bool HasMacroSameDirectionShoulders(double slope_before,
+                                             double slope_after);
+  static bool HasDualMacroOpposingShoulders(
+      double first_before,
+      double first_after,
+      double first_minimum_abs_slope,
+      double first_minimum_signal_change,
+      double second_before,
+      double second_after,
+      double second_minimum_abs_slope,
+      double second_minimum_signal_change,
+      double shoulder_duration_s);
   static std::vector<double> RobustNormalize(
       const std::vector<double>& values,
       const std::vector<bool>& valid);
@@ -669,15 +712,19 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
       const std::vector<double>& values,
       const std::vector<bool>& valid,
       double sample_step_s,
-      double expected_period_s) const;
-  PlateauDetectionResult DetectSrttPlateau(
+      double expected_period_s,
+      double minimum_coverage_ratio = -1.0) const;
+  PlateauDetectionResult DetectDualSignalPlateaus(
       const std::vector<double>& srtt,
       const std::vector<double>& srtt_slopes,
+      const std::vector<double>& drate,
+      const std::vector<double>& drate_slopes,
       const std::vector<double>& sender_residual,
       const std::vector<bool>& valid,
       double sample_step_s,
       double period_s,
-      double response_noise_sigma) const;
+      double srtt_noise_sigma,
+      double drate_noise_sigma) const;
   bool LocateBoundaryLiftPoint(
       const PlateauDetectionResult& plateau,
       const std::vector<double>& srtt_slopes,
@@ -710,17 +757,36 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   static const char* WaveformStateName(WaveformCruiseState state);
   static const char* WaveformClassificationName(
       WaveformClassification classification);
+  struct DeliveryRateWindowStats {
+    size_t sample_count = 0;
+    bool valid = false;
+    double min_bps = 0.0;
+    double max_bps = 0.0;
+    double mean_bps = 0.0;
+  };
+  static DeliveryRateWindowStats ComputeDeliveryRateWindowStats(
+      const std::vector<FreqCCv4RateSample>& samples);
+  static double SmoothTrustedBandwidth(double historical_smoothed_bps,
+                                       bool historical_valid,
+                                       double latest_trusted_bps);
+  struct WaveformDecisionInputs {
+    bool prechecks_valid = false;
+    bool srtt_input_valid = false;
+    bool drate_input_valid = false;
+    bool srtt_similar = false;
+    bool srtt_similar_without_middle = false;
+    bool drate_similar = false;
+    bool drate_similar_without_middle = false;
+    bool srtt_positive_half_clipped = false;
+    bool srtt_negative_half_clipped = false;
+    bool drate_positive_half_clipped = false;
+    bool positive_half_clips_simultaneous = false;
+    bool drate_has_waveform = false;
+    bool drate_middle_any_plateau = false;
+  };
   static WaveformClassification ClassifyWaveformState(
-      bool prechecks_valid,
-      bool srtt_input_valid,
-      bool srtt_similar_frequency,
-      bool srtt_similar,
-      bool srtt_cycle_complete,
-      bool srtt_positive_half_clipped,
-      bool srtt_negative_half_clipped,
-      bool srtt_clip_ambiguous,
-      bool drate_input_valid,
-      bool drate_similar);
+      const WaveformDecisionInputs& inputs,
+      const char** decision_rule = nullptr);
   static const char* CruiseDetectorModeName(
       FreqCCv4CruiseDetectorMode mode);
 
@@ -759,6 +825,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   static double WidthScore(double width_ratio, double r0, double sigma);
   static const char* LabelToString(int label);
 
+  const bool hybrid_window_baseline_enabled_;
   double configured_modulation_freq_hz_;
   FreqCCv4AmplitudeMode amplitude_mode_;
   uint64_t fixed_amplitude_bps_;
@@ -803,6 +870,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   uint32_t trusted_bw_candidate_update_count_;
   QuicBandwidth trusted_bw_candidate_;
   const char* trusted_bw_candidate_source_;
+  QuicBandwidth hybrid_latest_trusted_bw_;
+  QuicBandwidth hybrid_smoothed_trusted_bw_;
+  bool hybrid_smoothed_trusted_bw_valid_;
   std::string waveform_last_action_;
   std::string waveform_last_invalid_reason_;
 
@@ -815,6 +885,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   double waveform_period_tolerance_ratio_;
   double waveform_min_periodicity_correlation_;
   double waveform_min_cycle_coverage_ratio_;
+  double waveform_masked_min_cycle_coverage_ratio_;
   double waveform_min_completeness_score_;
   double waveform_min_rising_duration_ratio_;
   double waveform_min_falling_duration_ratio_;
