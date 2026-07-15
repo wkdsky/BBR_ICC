@@ -897,6 +897,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   QuicBandwidth hybrid_latest_trusted_bw_;
   QuicBandwidth hybrid_smoothed_trusted_bw_;
   bool hybrid_smoothed_trusted_bw_valid_;
+  QuicBandwidth adaptive_trusted_bw_history_;
+  bool adaptive_trusted_bw_history_valid_;
   std::string waveform_last_action_;
   std::string waveform_last_invalid_reason_;
 

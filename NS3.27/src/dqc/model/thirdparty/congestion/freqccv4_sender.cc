@@ -22,6 +22,8 @@ constexpr const char* kTrustedBwSourceNormal = "NORMAL_SPECTRAL";
 constexpr const char* kTrustedBwSourceMerged = "MERGED_SPECTRAL";
 constexpr const char* kTrustedBwSourceTimeWaveformBaseline =
     "TIME_WAVEFORM_SRTT_SEARCH";
+constexpr const char* kTrustedBwSourceAdaptiveBaselineSmoothedFallback =
+    "ADAPTIVE_BASELINE_SMOOTHED_FALLBACK";
 constexpr const char* kTrustedBwSourceHybridSmoothedWindowMean =
     "HYBRID_SMOOTHED_WINDOW_MEAN";
 constexpr const char* kWaveformDeltaSourceNone = "NONE";
@@ -41,6 +43,7 @@ constexpr const char* kWaveformDeltaSourceHybridSmoothedTrustedBw =
     "HYBRID_SMOOTHED_TRUSTED_BW";
 // RFC 6298 recommends alpha=1/8 for the SRTT EWMA update.
 constexpr double kHybridTrustedBwAlpha = 1.0 / 8.0;
+constexpr double kAdaptiveFallbackTrustedBwAlpha = 1.0 / 4.0;
 constexpr uint64_t kDefaultMinimumPacingRateBps = 1000000;
 constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
 constexpr float kFreqCCv4CruiseCwndGain = 1.25f;
@@ -50,6 +53,22 @@ constexpr const char* kLimitingSpectralSignalEqual = "EQUAL";
 
 double ClampValue(double value, double low, double high) {
   return std::max(low, std::min(high, value));
+}
+
+double SmoothBandwidthEwma(double historical_smoothed_bps,
+                           bool historical_valid,
+                           double latest_bps,
+                           double alpha) {
+  if (!std::isfinite(latest_bps) || latest_bps <= 0.0) {
+    return 0.0;
+  }
+  if (!historical_valid || !std::isfinite(historical_smoothed_bps) ||
+      historical_smoothed_bps <= 0.0) {
+    return latest_bps;
+  }
+  const double clamped_alpha = ClampValue(alpha, 0.0, 1.0);
+  return (1.0 - clamped_alpha) * historical_smoothed_bps +
+         clamped_alpha * latest_bps;
 }
 
 double CappedWindowStep(double window_gap_bps,
@@ -313,6 +332,8 @@ FreqCCv4Sender::FreqCCv4Sender(
       hybrid_latest_trusted_bw_(QuicBandwidth::Zero()),
       hybrid_smoothed_trusted_bw_(QuicBandwidth::Zero()),
       hybrid_smoothed_trusted_bw_valid_(false),
+      adaptive_trusted_bw_history_(QuicBandwidth::Zero()),
+      adaptive_trusted_bw_history_valid_(false),
       waveform_last_action_("none"),
       waveform_last_invalid_reason_("none"),
       waveform_initial_settle_rtt_mult_(1.0),
@@ -805,6 +826,8 @@ void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
   hybrid_latest_trusted_bw_ = QuicBandwidth::Zero();
   hybrid_smoothed_trusted_bw_ = QuicBandwidth::Zero();
   hybrid_smoothed_trusted_bw_valid_ = false;
+  adaptive_trusted_bw_history_ = QuicBandwidth::Zero();
+  adaptive_trusted_bw_history_valid_ = false;
   ClearTrustedBw("configuration_changed");
 }
 
@@ -2037,6 +2060,7 @@ void FreqCCv4Sender::PublishTrustedBwSelection(
   const std::string trusted_bw_source = selection.trusted_bw_source;
   const bool waveform_source =
       trusted_bw_source == kTrustedBwSourceTimeWaveformBaseline ||
+      trusted_bw_source == kTrustedBwSourceAdaptiveBaselineSmoothedFallback ||
       trusted_bw_source == kTrustedBwSourceHybridSmoothedWindowMean;
   const bool valid_selection =
       selection.trusted_bw_valid &&
@@ -2061,6 +2085,10 @@ void FreqCCv4Sender::PublishTrustedBwSelection(
   trusted_bw_ready_for_post_cruise_ = true;
   trusted_bw_application_phase_ = "POST_CRUISE_READY";
   trusted_bw_invalid_reason_ = "none";
+  if (adaptive_guard_enabled_) {
+    adaptive_trusted_bw_history_ = trusted_bw_;
+    adaptive_trusted_bw_history_valid_ = true;
+  }
 }
 
 const char* FreqCCv4Sender::PhaseApplicationName(
@@ -5172,6 +5200,60 @@ void FreqCCv4Sender::PublishWaveformTrustedBw() {
       trusted_bw_candidate_.ToBitsPerSecond());
   if (!trusted_baseline_locked_ || trusted_bw_candidate_.IsZero() ||
       !std::isfinite(candidate_bps) || candidate_bps <= 0.0) {
+    if (adaptive_guard_enabled_) {
+      const double tmp_bps = static_cast<double>(
+          current_injection_baseline_bw_.ToBitsPerSecond());
+      if (std::isfinite(tmp_bps) && tmp_bps > 0.0) {
+        double historical_bps = static_cast<double>(
+            adaptive_trusted_bw_history_.ToBitsPerSecond());
+        bool historical_valid =
+            adaptive_trusted_bw_history_valid_ &&
+            std::isfinite(historical_bps) && historical_bps > 0.0;
+        if (!historical_valid && trusted_bw_valid_ &&
+            !trusted_bw_.IsZero()) {
+          historical_bps =
+              static_cast<double>(trusted_bw_.ToBitsPerSecond());
+          historical_valid =
+              std::isfinite(historical_bps) && historical_bps > 0.0;
+        }
+
+        const double smoothed_bps = SmoothBandwidthEwma(
+            historical_bps,
+            historical_valid,
+            tmp_bps,
+            kAdaptiveFallbackTrustedBwAlpha);
+        const QuicBandwidth smoothed_bw = BandwidthFromBps(smoothed_bps);
+        if (!smoothed_bw.IsZero() &&
+            std::isfinite(static_cast<double>(
+                smoothed_bw.ToBitsPerSecond()))) {
+          trusted_bw_candidate_ = smoothed_bw;
+          trusted_bw_candidate_source_ =
+              kTrustedBwSourceAdaptiveBaselineSmoothedFallback;
+          ++trusted_bw_candidate_update_count_;
+          TrustedBwSelectionResult selection = {
+              BandwidthEstimate(),
+              smoothed_bw,
+              true,
+              1.0,
+              kTrustedBwSourceAdaptiveBaselineSmoothedFallback,
+              std::numeric_limits<double>::quiet_NaN(),
+              std::numeric_limits<double>::quiet_NaN(),
+              std::numeric_limits<double>::quiet_NaN(),
+              false,
+              false,
+              false,
+              "NOT_APPLICABLE",
+              false,
+              false,
+              0,
+              0,
+              0,
+              0};
+          PublishTrustedBwSelection(selection);
+          return;
+        }
+      }
+    }
     ClearTrustedBw(waveform_last_invalid_reason_.empty() ||
                            waveform_last_invalid_reason_ == "none"
                        ? "waveform_not_locked"
@@ -6085,15 +6167,10 @@ double FreqCCv4Sender::SmoothTrustedBandwidth(
     double historical_smoothed_bps,
     bool historical_valid,
     double latest_trusted_bps) {
-  if (!std::isfinite(latest_trusted_bps) || latest_trusted_bps <= 0.0) {
-    return 0.0;
-  }
-  if (!historical_valid || !std::isfinite(historical_smoothed_bps) ||
-      historical_smoothed_bps <= 0.0) {
-    return latest_trusted_bps;
-  }
-  return (1.0 - kHybridTrustedBwAlpha) * historical_smoothed_bps +
-         kHybridTrustedBwAlpha * latest_trusted_bps;
+  return SmoothBandwidthEwma(historical_smoothed_bps,
+                             historical_valid,
+                             latest_trusted_bps,
+                             kHybridTrustedBwAlpha);
 }
 
 std::vector<FreqCCv4RttSample> FreqCCv4Sender::SelectRttSamples(
