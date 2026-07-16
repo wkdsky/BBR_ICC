@@ -14,6 +14,7 @@ Directory layout:
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -45,6 +46,7 @@ class RunnerConfig:
     sim_time: float = 30.0
     algos: str = "BBRv2"
     start_times: str = "0"
+    stop_times: str = ""
     initial_rates: str = "0"
     rate_schedules: str = ""
     freqccv4_cruise_base_caps: str = "0"
@@ -63,6 +65,8 @@ class RunnerConfig:
     enable_trace: bool = True
     enable_heavy_trace: bool = False
     enable_queue_trace: bool = True
+    emit_bottleneck_queue_trace: bool = True
+    queue_sample_interval_us: int = 200
     emulated_connections: int = 1
     data_generator_batch: int = 2
     stream_buffer_bytes: int = 0
@@ -82,6 +86,7 @@ class RunnerConfig:
     trace_name: str = "generic_p2p_switch"
     seed: int = 1
     run_id: int = 1
+    direct_binary: bool = False
 
 
 def bool_to_ns3(value: bool) -> str:
@@ -105,6 +110,7 @@ def unique_dir(path: Path) -> Path:
 
 
 def prepare_experiment_dir(cfg: RunnerConfig, create: bool) -> Path:
+    explicit_trace_path = bool(cfg.trace_path)
     if cfg.trace_path:
         experiment_dir = Path(cfg.trace_path).expanduser()
     else:
@@ -116,7 +122,7 @@ def prepare_experiment_dir(cfg: RunnerConfig, create: bool) -> Path:
     cfg.trace_path = str(experiment_dir)
     if create:
         try:
-            experiment_dir.mkdir(parents=True, exist_ok=False)
+            experiment_dir.mkdir(parents=True, exist_ok=explicit_trace_path)
         except PermissionError as exc:
             raise RuntimeError(
                 f"无法在 {experiment_dir.parent} 下创建实验目录，当前用户没有写权限。\n"
@@ -133,6 +139,7 @@ def build_ns3_args(cfg: RunnerConfig) -> List[str]:
         "simTime": cfg.sim_time,
         "algos": cfg.algos,
         "startTimes": cfg.start_times,
+        "flowStopTimes": cfg.stop_times,
         "initialRates": cfg.initial_rates,
         "rateSchedules": cfg.rate_schedules,
         "freqccv4CruiseBaseCaps": cfg.freqccv4_cruise_base_caps,
@@ -151,6 +158,8 @@ def build_ns3_args(cfg: RunnerConfig) -> List[str]:
         "enableTrace": bool_to_ns3(cfg.enable_trace),
         "enableHeavyTrace": bool_to_ns3(cfg.enable_heavy_trace),
         "enableQueueTrace": bool_to_ns3(cfg.enable_queue_trace),
+        "emitBottleneckQueueTrace": bool_to_ns3(cfg.emit_bottleneck_queue_trace),
+        "queueSampleIntervalUs": cfg.queue_sample_interval_us,
         "emulatedConnections": cfg.emulated_connections,
         "dataGeneratorBatch": cfg.data_generator_batch,
         "streamBufferBytes": cfg.stream_buffer_bytes,
@@ -187,6 +196,7 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
     print(f"流数量：{cfg.n_flows}")
     print(f"算法：{cfg.algos}")
     print(f"注入时刻：{cfg.start_times} s")
+    print(f"停止时刻：{cfg.stop_times or cfg.sim_time} s")
     print(f"发送速率上限 initialRates：{cfg.initial_rates}")
     if cfg.rate_schedules:
         print(f"分阶段发送速率上限 rateSchedules：{cfg.rate_schedules}")
@@ -198,16 +208,29 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
     print(f"端侧/access 队列：{cfg.endpoint_queue_bytes} bytes")
     print(f"仿真时长：{cfg.sim_time} s")
     print(f"heavy trace：{cfg.enable_heavy_trace}")
+    print(
+        "队列 trace："
+        f"逐事件={cfg.enable_queue_trace}, 固定采样={cfg.emit_bottleneck_queue_trace}, "
+        f"间隔={cfg.queue_sample_interval_us} us"
+    )
     print(f"FreqCCv4 gate trace：{cfg.enable_convergence_gate_trace}, mode={cfg.gate_trace_mode}")
     print(f"log 根目录：{cfg.log_root}")
     print(f"本次实验目录：{cfg.trace_path}")
     print("本次实验目录内会保存：run.log、command.txt、config.json、ns-3 trace 文件")
     print(f"freqccv4 config：{cfg.freqccv4_config}")
     print("-" * 88)
-    run_part = " ".join([SCENARIO, *ns3_args])
-    print("完整 waf 命令：")
-    print(f"cd {shlex.quote(str(NS3_ROOT))}")
-    print(f"./waf --run {shlex.quote(run_part)}")
+    if cfg.direct_binary:
+        binary = NS3_ROOT / "build" / "scratch" / SCENARIO
+        print("完整二进制命令（批量脚本已预先编译）：")
+        print(
+            f"LD_LIBRARY_PATH={shlex.quote(str(NS3_ROOT / 'build'))}:$LD_LIBRARY_PATH "
+            + " ".join(shlex.quote(part) for part in [str(binary), *ns3_args])
+        )
+    else:
+        run_part = " ".join([SCENARIO, *ns3_args])
+        print("完整 waf 命令：")
+        print(f"cd {shlex.quote(str(NS3_ROOT))}")
+        print(f"./waf --run {shlex.quote(run_part)}")
     print("=" * 88)
     sys.stdout.flush()
 
@@ -224,12 +247,30 @@ def run_command(cfg: RunnerConfig, dry_run: bool) -> int:
         print("\n--dry-run 已启用：只打印命令，不执行。")
         return 0
 
-    run_part = " ".join([SCENARIO, *ns3_args])
-    cmd = ["./waf", "--run", run_part]
-    command_text = (
-        f"cd {shlex.quote(str(NS3_ROOT))}\n"
-        f"./waf --run {shlex.quote(run_part)}\n"
-    )
+    if cfg.direct_binary:
+        binary = NS3_ROOT / "build" / "scratch" / SCENARIO
+        if not binary.exists():
+            print(f"配置错误：直接运行的二进制不存在：{binary}", file=sys.stderr)
+            return 2
+        cmd = [str(binary), *ns3_args]
+        command_env = os.environ.copy()
+        old_library_path = command_env.get("LD_LIBRARY_PATH", "")
+        command_env["LD_LIBRARY_PATH"] = str(NS3_ROOT / "build") + (
+            f":{old_library_path}" if old_library_path else ""
+        )
+        command_text = (
+            f"LD_LIBRARY_PATH={shlex.quote(command_env['LD_LIBRARY_PATH'])} "
+            + " ".join(shlex.quote(part) for part in cmd)
+            + "\n"
+        )
+    else:
+        run_part = " ".join([SCENARIO, *ns3_args])
+        cmd = ["./waf", "--run", run_part]
+        command_text = (
+            f"cd {shlex.quote(str(NS3_ROOT))}\n"
+            f"./waf --run {shlex.quote(run_part)}\n"
+        )
+        command_env = None
     (experiment_dir / "command.txt").write_text(command_text, encoding="utf-8")
     (experiment_dir / "config.json").write_text(
         json.dumps(asdict(cfg), ensure_ascii=False, indent=2) + "\n",
@@ -250,6 +291,7 @@ def run_command(cfg: RunnerConfig, dry_run: bool) -> int:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
+            env=command_env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -392,6 +434,7 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.sim_time = args.sim_time
     cfg.algos = cc
     cfg.start_times = args.start_times
+    cfg.stop_times = args.stop_times
     cfg.initial_rates = args.initial_rates
     cfg.rate_schedules = args.rate_schedules
     cfg.freqccv4_cruise_base_caps = args.freqccv4_cruise_base_caps
@@ -409,7 +452,9 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.use_engine_timer = args.use_engine_timer
     cfg.enable_trace = True
     cfg.enable_heavy_trace = args.enable_heavy_trace
-    cfg.enable_queue_trace = True
+    cfg.enable_queue_trace = args.enable_queue_trace
+    cfg.emit_bottleneck_queue_trace = True
+    cfg.queue_sample_interval_us = args.queue_sample_interval_us
     cfg.enable_convergence_gate_trace = args.enable_convergence_gate_trace
     cfg.gate_trace_mode = args.gate_trace_mode
     cfg.data_generator_batch = args.data_generator_batch
@@ -420,6 +465,7 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.trace_name = cc
     cfg.seed = args.seed
     cfg.run_id = args.run_id
+    cfg.direct_binary = args.direct_binary
     return cfg
 
 
@@ -430,6 +476,7 @@ def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str,
         "n_flows_per_subexperiment": args.n_flows,
         "sim_time_s": args.sim_time,
         "start_times_s": args.start_times,
+        "stop_times_s": args.stop_times or str(args.sim_time),
         "initial_rates": args.initial_rates,
         "rate_schedules": args.rate_schedules,
         "freqccv4_cruise_base_caps": args.freqccv4_cruise_base_caps,
@@ -437,6 +484,10 @@ def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str,
         "stream_buffer_bytes": args.stream_buffer_bytes,
         "enable_convergence_gate_trace": args.enable_convergence_gate_trace,
         "gate_trace_mode": args.gate_trace_mode,
+        "enable_queue_trace": args.enable_queue_trace,
+        "queue_sample_interval_us": args.queue_sample_interval_us,
+        "seed": args.seed,
+        "run_id": args.run_id,
         "access_rate": args.access_rate,
         "shared_bottleneck_rate": args.service_rate,
         "rtt_design": f"RTT ~= 2 * (2 * {args.access_delay_ms}ms + {args.service_delay_ms}ms)",
@@ -494,6 +545,7 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         "",
         f"- 流数量：{args.n_flows}",
         f"- 启动时刻：{args.start_times} s",
+        f"- 停止时刻：{args.stop_times or args.sim_time} s",
         f"- 共享 bottleneck 链路：`left switch -> right switch` 为 {args.service_rate}",
         f"- access 链路：`sender[i] -> left switch` 和 `right switch -> receiver[i]` 为 {args.access_rate}",
         f"- RTT 设计：约 `2 * (2 * {args.access_delay_ms}ms + {args.service_delay_ms}ms)`",
@@ -512,6 +564,9 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
 def run_plot(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> int:
     compare_dir = root / "compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
+    plot_env = os.environ.copy()
+    plot_env["MPLCONFIGDIR"] = str(compare_dir / ".matplotlib")
+    plot_env["XDG_CACHE_HOME"] = str(compare_dir / ".cache")
     selected = list(ccs)
     cmd = [
         sys.executable,
@@ -530,6 +585,12 @@ def run_plot(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> int:
         str(args.sample_step_s),
         "--warmup-s",
         str(args.warmup_s),
+        "--flow-start-times",
+        args.start_times,
+        "--flow-stop-times",
+        args.stop_times or str(args.sim_time),
+        "--sim-time",
+        str(args.sim_time),
     ]
     (compare_dir / "plot_command.txt").write_text(
         " ".join(shlex.quote(part) for part in cmd) + "\n", encoding="utf-8"
@@ -541,6 +602,7 @@ def run_plot(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> int:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=plot_env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -605,8 +667,10 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-dir", default="", help="指定完整复合实验目录。配合 --skip-run 可只重画图。")
     parser.add_argument("--dry-run", action="store_true", help="只打印四个子实验命令，不运行、不画图。")
     parser.add_argument("--skip-run", action="store_true", help="跳过 ns-3 子实验，只根据已有 trace 画图。")
+    parser.add_argument("--skip-completed", action="store_true", help="已有 return_code=0 的 CC 子实验不再重复运行。")
     parser.add_argument("--no-plot", action="store_true", help="只运行四个子实验，不执行画图脚本。")
     parser.add_argument("--continue-on-error", action="store_true", help="某个 CC 子实验失败后继续尝试后续子实验。")
+    parser.add_argument("--direct-binary", action="store_true", help="直接运行已编译的 build/scratch 二进制；批量并行实验使用。")
     parser.add_argument(
         "--only-cc",
         default="",
@@ -619,6 +683,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-flows", type=int, default=4, help="每个子实验流数量。该复合方案默认 4。")
     parser.add_argument("--sim-time", type=float, default=60.0, help="仿真时长秒。默认 60。论文常用更长，调试可降低。")
     parser.add_argument("--start-times", default="0,0,0,0", help="四条流注入时刻。默认同步启动，贴近多数多流实验。")
+    parser.add_argument("--stop-times", default="", help="每条流停止时刻；给 1 个值或每流 1 个值。默认都在仿真结束时停止。")
     parser.add_argument("--initial-rates", default="0", help="发送端速率上限。0 表示不限制，让 CC 自行决定 pacing。")
     parser.add_argument(
         "--rate-schedules",
@@ -650,6 +715,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream-buffer-bytes", type=int, default=0, help="DQC stream send buffer；0 保持核心默认值。")
     parser.add_argument("--use-engine-timer", action=argparse.BooleanOptionalAction, default=True, help="是否使用 DQC engine timer。默认启用。")
     parser.add_argument("--enable-heavy-trace", action=argparse.BooleanOptionalAction, default=False, help="是否开启 RTT/BW/sendrate 等重 trace。默认关闭。")
+    parser.add_argument("--enable-queue-trace", action=argparse.BooleanOptionalAction, default=True, help="是否输出逐事件共享队列 trace；长实验可关闭并保留固定间隔 bottleneck_queue.csv。")
+    parser.add_argument("--queue-sample-interval-us", type=int, default=200, help="bottleneck_queue.csv 固定采样间隔 us。默认 200。")
     parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FreqCCv4 gate trace；绘制 Delivery Rate/TrustedBw 细节图时应开启。")
     parser.add_argument("--gate-trace-mode", choices=("off", "round_only", "sampled_pacing", "full"), default="round_only", help="FreqCCv4 gate trace 粒度。细节图建议 sampled_pacing。")
     parser.add_argument("--freqccv4-config", default=str(DEFAULT_FREQCCV4_CONFIG), help="freqccv4 配置文件路径；默认保持现有 freqccv4_default.conf。")
@@ -668,6 +735,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("提示：这是 4 条流对比方案；你覆盖了 --n-flows，脚本会照常运行。")
     if len(split_csv(args.start_times)) not in {1, args.n_flows}:
         print(f"配置错误：--start-times 必须给 1 个值或 {args.n_flows} 个值。", file=sys.stderr)
+        return 2
+    if args.stop_times and len(split_csv(args.stop_times)) not in {1, args.n_flows}:
+        print(f"配置错误：--stop-times 必须给 1 个值或 {args.n_flows} 个值。", file=sys.stderr)
         return 2
     try:
         ccs_to_run = selected_ccs(args)
@@ -693,6 +763,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     results: Dict[str, int] = {} if args.dry_run else load_return_codes(root)
     if not args.skip_run:
         for cc in ccs_to_run:
+            if args.skip_completed and results.get(cc) == 0:
+                print(f"跳过已完成子实验：{cc}")
+                continue
             print("\n" + "=" * 88)
             print(f"开始子实验：{cc}")
             cfg = build_sub_config(args, root, cc)

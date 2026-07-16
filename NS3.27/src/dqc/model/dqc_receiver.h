@@ -78,6 +78,6 @@ private:
     uint32_t m_timeLastPacket=0;
     uint64_t m_sumOwd=0;
     uint32_t m_lastCalGoodTime=0;
-    uint32_t m_lastGoodRecv=0;
+    uint64_t m_lastGoodRecv=0;
 };    
 }

@@ -485,6 +485,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     size_t sender_sample_count = 0;
     size_t drate_sample_count = 0;
     size_t srtt_sample_count = 0;
+    size_t srtt_stat_sample_count = 0;
+    bool srtt_stats_valid = false;
+    double srtt_mean_ms = 0.0;
+    double srtt_max_ms = 0.0;
+    bool latest_waveform_overload_srtt_mean_valid = false;
+    double latest_waveform_overload_srtt_mean_ms = 0.0;
     size_t delivery_rate_stat_sample_count = 0;
     bool delivery_rate_stats_valid = false;
     double delivery_rate_min_bps = 0.0;
@@ -786,12 +792,25 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   };
   static DeliveryRateWindowStats ComputeDeliveryRateWindowStats(
       const std::vector<FreqCCv4RateSample>& samples);
+  struct SrttWindowStats {
+    size_t sample_count = 0;
+    bool valid = false;
+    double mean_ms = 0.0;
+    double max_ms = 0.0;
+  };
+  static SrttWindowStats ComputeSrttWindowStats(
+      const std::vector<FreqCCv4RttSample>& samples);
   static double SmoothTrustedBandwidth(double historical_smoothed_bps,
                                        bool historical_valid,
                                        double latest_trusted_bps);
   struct WaveformDecisionInputs {
     bool prechecks_valid = false;
+    bool adaptive_guard_enabled = false;
     bool srtt_input_valid = false;
+    bool srtt_window_stats_valid = false;
+    double srtt_max_ms = 0.0;
+    bool latest_waveform_overload_srtt_mean_valid = false;
+    double latest_waveform_overload_srtt_mean_ms = 0.0;
     bool drate_input_valid = false;
     bool srtt_similar = false;
     bool srtt_similar_without_middle = false;
@@ -882,6 +901,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   bool waveform_delta_reference_valid_;
   double waveform_delta_reference_bps_;
   uint32_t consecutive_overload_count_;
+  bool latest_waveform_overload_srtt_mean_valid_;
+  double latest_waveform_overload_srtt_mean_ms_;
   const char* waveform_last_delta_source_;
   double waveform_last_raw_delta_bw_bps_;
   double waveform_last_applied_delta_bw_bps_;

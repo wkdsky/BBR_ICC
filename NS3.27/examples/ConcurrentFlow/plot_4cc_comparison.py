@@ -42,6 +42,15 @@ def split_csv(text: str) -> List[str]:
     return [part.strip() for part in str(text).split(",") if part.strip()]
 
 
+def expand_float_list(text: str, count: int, default: float, name: str) -> List[float]:
+    values = [float(part) for part in split_csv(text)] if text else [default]
+    if len(values) == 1:
+        return values * count
+    if len(values) != count:
+        raise ValueError(f"{name} 必须给 1 个值或 {count} 个值。")
+    return values
+
+
 def parse_rate_bps(text: str) -> float:
     value = str(text).strip()
     match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([kKmMgG]?)\s*(?:b(?:it)?s?|bps)?", value)
@@ -73,6 +82,19 @@ def read_two_column_trace(path: Path) -> List[Tuple[float, float]]:
 
 def read_queue_trace(path: Path, service_rate_bps: float) -> List[Tuple[float, float]]:
     rows: List[Tuple[float, float]] = []
+    if path.name == "bottleneck_queue.csv":
+        with path.open("r", newline="", encoding="utf-8", errors="replace") as fh:
+            for item in csv.DictReader(fh):
+                try:
+                    time_s = float(item["time_s"])
+                    queue_bytes = float(item["queue_bytes"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                delay_ms = queue_bytes * 8.0 / service_rate_bps * 1000.0
+                rows.append((time_s, delay_ms))
+        rows.sort(key=lambda item: item[0])
+        return rows
+
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -136,13 +158,23 @@ def build_time_grid(max_time_s: float, step_s: float) -> List[float]:
 
 
 def find_goodput_files(run_dir: Path, trace_name: str, cc: str) -> List[Path]:
-    exact = sorted(run_dir.glob(f"{trace_name}_flow*_{cc}_good.txt"))
+    def flow_sort_key(path: Path) -> Tuple[int, str]:
+        match = re.search(r"_flow(\d+)_", path.name)
+        return (int(match.group(1)) if match else 10**9, path.name)
+
+    exact = sorted(
+        run_dir.glob(f"{trace_name}_flow*_{cc}_good.txt"),
+        key=flow_sort_key,
+    )
     if exact:
         return exact
-    return sorted(run_dir.glob("*_flow*_*_good.txt"))
+    return sorted(run_dir.glob("*_flow*_*_good.txt"), key=flow_sort_key)
 
 
 def find_queue_files(run_dir: Path, trace_name: str) -> List[Path]:
+    fixed_interval = run_dir / "bottleneck_queue.csv"
+    if fixed_interval.exists():
+        return [fixed_interval]
     shared = sorted(run_dir.glob(f"{trace_name}_shared_bottleneck_queue.txt"))
     if shared:
         return shared
@@ -200,12 +232,25 @@ def plot_lines(
     ylabel: str,
     title: str,
     ideal_line: Optional[float] = None,
+    ideal_values: Optional[Sequence[float]] = None,
+    transition_times: Sequence[float] = (),
 ) -> None:
     fig, ax = plt.subplots(figsize=(10.5, 5.6))
     for cc, values in values_by_cc.items():
         ax.plot(grid, values, label=cc, linewidth=1.8, color=PLOT_COLORS.get(cc))
     if ideal_line is not None:
         ax.axhline(ideal_line, color="#555555", linestyle="--", linewidth=1.0, label="ideal capacity")
+    if ideal_values is not None:
+        ax.plot(
+            grid,
+            ideal_values,
+            color="#555555",
+            linestyle="--",
+            linewidth=1.0,
+            label="ideal fair share",
+        )
+    for time_s in transition_times:
+        ax.axvline(time_s, color="#777777", linestyle=":", linewidth=1.0)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -241,6 +286,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--trace-names", default="", help="每个 CC 对应的 traceName，默认与 CC 名相同。")
     parser.add_argument("--sample-step-s", type=float, default=0.1, help="绘图重采样时间步长。默认 0.1s。")
     parser.add_argument("--warmup-s", type=float, default=5.0, help="汇总平均值时跳过的启动阶段。默认 5s。")
+    parser.add_argument("--flow-start-times", default="0", help="每流启动时刻，用于动态流统计。")
+    parser.add_argument("--flow-stop-times", default="", help="每流停止时刻，用于动态流统计。")
+    parser.add_argument("--sim-time", type=float, default=0.0, help="仿真结束时刻；0 表示从 trace 推断。")
     args = parser.parse_args(argv)
 
     experiment_dir = Path(args.experiment_dir).expanduser().resolve()
@@ -253,13 +301,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit("trace-names 必须为空，或与 ccs 数量相同。")
     trace_name_by_cc = dict(zip(ccs, trace_names))
     service_rate_bps = parse_rate_bps(args.service_rate)
+    flow_start_times = expand_float_list(
+        args.flow_start_times, args.n_flows, 0.0, "flow-start-times"
+    )
 
     raw = {
         cc: load_cc_data(experiment_dir, cc, trace_name_by_cc[cc], service_rate_bps)
         for cc in ccs
     }
     max_time = max(float(item["max_time"]) for item in raw.values())
+    sim_end_s = args.sim_time if args.sim_time > 0.0 else max_time
+    flow_stop_times = expand_float_list(
+        args.flow_stop_times, args.n_flows, sim_end_s, "flow-stop-times"
+    )
     grid = build_time_grid(max_time, args.sample_step_s)
+
+    def active_indexes(time_s: float) -> List[int]:
+        return [
+            idx
+            for idx in range(args.n_flows)
+            if flow_start_times[idx] <= time_s < flow_stop_times[idx]
+        ]
+
+    active_counts = [len(active_indexes(time_s)) for time_s in grid]
 
     aggregate_tput: Dict[str, List[float]] = {}
     mean_tput: Dict[str, List[float]] = {}
@@ -267,6 +331,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p95_qdelay: Dict[str, float] = {}
     avg_qdelay: Dict[str, float] = {}
     avg_aggregate_tput: Dict[str, float] = {}
+    avg_utilization: Dict[str, float] = {}
+    avg_jain_fairness: Dict[str, float] = {}
+    jain_fairness: Dict[str, List[float]] = {}
 
     for cc in ccs:
         goodput_series = raw[cc]["goodput"]  # type: ignore[index]
@@ -274,44 +341,86 @@ def main(argv: Optional[List[str]] = None) -> int:
         sampled_goodput = [sample_previous(series, grid) for series in goodput_series]  # type: ignore[arg-type]
         sampled_queue = [sample_previous(series, grid) for series in queue_series]  # type: ignore[arg-type]
 
+        for flow_idx, values in enumerate(sampled_goodput):
+            if flow_idx >= args.n_flows:
+                break
+            for grid_idx, time_s in enumerate(grid):
+                if not (
+                    flow_start_times[flow_idx]
+                    <= time_s
+                    < flow_stop_times[flow_idx]
+                ):
+                    values[grid_idx] = 0.0
+
         aggregate: List[float] = []
         per_flow_mean: List[float] = []
+        fairness: List[float] = []
         for idx in range(len(grid)):
             values_kbps = [series[idx] for series in sampled_goodput]
             total_mbps = sum(v for v in values_kbps if not math.isnan(v)) / 1000.0
             aggregate.append(total_mbps)
-            per_flow_mean.append(mean_ignore_nan(values_kbps) / 1000.0)
+            active = active_indexes(grid[idx])
+            active_values = [
+                values_kbps[flow_idx]
+                for flow_idx in active
+                if flow_idx < len(values_kbps) and not math.isnan(values_kbps[flow_idx])
+            ]
+            per_flow_mean.append(
+                mean_ignore_nan(active_values) / 1000.0 if active_values else 0.0
+            )
+            denominator = len(active_values) * sum(value * value for value in active_values)
+            fairness.append(
+                (sum(active_values) ** 2 / denominator)
+                if denominator > 0.0
+                else math.nan
+            )
         aggregate_tput[cc] = aggregate
         mean_tput[cc] = per_flow_mean
+        jain_fairness[cc] = fairness
 
         q_mean: List[float] = []
         for idx in range(len(grid)):
             q_mean.append(mean_ignore_nan(series[idx] for series in sampled_queue))
         mean_qdelay[cc] = q_mean
 
-        steady_indexes = [idx for idx, time_s in enumerate(grid) if time_s >= args.warmup_s]
+        steady_indexes = [
+            idx
+            for idx, time_s in enumerate(grid)
+            if args.warmup_s <= time_s < sim_end_s
+        ]
         if not steady_indexes:
             steady_indexes = list(range(len(grid)))
         steady_tput = [aggregate[idx] for idx in steady_indexes]
         steady_q = [q_mean[idx] for idx in steady_indexes]
         avg_aggregate_tput[cc] = mean_ignore_nan(steady_tput)
+        avg_utilization[cc] = avg_aggregate_tput[cc] / (service_rate_bps / 1e6)
         avg_qdelay[cc] = mean_ignore_nan(steady_q)
         p95_qdelay[cc] = percentile(steady_q, 95.0)
+        avg_jain_fairness[cc] = mean_ignore_nan(
+            fairness[idx] for idx in steady_indexes
+        )
 
     total_capacity_mbps = service_rate_bps / 1e6
-    per_flow_capacity_mbps = service_rate_bps / args.n_flows / 1e6
+    ideal_per_flow_mbps = [
+        total_capacity_mbps / count if count > 0 else 0.0
+        for count in active_counts
+    ]
 
     write_timeseries_csv(compare_dir / "timeseries_throughput_aggregate_mbps.csv", grid, aggregate_tput)
     write_timeseries_csv(compare_dir / "timeseries_throughput_mean_per_flow_mbps.csv", grid, mean_tput)
     write_timeseries_csv(compare_dir / "timeseries_queue_delay_mean_ms.csv", grid, mean_qdelay)
+    write_timeseries_csv(compare_dir / "timeseries_jain_fairness.csv", grid, jain_fairness)
+    write_timeseries_csv(compare_dir / "timeseries_active_flows.csv", grid, {"active_flows": active_counts})
 
     with (compare_dir / "summary_metrics.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow([
             "cc",
             "avg_aggregate_throughput_mbps_after_warmup",
+            "avg_bottleneck_utilization_after_warmup",
             "avg_queue_delay_ms_after_warmup",
             "p95_queue_delay_ms_after_warmup",
+            "avg_jain_fairness_after_warmup",
             "goodput_trace_files",
             "queue_trace_files",
         ])
@@ -319,11 +428,79 @@ def main(argv: Optional[List[str]] = None) -> int:
             writer.writerow([
                 cc,
                 f"{avg_aggregate_tput[cc]:.6f}",
+                f"{avg_utilization[cc]:.6f}",
                 f"{avg_qdelay[cc]:.6f}",
                 f"{p95_qdelay[cc]:.6f}",
+                f"{avg_jain_fairness[cc]:.6f}",
                 len(raw[cc]["goodput_files"]),  # type: ignore[arg-type]
                 len(raw[cc]["queue_files"]),  # type: ignore[arg-type]
             ])
+
+    phase_boundaries = sorted(
+        {
+            0.0,
+            sim_end_s,
+            *(
+                value
+                for value in [*flow_start_times, *flow_stop_times]
+                if 0.0 < value < sim_end_s
+            ),
+        }
+    )
+    with (compare_dir / "phase_summary_metrics.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "cc",
+            "phase_index",
+            "phase_start_s",
+            "metric_start_s",
+            "phase_end_s",
+            "active_flows",
+            "avg_aggregate_throughput_mbps",
+            "avg_bottleneck_utilization",
+            "avg_active_flow_throughput_mbps",
+            "avg_queue_delay_ms",
+            "p95_queue_delay_ms",
+            "avg_jain_fairness",
+        ])
+        for cc in ccs:
+            for phase_index, (phase_start, phase_end) in enumerate(
+                zip(phase_boundaries, phase_boundaries[1:]), start=1
+            ):
+                metric_start = min(phase_end, phase_start + args.warmup_s)
+                indexes = [
+                    idx
+                    for idx, time_s in enumerate(grid)
+                    if metric_start <= time_s < phase_end
+                ]
+                if not indexes:
+                    indexes = [
+                        idx
+                        for idx, time_s in enumerate(grid)
+                        if phase_start <= time_s < phase_end
+                    ]
+                active = len(active_indexes((phase_start + phase_end) / 2.0))
+                avg_tput = mean_ignore_nan(aggregate_tput[cc][idx] for idx in indexes)
+                avg_per_flow = mean_ignore_nan(mean_tput[cc][idx] for idx in indexes)
+                avg_queue = mean_ignore_nan(mean_qdelay[cc][idx] for idx in indexes)
+                p95_queue = percentile((mean_qdelay[cc][idx] for idx in indexes), 95.0)
+                avg_fairness = mean_ignore_nan(jain_fairness[cc][idx] for idx in indexes)
+                writer.writerow([
+                    cc,
+                    phase_index,
+                    f"{phase_start:.6f}",
+                    f"{metric_start:.6f}",
+                    f"{phase_end:.6f}",
+                    active,
+                    f"{avg_tput:.6f}",
+                    f"{avg_tput / total_capacity_mbps:.6f}",
+                    f"{avg_per_flow:.6f}",
+                    f"{avg_queue:.6f}",
+                    f"{p95_queue:.6f}",
+                    f"{avg_fairness:.6f}",
+                ])
 
     plot_lines(
         compare_dir / "throughput_aggregate_mbps.png",
@@ -332,6 +509,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "Aggregate throughput (Mbps)",
         "Aggregate throughput over time",
         total_capacity_mbps,
+        transition_times=phase_boundaries[1:-1],
     )
     plot_lines(
         compare_dir / "throughput_mean_per_flow_mbps.png",
@@ -339,7 +517,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         mean_tput,
         "Mean per-flow throughput (Mbps)",
         "Mean per-flow throughput over time",
-        per_flow_capacity_mbps,
+        ideal_values=ideal_per_flow_mbps,
+        transition_times=phase_boundaries[1:-1],
     )
     plot_lines(
         compare_dir / "queue_delay_mean_ms.png",
@@ -347,6 +526,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         mean_qdelay,
         "Mean queueing delay (ms)",
         "Mean switch egress queueing delay over time",
+        transition_times=phase_boundaries[1:-1],
+    )
+    plot_lines(
+        compare_dir / "jain_fairness_over_time.png",
+        grid,
+        jain_fairness,
+        "Jain fairness index",
+        "Jain fairness over time",
+        transition_times=phase_boundaries[1:-1],
+    )
+    plot_lines(
+        compare_dir / "active_flows.png",
+        grid,
+        {"active flows": active_counts},
+        "Active flows",
+        "Active flow count over time",
+        transition_times=phase_boundaries[1:-1],
     )
     plot_bar(
         compare_dir / "queue_delay_p95_ms.png",
@@ -359,6 +555,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         avg_aggregate_tput,
         "Average aggregate throughput (Mbps)",
         f"Average aggregate throughput after {args.warmup_s:g}s warmup",
+    )
+    plot_bar(
+        compare_dir / "jain_fairness_average.png",
+        avg_jain_fairness,
+        "Average Jain fairness index",
+        f"Average Jain fairness after {args.warmup_s:g}s warmup",
     )
 
     print(f"对比图和汇总 CSV 已写入：{compare_dir}")
