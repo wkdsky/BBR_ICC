@@ -174,6 +174,8 @@ struct FreqBbrConfig {
   uint32_t waveform_clip_floor_confirmations = 2;
   uint32_t waveform_max_baseline_adjustments = 8;
   uint32_t waveform_max_inconclusive_extensions = 1;
+  double waveform_inconclusive_signal_amplification_factor = 1.25;
+  double waveform_inconclusive_signal_amplification_max_ratio = 2.0;
   double waveform_max_app_limited_sample_ratio = 0.25;
   double waveform_max_interpolation_gap_period_ratio = 0.10;
 
@@ -429,11 +431,14 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     bool valid = false;
     bool positive_half_clipped = false;
     bool negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
     bool top_clip = false;
     bool bottom_clip = false;
     bool ambiguous = false;
     bool drate_positive_half_clipped = false;
     bool drate_negative_half_clipped = false;
+    bool drate_only_negative_half = false;
     bool drate_clip_ambiguous = false;
     bool positive_half_clips_simultaneous = false;
     bool srtt_middle_sequential_plateau = false;
@@ -451,6 +456,10 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     double plateau_level_span_ratio = 0.0;
     double plateau_extreme_distance_ratio = 1.0;
     double plateau_abs_slope = 0.0;
+    double srtt_positive_half_span_ms = 0.0;
+    double srtt_negative_half_span_ms = 0.0;
+    double drate_positive_half_span_bps = 0.0;
+    double drate_negative_half_span_bps = 0.0;
     double shoulder_slope_before = 0.0;
     double shoulder_slope_after = 0.0;
     double other_shoulder_slope_before = 0.0;
@@ -488,9 +497,12 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     size_t srtt_stat_sample_count = 0;
     bool srtt_stats_valid = false;
     double srtt_mean_ms = 0.0;
+    double srtt_min_ms = 0.0;
     double srtt_max_ms = 0.0;
     bool latest_waveform_overload_srtt_mean_valid = false;
     double latest_waveform_overload_srtt_mean_ms = 0.0;
+    bool latest_waveform_underload_srtt_mean_valid = false;
+    double latest_waveform_underload_srtt_mean_ms = 0.0;
     size_t delivery_rate_stat_sample_count = 0;
     bool delivery_rate_stats_valid = false;
     double delivery_rate_min_bps = 0.0;
@@ -525,6 +537,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     bool srtt_cycle_complete = false;
     bool srtt_positive_half_clipped = false;
     bool srtt_negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
     bool srtt_clip_ambiguous = false;
     bool srtt_match = false;
     PlateauDetectionResult plateau;
@@ -588,6 +602,9 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
                                  bool extended_window);
   void ApplyWaveformClassification(const WaveformWindowAnalysis& analysis,
                                    QuicTime now);
+  bool AmplifyWaveformProbeAfterInconclusive(
+      const WaveformWindowAnalysis& analysis,
+      QuicTime now);
   WaveformWindowAnalysis AnalyzeWaveformWindow(QuicTime window_start,
                                                QuicTime window_end,
                                                double window_periods,
@@ -796,21 +813,24 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     size_t sample_count = 0;
     bool valid = false;
     double mean_ms = 0.0;
+    double min_ms = 0.0;
     double max_ms = 0.0;
   };
   static SrttWindowStats ComputeSrttWindowStats(
       const std::vector<FreqCCv4RttSample>& samples);
-  static double SmoothTrustedBandwidth(double historical_smoothed_bps,
-                                       bool historical_valid,
-                                       double latest_trusted_bps);
+  bool UsesAdaptiveLoadJudgment() const;
   struct WaveformDecisionInputs {
     bool prechecks_valid = false;
     bool adaptive_guard_enabled = false;
     bool srtt_input_valid = false;
     bool srtt_window_stats_valid = false;
+    double srtt_mean_ms = 0.0;
+    double srtt_min_ms = 0.0;
     double srtt_max_ms = 0.0;
     bool latest_waveform_overload_srtt_mean_valid = false;
     double latest_waveform_overload_srtt_mean_ms = 0.0;
+    bool latest_waveform_underload_srtt_mean_valid = false;
+    double latest_waveform_underload_srtt_mean_ms = 0.0;
     bool drate_input_valid = false;
     bool srtt_similar = false;
     bool srtt_similar_without_middle = false;
@@ -818,7 +838,10 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
     bool drate_similar_without_middle = false;
     bool srtt_positive_half_clipped = false;
     bool srtt_negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
     bool drate_positive_half_clipped = false;
+    bool drate_only_negative_half = false;
     bool positive_half_clips_simultaneous = false;
     bool drate_has_waveform = false;
     bool drate_middle_any_plateau = false;
@@ -885,6 +908,7 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   QuicBandwidth initial_cruise_baseline_bw_;
   QuicBandwidth current_injection_baseline_bw_;
   uint64_t current_probe_amplitude_bps_;
+  uint64_t waveform_initial_probe_amplitude_bps_;
   mutable double current_probe_bw_phase_gain_;
   QuicTime probe_epoch_start_time_;
   TimeDelta probe_epoch_rtt_;
@@ -903,11 +927,22 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   uint32_t consecutive_overload_count_;
   bool latest_waveform_overload_srtt_mean_valid_;
   double latest_waveform_overload_srtt_mean_ms_;
+  bool latest_waveform_underload_srtt_mean_valid_;
+  double latest_waveform_underload_srtt_mean_ms_;
+  bool adaptive_baseline_low_valid_;
+  QuicBandwidth adaptive_baseline_low_;
+  bool adaptive_baseline_up_valid_;
+  QuicBandwidth adaptive_baseline_up_;
+  bool adaptive_previous_cruise_max_bw_valid_;
+  QuicBandwidth adaptive_previous_cruise_max_bw_;
+  QuicBandwidth adaptive_cruise_start_max_bw_;
+  bool adaptive_bounds_inherited_this_cruise_;
   const char* waveform_last_delta_source_;
   double waveform_last_raw_delta_bw_bps_;
   double waveform_last_applied_delta_bw_bps_;
   uint32_t baseline_adjustment_count_;
   uint32_t inconclusive_extension_count_;
+  uint32_t waveform_inconclusive_amplification_count_;
   uint32_t floor_clip_confirmation_count_;
   int waveform_last_clip_direction_;
   uint32_t waveform_decision_count_;
@@ -918,8 +953,6 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   QuicBandwidth hybrid_latest_trusted_bw_;
   QuicBandwidth hybrid_smoothed_trusted_bw_;
   bool hybrid_smoothed_trusted_bw_valid_;
-  QuicBandwidth adaptive_trusted_bw_history_;
-  bool adaptive_trusted_bw_history_valid_;
   std::string waveform_last_action_;
   std::string waveform_last_invalid_reason_;
 
@@ -969,6 +1002,8 @@ class QUIC_EXPORT_PRIVATE FreqCCv4Sender final : public Bbr2Sender {
   uint32_t waveform_clip_floor_confirmations_;
   uint32_t waveform_max_baseline_adjustments_;
   uint32_t waveform_max_inconclusive_extensions_;
+  double waveform_inconclusive_signal_amplification_factor_;
+  double waveform_inconclusive_signal_amplification_max_ratio_;
   double waveform_max_app_limited_sample_ratio_;
   double waveform_max_interpolation_gap_period_ratio_;
 

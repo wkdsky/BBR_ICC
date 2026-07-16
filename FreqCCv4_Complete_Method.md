@@ -957,6 +957,59 @@ cd /home/wkd/BBR_ICC/NS3.27
 --outputDir=<dir>
 ```
 
+### 21.5 FreqCCv4-Adaptive 波形判定与执行器
+
+Adaptive 的相似波动只要求估计周期接近发送波周期且周期波形完整，不要求响应波形与三角波同形。SRTT 和 Delivery Rate 的“中间顺位削平”分别独立识别；遮掉该区间后仍满足周期完整性时，记为 masked-similar。正、负半周期肩部削平也按两个信号独立识别。判断某个信号是否“只剩正/负半周期”前，同样先遮掉该信号自己的中间顺位削平区间。只有 R2.1 的正肩削平分支额外要求 SRTT 与 Delivery Rate 的正半周期肩部削平同时出现；Delivery Rate 只剩负半周期时无需肩部同时性。
+
+分类优先级为：
+
+1. SRTT 有效相似且无肩部削平，或遮掉中间顺位削平后有效相似且无肩部削平：`FULL_LOAD`。
+2. SRTT 仅从正半周期开始肩部削平，或只剩负半周期：Delivery Rate 相似，并且同时出现正肩削平或只剩负半周期时为 `OVERLOAD`；否则 Delivery Rate 原始或 masked-similar 时为 `FULL_LOAD`；明确不相似时为 `OVERLOAD`。
+3. SRTT 仅从负半周期开始肩部削平，或只剩正半周期：Delivery Rate 相似，或有波动且存在任意中间削平时为 `UNDERLOAD`；否则为 `INCONCLUSIVE`。
+4. SRTT 正负半周期均肩部削平：判定条件与上一条相同。
+5. SRTT 原始和 masked 结果都不相似：Delivery Rate 原始或 masked-similar 时为 `UNDERLOAD`，否则为 `OVERLOAD`。
+6. 不能完成上述波形判定时，若窗口 SRTT 均值或最大值大于 `srtt_up`，判为 `OVERLOAD`；否则若均值或最小值小于 `srtt_low`，判为 `UNDERLOAD`；否则为 `INCONCLUSIVE`。
+
+`INCONCLUSIVE` 出现时额外观察一个周期，然后只用三周期采集区间中的后两个周期重新判定。如果仍为 `INCONCLUSIVE`，公共状态机会把下一轮 CRUISE 三角探针幅度乘以 `waveform.inconclusive_signal_amplification_factor`，但不超过本轮 CRUISE 初始幅度乘以 `waveform.inconclusive_signal_amplification_max_ratio`，随后等待 1 RTT settle 并重新采集。之后若再次经历“初判不确定 + 补采重判仍不确定”，继续按同一规则放大；达到幅度上限后不再扩大，只保留无 baseline 变更的重试/观察路径。
+
+波形规则 R1-R5 得到 `OVERLOAD` 时：
+
+```text
+baseline_up = window_mean_delivery_rate
+srtt_up = window_mean_srtt
+```
+
+波形规则 R1-R5 得到 `UNDERLOAD` 时：
+
+```text
+baseline_low = window_mean_delivery_rate
+srtt_low = window_mean_srtt
+```
+
+R6.1/R6.2 只使用已有 `baseline_low`、`baseline_up`、`srtt_low` 和 `srtt_up`
+直接调整下一步注入 baseline，不更新这些边界。每次确定 `OVERLOAD` 时将窗口最小
+Delivery Rate 记为 `mindrate`；每次确定 `UNDERLOAD` 时将窗口最大 Delivery Rate
+记为 `maxdrate`。若 `baseline_up > baseline_low`，区间内目标点为：
+
+```text
+overload_target  = baseline_low + (baseline_up - baseline_low) / 4
+underload_target = baseline_low + (baseline_up - baseline_low) / 2
+
+OVERLOAD:
+  next_baseline = current_baseline > overload_target
+      ? overload_target
+      : mindrate
+
+UNDERLOAD:
+  next_baseline = current_baseline < underload_target
+      ? underload_target
+      : maxdrate
+```
+
+缺少有效对侧边界或 `baseline_up <= baseline_low` 时，`OVERLOAD` 直接使用窗口最小 Delivery Rate，`UNDERLOAD` 直接使用窗口最大 Delivery Rate。`FULL_LOAD` 直接把窗口平均 Delivery Rate 更新为本轮 `TrustedBw` 候选，并保持当前注入 baseline 不变；Adaptive 不再用当前 baseline 的 EWMA 生成兜底 TrustedBw。
+
+每轮 CRUISE 开始时比较当前 Native BBRv2 `MaxBandwidth()` 与上一轮 CRUISE 开始值。按上一轮值归一化后的差异严格小于 25% 时，继承 `baseline_low`、`baseline_up`、`srtt_low` 和 `srtt_up`；否则清空这四个状态。CRUISE 初始注入 baseline 仍从当前 `BandwidthEstimate()` 开始，不直接继承上一轮注入 baseline。
+
 ## 22. 自测试和验证
 
 ### 22.1 三个内置自测试

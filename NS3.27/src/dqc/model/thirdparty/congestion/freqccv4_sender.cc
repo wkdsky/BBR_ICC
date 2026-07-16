@@ -22,28 +22,28 @@ constexpr const char* kTrustedBwSourceNormal = "NORMAL_SPECTRAL";
 constexpr const char* kTrustedBwSourceMerged = "MERGED_SPECTRAL";
 constexpr const char* kTrustedBwSourceTimeWaveformBaseline =
     "TIME_WAVEFORM_SRTT_SEARCH";
-constexpr const char* kTrustedBwSourceAdaptiveBaselineSmoothedFallback =
-    "ADAPTIVE_BASELINE_SMOOTHED_FALLBACK";
-constexpr const char* kTrustedBwSourceHybridSmoothedWindowMean =
-    "HYBRID_SMOOTHED_WINDOW_MEAN";
+constexpr const char* kTrustedBwSourceAdaptiveWindowMean =
+    "ADAPTIVE_WINDOW_MEAN";
+constexpr const char* kTrustedBwSourceHybridWindowMean =
+    "HYBRID_WINDOW_MEAN";
 constexpr const char* kWaveformDeltaSourceNone = "NONE";
 constexpr const char* kWaveformDeltaSourceRecentDrate =
     "RECENT_DRATE_AMPLITUDE";
 constexpr const char* kWaveformDeltaSourceBaselineFallback =
     "BASELINE_QUARTER_FALLBACK";
-constexpr const char* kWaveformDeltaSourceAdaptiveBaselineFallback =
-    "ADAPTIVE_BASELINE_RATIO_FALLBACK";
-constexpr const char* kWaveformDeltaSourceSmoothedDrate =
-    "SMOOTHED_DRATE_AMPLITUDE";
+constexpr const char* kWaveformDeltaSourceAdaptiveBracketBound =
+    "ADAPTIVE_WINDOW_EXTREME_GAP_BOUND";
+constexpr const char* kWaveformDeltaSourceAdaptiveWindowMinimum =
+    "ADAPTIVE_WINDOW_MINIMUM";
+constexpr const char* kWaveformDeltaSourceAdaptiveWindowMaximum =
+    "ADAPTIVE_WINDOW_MAXIMUM";
 constexpr const char* kWaveformDeltaSourceHybridWindowMinimum =
     "HYBRID_WINDOW_MINIMUM";
 constexpr const char* kWaveformDeltaSourceHybridWindowMaximum =
     "HYBRID_WINDOW_MAXIMUM";
-constexpr const char* kWaveformDeltaSourceHybridSmoothedTrustedBw =
-    "HYBRID_SMOOTHED_TRUSTED_BW";
-// RFC 6298 recommends alpha=1/8 for the SRTT EWMA update.
-constexpr double kHybridTrustedBwAlpha = 1.0 / 8.0;
-constexpr double kAdaptiveFallbackTrustedBwAlpha = 1.0 / 4.0;
+constexpr const char* kWaveformDeltaSourceHybridTrustedBw =
+    "HYBRID_TRUSTED_BW";
+constexpr double kAdaptiveMaxBwInheritanceTolerance = 0.25;
 constexpr uint64_t kDefaultMinimumPacingRateBps = 1000000;
 constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
 constexpr float kFreqCCv4CruiseCwndGain = 1.25f;
@@ -55,57 +55,190 @@ double ClampValue(double value, double low, double high) {
   return std::max(low, std::min(high, value));
 }
 
-double SmoothBandwidthEwma(double historical_smoothed_bps,
-                           bool historical_valid,
-                           double latest_bps,
-                           double alpha) {
-  if (!std::isfinite(latest_bps) || latest_bps <= 0.0) {
-    return 0.0;
+bool ShouldInheritAdaptiveBounds(double current_max_bw_bps,
+                                 double previous_max_bw_bps) {
+  if (!std::isfinite(current_max_bw_bps) || current_max_bw_bps <= 0.0 ||
+      !std::isfinite(previous_max_bw_bps) || previous_max_bw_bps <= 0.0) {
+    return false;
   }
-  if (!historical_valid || !std::isfinite(historical_smoothed_bps) ||
-      historical_smoothed_bps <= 0.0) {
-    return latest_bps;
-  }
-  const double clamped_alpha = ClampValue(alpha, 0.0, 1.0);
-  return (1.0 - clamped_alpha) * historical_smoothed_bps +
-         clamped_alpha * latest_bps;
+  return std::abs(current_max_bw_bps - previous_max_bw_bps) /
+             previous_max_bw_bps <
+         kAdaptiveMaxBwInheritanceTolerance;
 }
 
-double CappedWindowStep(double window_gap_bps,
-                        double delta_reference_bps,
-                        double multiplier) {
-  if (!std::isfinite(window_gap_bps) ||
-      !std::isfinite(delta_reference_bps) ||
-      !std::isfinite(multiplier)) {
-    return 0.0;
+bool IsWaveformDecisionRule(const char* decision_rule) {
+  if (decision_rule == nullptr || decision_rule[0] != 'R' ||
+      decision_rule[1] == '\0') {
+    return false;
   }
-  return std::min(std::max(0.0, window_gap_bps),
-                  std::max(0.0, multiplier) *
-                      std::max(0.0, delta_reference_bps));
+  return decision_rule[1] >= '1' && decision_rule[1] <= '5' &&
+         (decision_rule[2] == '\0' || decision_rule[2] == '.');
 }
 
-double OverloadStepMultiplier(double queue_ratio,
-                              double target_ratio,
-                              double high_ratio,
-                              double maximum_multiplier) {
-  if (!std::isfinite(queue_ratio) || high_ratio <= target_ratio) {
-    return 1.0;
+double ComputeAdaptiveNextBaseline(
+    WaveformClassification classification,
+    bool baseline_low_valid,
+    double baseline_low_bps,
+    bool baseline_up_valid,
+    double baseline_up_bps,
+    double current_baseline_bps,
+    double window_min_bps,
+    double window_max_bps,
+    double minimum_rate_bps) {
+  double next_baseline_bps =
+      classification == WaveformClassification::kOverload
+          ? window_min_bps
+          : window_max_bps;
+  if (baseline_low_valid && baseline_up_valid &&
+      std::isfinite(baseline_low_bps) && std::isfinite(baseline_up_bps) &&
+      baseline_up_bps > baseline_low_bps) {
+    const double baseline_gap = baseline_up_bps - baseline_low_bps;
+    const double quarter_target_bps = baseline_low_bps + baseline_gap / 4.0;
+    const double half_target_bps = baseline_low_bps + baseline_gap / 2.0;
+    if (classification == WaveformClassification::kOverload) {
+      if (std::isfinite(current_baseline_bps) &&
+          current_baseline_bps > quarter_target_bps) {
+        next_baseline_bps = quarter_target_bps;
+      }
+    } else if (classification == WaveformClassification::kUnderload) {
+      if (std::isfinite(current_baseline_bps) &&
+          current_baseline_bps < half_target_bps) {
+        next_baseline_bps = half_target_bps;
+      }
+    }
   }
-  const double fraction = ClampValue(
-      (queue_ratio - target_ratio) / (high_ratio - target_ratio), 0.0, 1.0);
-  return 1.0 + fraction * (std::max(1.0, maximum_multiplier) - 1.0);
+  if (!std::isfinite(next_baseline_bps)) {
+    next_baseline_bps = minimum_rate_bps;
+  }
+  return next_baseline_bps;
 }
 
-double UnderloadStepMultiplier(double queue_ratio,
-                               double low_ratio,
-                               double target_ratio,
-                               double maximum_multiplier) {
-  if (!std::isfinite(queue_ratio) || target_ratio <= low_ratio) {
-    return 1.0;
+bool ShouldObserveAfterInconclusive(
+    bool adaptive_guard_enabled,
+    uint32_t extension_count,
+    uint32_t max_extensions,
+    double window_periods,
+    double max_window_periods) {
+  if (adaptive_guard_enabled) {
+    return true;
   }
-  const double fraction = ClampValue(
-      (target_ratio - queue_ratio) / (target_ratio - low_ratio), 0.0, 1.0);
-  return 1.0 + fraction * (std::max(1.0, maximum_multiplier) - 1.0);
+  return extension_count < max_extensions &&
+         window_periods < max_window_periods;
+}
+
+double InconclusiveWindowStartAdvancePeriods(
+    bool adaptive_guard_enabled,
+    bool extended_window,
+    double window_periods) {
+  return adaptive_guard_enabled && extended_window &&
+                 window_periods >= 3.0
+             ? 1.0
+             : 0.0;
+}
+
+uint64_t AmplifiedWaveformProbeAmplitude(
+    uint64_t current_amplitude_bps,
+    uint64_t initial_amplitude_bps,
+    double amplification_factor,
+    double amplification_max_ratio) {
+  if (current_amplitude_bps == 0 || initial_amplitude_bps == 0 ||
+      !std::isfinite(amplification_factor) ||
+      !std::isfinite(amplification_max_ratio) ||
+      amplification_factor <= 1.0 || amplification_max_ratio <= 1.0) {
+    return current_amplitude_bps;
+  }
+  const double current = static_cast<double>(current_amplitude_bps);
+  const double initial = static_cast<double>(initial_amplitude_bps);
+  const double max_int64 =
+      static_cast<double>(std::numeric_limits<int64_t>::max());
+  const double cap =
+      std::min(max_int64, initial * amplification_max_ratio);
+  if (!std::isfinite(current) || !std::isfinite(initial) ||
+      !std::isfinite(cap) || cap <= current) {
+    return current_amplitude_bps;
+  }
+  const double amplified =
+      std::min(cap, std::ceil(current * amplification_factor));
+  if (!std::isfinite(amplified) || amplified <= current) {
+    return current_amplitude_bps;
+  }
+  return static_cast<uint64_t>(amplified);
+}
+
+bool HasOnlyHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    bool negative_half_active,
+    double* positive_span,
+    double* negative_span) {
+  if (response.size() != sender_residual.size() ||
+      response.size() != valid.size()) {
+    return false;
+  }
+  std::vector<double> positive_values;
+  std::vector<double> negative_values;
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (!valid[i] || !std::isfinite(response[i]) ||
+        !std::isfinite(sender_residual[i])) {
+      continue;
+    }
+    (sender_residual[i] >= 0.0 ? positive_values : negative_values)
+        .push_back(response[i]);
+  }
+  if (positive_values.size() < 4 || negative_values.size() < 4) {
+    return false;
+  }
+  auto robust_span = [](std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    const size_t low_index = static_cast<size_t>(
+        std::floor(0.10 * static_cast<double>(values.size() - 1)));
+    const size_t high_index = static_cast<size_t>(
+        std::ceil(0.90 * static_cast<double>(values.size() - 1)));
+    return std::max(0.0, values[high_index] - values[low_index]);
+  };
+  const double positive = robust_span(positive_values);
+  const double negative = robust_span(negative_values);
+  if (positive_span != nullptr) {
+    *positive_span = positive;
+  }
+  if (negative_span != nullptr) {
+    *negative_span = negative;
+  }
+  const double finite_noise =
+      std::isfinite(noise_sigma) ? std::max(0.0, noise_sigma) : 0.0;
+  const double active_span = negative_half_active ? negative : positive;
+  const double suppressed_span = negative_half_active ? positive : negative;
+  const bool active =
+      active_span > std::max(4.0 * finite_noise, 1e-9);
+  const bool opposite_suppressed =
+      suppressed_span <= std::max(2.0 * finite_noise, 0.25 * active_span);
+  return active && opposite_suppressed;
+}
+
+bool HasOnlyNegativeHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    double* positive_span,
+    double* negative_span) {
+  return HasOnlyHalfWaveform(
+      response, sender_residual, valid, noise_sigma, true,
+      positive_span, negative_span);
+}
+
+bool HasOnlyPositiveHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    double* positive_span,
+    double* negative_span) {
+  return HasOnlyHalfWaveform(
+      response, sender_residual, valid, noise_sigma, false,
+      positive_span, negative_span);
 }
 
 int64_t AddPacingOffsetWithFloor(int64_t baseline_bps,
@@ -301,6 +434,7 @@ FreqCCv4Sender::FreqCCv4Sender(
       initial_cruise_baseline_bw_(QuicBandwidth::Zero()),
       current_injection_baseline_bw_(QuicBandwidth::Zero()),
       current_probe_amplitude_bps_(0),
+      waveform_initial_probe_amplitude_bps_(0),
       current_probe_bw_phase_gain_(1.0),
       probe_epoch_start_time_(QuicTime::Zero()),
       probe_epoch_rtt_(TimeDelta::Zero()),
@@ -319,11 +453,22 @@ FreqCCv4Sender::FreqCCv4Sender(
       consecutive_overload_count_(0),
       latest_waveform_overload_srtt_mean_valid_(false),
       latest_waveform_overload_srtt_mean_ms_(0.0),
+      latest_waveform_underload_srtt_mean_valid_(false),
+      latest_waveform_underload_srtt_mean_ms_(0.0),
+      adaptive_baseline_low_valid_(false),
+      adaptive_baseline_low_(QuicBandwidth::Zero()),
+      adaptive_baseline_up_valid_(false),
+      adaptive_baseline_up_(QuicBandwidth::Zero()),
+      adaptive_previous_cruise_max_bw_valid_(false),
+      adaptive_previous_cruise_max_bw_(QuicBandwidth::Zero()),
+      adaptive_cruise_start_max_bw_(QuicBandwidth::Zero()),
+      adaptive_bounds_inherited_this_cruise_(false),
       waveform_last_delta_source_(kWaveformDeltaSourceNone),
       waveform_last_raw_delta_bw_bps_(0.0),
       waveform_last_applied_delta_bw_bps_(0.0),
       baseline_adjustment_count_(0),
       inconclusive_extension_count_(0),
+      waveform_inconclusive_amplification_count_(0),
       floor_clip_confirmation_count_(0),
       waveform_last_clip_direction_(0),
       waveform_decision_count_(0),
@@ -334,8 +479,6 @@ FreqCCv4Sender::FreqCCv4Sender(
       hybrid_latest_trusted_bw_(QuicBandwidth::Zero()),
       hybrid_smoothed_trusted_bw_(QuicBandwidth::Zero()),
       hybrid_smoothed_trusted_bw_valid_(false),
-      adaptive_trusted_bw_history_(QuicBandwidth::Zero()),
-      adaptive_trusted_bw_history_valid_(false),
       waveform_last_action_("none"),
       waveform_last_invalid_reason_("none"),
       waveform_initial_settle_rtt_mult_(1.0),
@@ -384,6 +527,8 @@ FreqCCv4Sender::FreqCCv4Sender(
       waveform_clip_floor_confirmations_(2),
       waveform_max_baseline_adjustments_(8),
       waveform_max_inconclusive_extensions_(1),
+      waveform_inconclusive_signal_amplification_factor_(1.25),
+      waveform_inconclusive_signal_amplification_max_ratio_(2.0),
       waveform_max_app_limited_sample_ratio_(0.25),
       waveform_max_interpolation_gap_period_ratio_(0.10),
       min_cruise_cycles_per_window_(4.0),
@@ -813,12 +958,22 @@ void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
         config.waveform_max_baseline_adjustments;
   }
   waveform_max_inconclusive_extensions_ = 1;
-  if (cruise_detector_mode_ == FreqCCv4CruiseDetectorMode::kTimeWaveform &&
+  if (!UsesAdaptiveLoadJudgment() &&
+      cruise_detector_mode_ == FreqCCv4CruiseDetectorMode::kTimeWaveform &&
       config.waveform_max_inconclusive_extensions != 1) {
-    std::cerr << "[FreqCCv4 config warning] time_waveform always observes "
-                 "exactly one extra period after an inconclusive decision"
+    std::cerr << "[FreqCCv4 config warning] non-Adaptive time_waveform "
+                 "observes exactly one extra period after an inconclusive "
+                 "decision"
               << std::endl;
   }
+  waveform_inconclusive_signal_amplification_factor_ = range_or(
+      config.waveform_inconclusive_signal_amplification_factor,
+      1.0, 4.0, 1.25,
+      "waveform.inconclusive_signal_amplification_factor");
+  waveform_inconclusive_signal_amplification_max_ratio_ = range_or(
+      config.waveform_inconclusive_signal_amplification_max_ratio,
+      1.0, 16.0, 2.0,
+      "waveform.inconclusive_signal_amplification_max_ratio");
   waveform_max_app_limited_sample_ratio_ = range_or(
       config.waveform_max_app_limited_sample_ratio, 0.0, 1.0, 0.25,
       "waveform.max_app_limited_sample_ratio");
@@ -828,8 +983,18 @@ void FreqCCv4Sender::ConfigureFreqBbr(const FreqBbrConfig& config) {
   hybrid_latest_trusted_bw_ = QuicBandwidth::Zero();
   hybrid_smoothed_trusted_bw_ = QuicBandwidth::Zero();
   hybrid_smoothed_trusted_bw_valid_ = false;
-  adaptive_trusted_bw_history_ = QuicBandwidth::Zero();
-  adaptive_trusted_bw_history_valid_ = false;
+  latest_waveform_overload_srtt_mean_valid_ = false;
+  latest_waveform_overload_srtt_mean_ms_ = 0.0;
+  latest_waveform_underload_srtt_mean_valid_ = false;
+  latest_waveform_underload_srtt_mean_ms_ = 0.0;
+  adaptive_baseline_low_valid_ = false;
+  adaptive_baseline_low_ = QuicBandwidth::Zero();
+  adaptive_baseline_up_valid_ = false;
+  adaptive_baseline_up_ = QuicBandwidth::Zero();
+  adaptive_previous_cruise_max_bw_valid_ = false;
+  adaptive_previous_cruise_max_bw_ = QuicBandwidth::Zero();
+  adaptive_cruise_start_max_bw_ = QuicBandwidth::Zero();
+  adaptive_bounds_inherited_this_cruise_ = false;
   ClearTrustedBw("configuration_changed");
 }
 
@@ -1299,6 +1464,7 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
   };
   WaveformDecisionInputs decision;
   decision.prechecks_valid = true;
+  decision.adaptive_guard_enabled = true;
   decision.srtt_input_valid = true;
   decision.drate_input_valid = true;
   decision.srtt_similar = true;
@@ -1312,8 +1478,22 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
                  "test 4: simultaneous positive SRTT/Drate clips are OVERLOAD");
   decision.drate_positive_half_clipped = false;
   decision.positive_half_clips_simultaneous = false;
+  decision.drate_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.1",
+                 "test 4b: similar Drate with only its negative half remaining is OVERLOAD");
+  decision.drate_only_negative_half = false;
   check_decision(decision, WaveformClassification::kFullLoad, "R2.2",
                  "test 5: positive SRTT clip with similar Drate is FULL_LOAD");
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kFullLoad, "R2.2",
+                 "test 5b: SRTT with only its negative half follows R2");
+  decision.drate_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.1",
+                 "test 5c: matching Drate only-negative-half evidence makes R2.1 OVERLOAD");
+  decision.drate_only_negative_half = false;
+  decision.srtt_only_negative_half = false;
+  decision.srtt_positive_half_clipped = true;
   decision.drate_similar = false;
   check_decision(decision, WaveformClassification::kOverload, "R2.3",
                  "test 6: positive SRTT clip with dissimilar Drate is OVERLOAD");
@@ -1322,6 +1502,12 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
   decision.drate_similar = true;
   check_decision(decision, WaveformClassification::kUnderload, "R3.1",
                  "test 7: negative SRTT clip with similar Drate is UNDERLOAD");
+  decision.srtt_negative_half_clipped = false;
+  decision.srtt_only_positive_half = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 7b: SRTT with only its positive half follows R3");
+  decision.srtt_only_positive_half = false;
+  decision.srtt_negative_half_clipped = true;
   decision.drate_similar = false;
   decision.drate_has_waveform = true;
   decision.drate_middle_any_plateau = true;
@@ -1346,80 +1532,99 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
                  "test 8e: positive SRTT clip with invalid Drate is INCONCLUSIVE");
   decision.drate_input_valid = true;
 
-  const double recent_amplitude_mbps = 4.0;
-  require(std::abs(0.50 * recent_amplitude_mbps - 2.0) < 1e-12,
-          "test 9: 4 Mbps recent Delivery Rate amplitude gives 2 Mbps delta");
-  require(std::abs(0.25 * 20.0 - 5.0) < 1e-12 &&
-              std::abs(0.10 * 20.0 - 2.0) < 1e-12,
-          "test 10: original and Adaptive retain separate fallback deltas");
-  double remembered_amplitude_mbps = 4.0;
-  remembered_amplitude_mbps = 6.0;
-  require(std::abs(0.50 * remembered_amplitude_mbps - 3.0) < 1e-12,
-          "test 11: current similar window updates amplitude before delta");
-  require(std::abs(CappedWindowStep(10.0, 2.0, 1.5) - 3.0) < 1e-12 &&
-              std::abs(CappedWindowStep(1.0, 2.0, 1.5) - 1.0) < 1e-12 &&
-              CappedWindowStep(0.0, 2.0, 2.0) == 0.0,
-          "test 11b: window gap is a boundary and delta controls step speed");
-  require(std::abs(OverloadStepMultiplier(0.75, 0.50, 1.0, 2.0) -
-                       1.5) < 1e-12 &&
-              std::abs(UnderloadStepMultiplier(0.375, 0.25, 0.50, 2.0) -
-                       1.5) < 1e-12,
-          "test 11c: queue feedback smoothly scales both adjustment directions");
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kOverload,
+                       true, 80.0, true, 100.0,
+                       100.0, 40.0, 60.0, 1.0) -
+                   85.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kOverload,
+                           true, 80.0, true, 100.0,
+                           84.0, 40.0, 60.0, 1.0) -
+                       40.0) < 1e-12,
+          "test 9: overload uses low+quarter-gap only above that target");
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kUnderload,
+                       true, 80.0, true, 100.0,
+                       80.0, 60.0, 120.0, 1.0) -
+                   90.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kUnderload,
+                           true, 80.0, true, 100.0,
+                           95.0, 60.0, 120.0, 1.0) -
+                       120.0) < 1e-12,
+          "test 10: underload uses low+half-gap only below that target");
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kOverload,
+                       false, 0.0, true, 100.0,
+                       100.0, 72.0, 90.0, 1.0) -
+                   72.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kUnderload,
+                           true, 80.0, false, 0.0,
+                           80.0, 70.0, 118.0, 1.0) -
+                       118.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kOverload,
+                           false, 0.0, true, 100.0,
+                           100.0, 0.5, 90.0, 1.0) -
+                       0.5) < 1e-12,
+          "test 11: missing opposite bounds use exact window min/max Drate");
+  require(ShouldInheritAdaptiveBounds(124.9, 100.0) &&
+              !ShouldInheritAdaptiveBounds(125.0, 100.0) &&
+              ShouldInheritAdaptiveBounds(80.0, 100.0),
+          "test 12: inheritance uses a strict 25 percent MaxBw threshold");
+  require(IsWaveformDecisionRule("R1") &&
+              IsWaveformDecisionRule("R5.2") &&
+              !IsWaveformDecisionRule("R6.1"),
+          "test 13: only R1-R5 decisions update Adaptive bounds");
+  require(ShouldObserveAfterInconclusive(
+              true, 100, 1, 3.0, 3.0) &&
+              InconclusiveWindowStartAdvancePeriods(
+                  true, false, 2.0) == 0.0 &&
+              InconclusiveWindowStartAdvancePeriods(
+                  true, true, 3.0) == 1.0 &&
+              !ShouldObserveAfterInconclusive(
+                  false, 1, 1, 3.0, 3.0),
+          "test 13b: inconclusive extension policy allows Adaptive rolling fallback");
+  require(AmplifiedWaveformProbeAmplitude(100, 100, 1.25, 2.0) == 125 &&
+              AmplifiedWaveformProbeAmplitude(190, 100, 1.25, 2.0) == 200 &&
+              AmplifiedWaveformProbeAmplitude(200, 100, 1.25, 2.0) == 200 &&
+              AmplifiedWaveformProbeAmplitude(100, 100, 1.0, 2.0) == 100,
+          "test 13c: inconclusive signal amplification is bounded");
 
-  struct SearchState {
-    double baseline = 20.0;
-    bool underload_located = false;
-    bool candidate_valid = false;
-    bool observation_active = true;
-    uint32_t candidate_updates = 0;
-    double candidate = 0.0;
-  };
-  auto apply = [](SearchState* state,
-                  WaveformClassification classification,
-                  double delta) {
-    if (classification == WaveformClassification::kFullLoad) {
-      state->candidate_valid = true;
-      state->candidate = state->baseline;
-      ++state->candidate_updates;
-    } else if (classification == WaveformClassification::kUnderload) {
-      state->underload_located = true;
-      state->baseline += delta;
-    } else if (classification == WaveformClassification::kOverload) {
-      state->baseline -= delta;
-    }
-  };
-  SearchState full_before_underload;
-  apply(&full_before_underload, WaveformClassification::kFullLoad, 2.0);
-  require(std::abs(full_before_underload.baseline - 20.0) < 1e-12 &&
-              full_before_underload.candidate_valid &&
-              std::abs(full_before_underload.candidate - 20.0) < 1e-12 &&
-              full_before_underload.observation_active,
-          "test 12: first FULL_LOAD immediately updates TrustedBw candidate");
-  SearchState underload;
-  apply(&underload, WaveformClassification::kUnderload, 2.0);
-  require(underload.underload_located &&
-              std::abs(underload.baseline - 22.0) < 1e-12 &&
-              underload.observation_active,
-          "test 13: UNDERLOAD increases baseline while observation continues");
-  SearchState overload;
-  overload.underload_located = true;
-  overload.candidate_valid = true;
-  overload.candidate = 19.0;
-  apply(&overload, WaveformClassification::kOverload, 2.0);
-  require(overload.underload_located &&
-              std::abs(overload.baseline - 18.0) < 1e-12 &&
-              std::abs(overload.candidate - 19.0) < 1e-12 &&
-              overload.observation_active,
-          "test 14: OVERLOAD adjusts baseline without discarding the latest candidate");
-  SearchState refresh;
-  apply(&refresh, WaveformClassification::kFullLoad, 2.0);
-  apply(&refresh, WaveformClassification::kUnderload, 2.0);
-  apply(&refresh, WaveformClassification::kFullLoad, 2.0);
-  require(refresh.candidate_valid && refresh.candidate_updates == 2 &&
-              std::abs(refresh.candidate - 22.0) < 1e-12 &&
-              std::abs(refresh.baseline - 22.0) < 1e-12 &&
-              refresh.observation_active,
-          "test 15: every later FULL_LOAD refreshes the candidate without stopping observation");
+  const std::vector<double> half_sender = {
+      1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+      -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+  const std::vector<double> only_negative_response = {
+      0.00, 0.01, 0.00, -0.01, 0.00, 0.01, 0.00, -0.01,
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0};
+  const std::vector<double> only_positive_response = {
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0,
+      0.00, 0.01, 0.00, -0.01, 0.00, 0.01, 0.00, -0.01};
+  const std::vector<double> both_halves_response = {
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0,
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0};
+  const std::vector<bool> half_valid(half_sender.size(), true);
+  double positive_span = 0.0;
+  double negative_span = 0.0;
+  require(HasOnlyNegativeHalfWaveform(
+              only_negative_response, half_sender, half_valid, 0.05,
+              &positive_span, &negative_span) &&
+              negative_span > 4.0 * positive_span,
+          "test 14a: only-negative-half extraction detects a suppressed positive half");
+  require(HasOnlyPositiveHalfWaveform(
+              only_positive_response, half_sender, half_valid, 0.05,
+              &positive_span, &negative_span) &&
+              positive_span > 4.0 * negative_span,
+          "test 14b: only-positive-half extraction detects a suppressed negative half");
+  require(!HasOnlyNegativeHalfWaveform(
+              both_halves_response, half_sender, half_valid, 0.05,
+              nullptr, nullptr) &&
+              !HasOnlyPositiveHalfWaveform(
+                  both_halves_response, half_sender, half_valid, 0.05,
+                  nullptr, nullptr),
+          "test 14c: half-only extraction rejects two active halves");
 
   std::vector<double> small_periodic_response(periodic_count, 0.0);
   for (size_t i = 0; i < periodic_count; ++i) {
@@ -1480,22 +1685,37 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
   decision.srtt_similar_without_middle = true;
   check_decision(decision, WaveformClassification::kFullLoad, "R1",
                  "test 18d: masked-similar SRTT is FULL_LOAD");
+  decision.srtt_positive_half_clipped = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.3",
+                 "test 18d2: masked-similar SRTT still honors a positive shoulder clip");
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_similar_without_middle = false;
+  decision.drate_input_valid = false;
+  check_decision(decision, WaveformClassification::kOverload, "R5.2",
+                 "test 18d3: missing Drate similarity under dissimilar SRTT is OVERLOAD");
+  decision.drate_input_valid = true;
   decision.prechecks_valid = false;
-  check_decision(decision, WaveformClassification::kInconclusive, "R6",
+  check_decision(decision, WaveformClassification::kInconclusive, "R6.3",
                  "test 18e: invalid prechecks remain INCONCLUSIVE");
-  decision.adaptive_guard_enabled = true;
   decision.srtt_window_stats_valid = true;
+  decision.srtt_mean_ms = 119.0;
+  decision.srtt_min_ms = 118.0;
   decision.srtt_max_ms = 121.0;
   decision.latest_waveform_overload_srtt_mean_valid = true;
   decision.latest_waveform_overload_srtt_mean_ms = 120.0;
   check_decision(decision, WaveformClassification::kOverload, "R6.1",
-                 "test 18f: Adaptive R6 overloads above the latest waveform-overload SRTT mean");
+                 "test 18f: Adaptive R6 overloads above srtt_up");
+  decision.srtt_mean_ms = 99.0;
+  decision.srtt_min_ms = 98.0;
   decision.srtt_max_ms = 120.0;
-  check_decision(decision, WaveformClassification::kInconclusive, "R6.2",
-                 "test 18g: Adaptive R6 remains inconclusive at the historical SRTT mean");
-  decision.latest_waveform_overload_srtt_mean_valid = false;
-  check_decision(decision, WaveformClassification::kInconclusive, "R6.2",
-                 "test 18h: Adaptive R6 remains inconclusive without waveform-overload history");
+  decision.latest_waveform_underload_srtt_mean_valid = true;
+  decision.latest_waveform_underload_srtt_mean_ms = 100.0;
+  check_decision(decision, WaveformClassification::kUnderload, "R6.2",
+                 "test 18g: Adaptive R6 underloads below srtt_low");
+  decision.srtt_mean_ms = 110.0;
+  decision.srtt_min_ms = 100.0;
+  check_decision(decision, WaveformClassification::kInconclusive, "R6.3",
+                 "test 18h: Adaptive R6 is inconclusive between thresholds");
 
   const std::vector<FreqCCv4RttSample> srtt_stat_samples = {
       {QuicTime::Zero(), 80.0},
@@ -1507,6 +1727,7 @@ bool FreqCCv4Sender::RunWaveformCruiseSelfTest(std::ostream& os) {
       ComputeSrttWindowStats(srtt_stat_samples);
   require(srtt_stats.valid && srtt_stats.sample_count == 2 &&
               std::abs(srtt_stats.mean_ms - 100.0) < 1e-12 &&
+              std::abs(srtt_stats.min_ms - 80.0) < 1e-12 &&
               std::abs(srtt_stats.max_ms - 120.0) < 1e-12,
           "test 18i: R6 SRTT statistics use finite positive window samples");
 
@@ -1610,14 +1831,11 @@ bool FreqCCv4Sender::RunHybridBaselineSelfTest(std::ostream& os) {
           "UNDERLOAD baseline uses the window maximum");
   require(std::abs(stats.mean_bps - 10000000.0) < 1e-6,
           "FULL_LOAD trustedbw uses the arithmetic window mean");
-  const double initialized =
-      SmoothTrustedBandwidth(0.0, false, stats.mean_bps);
-  require(std::abs(initialized - 10000000.0) < 1e-6,
-          "the first trustedbw initializes strustedbw directly");
-  const double smoothed =
-      SmoothTrustedBandwidth(initialized, true, 18000000.0);
-  require(std::abs(smoothed - 11000000.0) < 1e-6,
-          "subsequent trustedbw uses RFC 6298 alpha=1/8 smoothing");
+  const QuicBandwidth first_trusted_bw = BandwidthFromBps(stats.mean_bps);
+  const QuicBandwidth next_trusted_bw = BandwidthFromBps(18000000.0);
+  require(first_trusted_bw.ToBitsPerSecond() == 10000000 &&
+              next_trusted_bw.ToBitsPerSecond() == 18000000,
+          "hybrid trustedbw publishes each arithmetic window mean without smoothing");
   os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
@@ -1759,10 +1977,38 @@ void FreqCCv4Sender::EnterCruise(QuicTime now) {
   }
   ClearTrustedBwApplication("cruise_start");
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
+  adaptive_cruise_start_max_bw_ = model_.MaxBandwidth();
+  adaptive_bounds_inherited_this_cruise_ = false;
+  if (UsesAdaptiveLoadJudgment()) {
+    const double current_max_bw_bps = static_cast<double>(
+        adaptive_cruise_start_max_bw_.ToBitsPerSecond());
+    const double previous_max_bw_bps = static_cast<double>(
+        adaptive_previous_cruise_max_bw_.ToBitsPerSecond());
+    adaptive_bounds_inherited_this_cruise_ =
+        adaptive_previous_cruise_max_bw_valid_ &&
+        ShouldInheritAdaptiveBounds(current_max_bw_bps,
+                                    previous_max_bw_bps);
+    if (!adaptive_bounds_inherited_this_cruise_) {
+      adaptive_baseline_low_valid_ = false;
+      adaptive_baseline_low_ = QuicBandwidth::Zero();
+      adaptive_baseline_up_valid_ = false;
+      adaptive_baseline_up_ = QuicBandwidth::Zero();
+      latest_waveform_overload_srtt_mean_valid_ = false;
+      latest_waveform_overload_srtt_mean_ms_ = 0.0;
+      latest_waveform_underload_srtt_mean_valid_ = false;
+      latest_waveform_underload_srtt_mean_ms_ = 0.0;
+    }
+    adaptive_previous_cruise_max_bw_ = adaptive_cruise_start_max_bw_;
+    adaptive_previous_cruise_max_bw_valid_ =
+        !adaptive_cruise_start_max_bw_.IsInfinite() &&
+        std::isfinite(current_max_bw_bps) && current_max_bw_bps > 0.0;
+  }
   const QuicBandwidth current_native_max_bw = BandwidthEstimate();
   initial_cruise_baseline_bw_ = current_native_max_bw;
   current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
   current_probe_amplitude_bps_ = GetCurrentAmplitudeBps();
+  waveform_initial_probe_amplitude_bps_ = current_probe_amplitude_bps_;
+  waveform_inconclusive_amplification_count_ = 0;
   current_probe_bw_phase_gain_ =
       cruise_detector_mode_ == FreqCCv4CruiseDetectorMode::kTimeWaveform
           ? 1.0
@@ -1788,6 +2034,8 @@ void FreqCCv4Sender::EnterCruise(QuicTime now) {
                 << CruiseDetectorModeName(cruise_detector_mode_)
                 << ", initial_maxbw_baseline_bps="
                 << initial_cruise_baseline_bw_.ToBitsPerSecond()
+                << ", adaptive_bounds_inherited="
+                << adaptive_bounds_inherited_this_cruise_
                 << ", amplitude_bps=" << current_probe_amplitude_bps_;
 }
 
@@ -2088,8 +2336,8 @@ void FreqCCv4Sender::PublishTrustedBwSelection(
   const std::string trusted_bw_source = selection.trusted_bw_source;
   const bool waveform_source =
       trusted_bw_source == kTrustedBwSourceTimeWaveformBaseline ||
-      trusted_bw_source == kTrustedBwSourceAdaptiveBaselineSmoothedFallback ||
-      trusted_bw_source == kTrustedBwSourceHybridSmoothedWindowMean;
+      trusted_bw_source == kTrustedBwSourceAdaptiveWindowMean ||
+      trusted_bw_source == kTrustedBwSourceHybridWindowMean;
   const bool valid_selection =
       selection.trusted_bw_valid &&
       (waveform_source || selection.dual_signal_spectral_gate_pass) &&
@@ -2113,10 +2361,6 @@ void FreqCCv4Sender::PublishTrustedBwSelection(
   trusted_bw_ready_for_post_cruise_ = true;
   trusted_bw_application_phase_ = "POST_CRUISE_READY";
   trusted_bw_invalid_reason_ = "none";
-  if (adaptive_guard_enabled_) {
-    adaptive_trusted_bw_history_ = trusted_bw_;
-    adaptive_trusted_bw_history_valid_ = true;
-  }
 }
 
 const char* FreqCCv4Sender::PhaseApplicationName(
@@ -2655,6 +2899,10 @@ const char* FreqCCv4Sender::WaveformClassificationName(
   }
 }
 
+bool FreqCCv4Sender::UsesAdaptiveLoadJudgment() const {
+  return adaptive_guard_enabled_ || hybrid_window_baseline_enabled_;
+}
+
 WaveformClassification FreqCCv4Sender::ClassifyWaveformState(
     const WaveformDecisionInputs& inputs,
     const char** decision_rule) {
@@ -2669,18 +2917,33 @@ WaveformClassification FreqCCv4Sender::ClassifyWaveformState(
     if (!inputs.adaptive_guard_enabled) {
       return decide(WaveformClassification::kInconclusive, "R6");
     }
-    const bool comparison_valid =
-        inputs.srtt_window_stats_valid &&
-        std::isfinite(inputs.srtt_max_ms) && inputs.srtt_max_ms > 0.0 &&
+    const bool window_stats_valid = inputs.srtt_window_stats_valid &&
+        std::isfinite(inputs.srtt_mean_ms) && inputs.srtt_mean_ms > 0.0 &&
+        std::isfinite(inputs.srtt_min_ms) && inputs.srtt_min_ms > 0.0 &&
+        std::isfinite(inputs.srtt_max_ms) && inputs.srtt_max_ms > 0.0;
+    const bool srtt_up_valid =
         inputs.latest_waveform_overload_srtt_mean_valid &&
         std::isfinite(inputs.latest_waveform_overload_srtt_mean_ms) &&
         inputs.latest_waveform_overload_srtt_mean_ms > 0.0;
-    if (comparison_valid &&
-        inputs.srtt_max_ms >
-            inputs.latest_waveform_overload_srtt_mean_ms) {
+    if (window_stats_valid && srtt_up_valid &&
+        (inputs.srtt_mean_ms >
+             inputs.latest_waveform_overload_srtt_mean_ms ||
+         inputs.srtt_max_ms >
+             inputs.latest_waveform_overload_srtt_mean_ms)) {
       return decide(WaveformClassification::kOverload, "R6.1");
     }
-    return decide(WaveformClassification::kInconclusive, "R6.2");
+    const bool srtt_low_valid =
+        inputs.latest_waveform_underload_srtt_mean_valid &&
+        std::isfinite(inputs.latest_waveform_underload_srtt_mean_ms) &&
+        inputs.latest_waveform_underload_srtt_mean_ms > 0.0;
+    if (window_stats_valid && srtt_low_valid &&
+        (inputs.srtt_mean_ms <
+             inputs.latest_waveform_underload_srtt_mean_ms ||
+         inputs.srtt_min_ms <
+             inputs.latest_waveform_underload_srtt_mean_ms)) {
+      return decide(WaveformClassification::kUnderload, "R6.2");
+    }
+    return decide(WaveformClassification::kInconclusive, "R6.3");
   };
   if (!inputs.prechecks_valid || !inputs.srtt_input_valid) {
     return decide_r6();
@@ -2688,6 +2951,57 @@ WaveformClassification FreqCCv4Sender::ClassifyWaveformState(
 
   const bool drate_effective_similar =
       inputs.drate_similar || inputs.drate_similar_without_middle;
+  if (inputs.adaptive_guard_enabled) {
+    const bool srtt_effective_similar =
+        inputs.srtt_similar || inputs.srtt_similar_without_middle;
+    if (srtt_effective_similar) {
+      const bool positive_side_suppressed =
+          inputs.srtt_positive_half_clipped ||
+          inputs.srtt_only_negative_half;
+      const bool negative_side_suppressed =
+          inputs.srtt_negative_half_clipped ||
+          inputs.srtt_only_positive_half;
+      const bool positive_only = positive_side_suppressed &&
+                                 !negative_side_suppressed;
+      const bool negative_only = !positive_side_suppressed &&
+                                 negative_side_suppressed;
+      const bool both_clipped = positive_side_suppressed &&
+                                negative_side_suppressed;
+      if (positive_only) {
+        if (!inputs.drate_input_valid) {
+          return decide(WaveformClassification::kInconclusive, "R2.4");
+        }
+        if (inputs.drate_similar &&
+            ((inputs.drate_positive_half_clipped &&
+              inputs.positive_half_clips_simultaneous) ||
+             inputs.drate_only_negative_half)) {
+          return decide(WaveformClassification::kOverload, "R2.1");
+        }
+        if (drate_effective_similar) {
+          return decide(WaveformClassification::kFullLoad, "R2.2");
+        }
+        return decide(WaveformClassification::kOverload, "R2.3");
+      }
+      if (negative_only || both_clipped) {
+        const char* similar_rule = negative_only ? "R3.1" : "R4.1";
+        const char* plateau_rule = negative_only ? "R3.2" : "R4.2";
+        const char* otherwise_rule = negative_only ? "R3.3" : "R4.3";
+        if (inputs.drate_input_valid && inputs.drate_similar) {
+          return decide(WaveformClassification::kUnderload, similar_rule);
+        }
+        if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
+          return decide(WaveformClassification::kUnderload, plateau_rule);
+        }
+        return decide(WaveformClassification::kInconclusive, otherwise_rule);
+      }
+      return decide(WaveformClassification::kFullLoad, "R1");
+    }
+    if (drate_effective_similar) {
+      return decide(WaveformClassification::kUnderload, "R5.1");
+    }
+    return decide(WaveformClassification::kOverload, "R5.2");
+  }
+
   if (inputs.srtt_similar) {
     const bool positive_only = inputs.srtt_positive_half_clipped &&
                                !inputs.srtt_negative_half_clipped;
@@ -3532,6 +3846,7 @@ FreqCCv4Sender::DetectDualSignalPlateaus(
     result.invalid_reason = "invalid_dual_plateau_input";
     return result;
   }
+  const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
 
   struct SignalThresholds {
     bool valid = false;
@@ -3600,7 +3915,9 @@ FreqCCv4Sender::DetectDualSignalPlateaus(
   const SignalThresholds drate_thresholds =
       build_thresholds(drate, drate_slopes, drate_noise_sigma);
   result.drate_has_waveform = drate_thresholds.valid;
-  if (!srtt_thresholds.valid || !drate_thresholds.valid) {
+  if ((!srtt_thresholds.valid && !drate_thresholds.valid) ||
+      (!use_adaptive_load_judgment &&
+       (!srtt_thresholds.valid || !drate_thresholds.valid))) {
     result.invalid_reason = "dual_signal_flat_or_below_noise";
     return result;
   }
@@ -3729,17 +4046,25 @@ FreqCCv4Sender::DetectDualSignalPlateaus(
           candidate.before, candidate.after);
       const bool other_same = HasMacroSameDirectionShoulders(
           candidate.other_before, candidate.other_after);
-      const bool dual_opposing = HasDualMacroOpposingShoulders(
-          candidate.before, candidate.after,
+      const bool owner_opposing = HasMacroOpposingShoulders(
+          candidate.before, candidate.after, shoulder_duration_s,
           thresholds.shoulder_slope,
-          thresholds.minimum_shoulder_change,
-          candidate.other_before, candidate.other_after,
-          other_thresholds.shoulder_slope,
-          other_thresholds.minimum_shoulder_change,
-          shoulder_duration_s);
-      candidate.middle_sequential = owner_same || other_same;
+          thresholds.minimum_shoulder_change);
+      const bool dual_opposing = other_thresholds.valid &&
+          HasDualMacroOpposingShoulders(
+              candidate.before, candidate.after,
+              thresholds.shoulder_slope,
+              thresholds.minimum_shoulder_change,
+              candidate.other_before, candidate.other_after,
+              other_thresholds.shoulder_slope,
+              other_thresholds.minimum_shoulder_change,
+              shoulder_duration_s);
+      candidate.middle_sequential = use_adaptive_load_judgment
+          ? owner_same
+          : owner_same || other_same;
       candidate.genuine_shoulder_clip =
-          !candidate.middle_sequential && dual_opposing &&
+          !candidate.middle_sequential &&
+          (use_adaptive_load_judgment ? owner_opposing : dual_opposing) &&
           candidate.overlap_ratio >= waveform_clip_min_half_overlap_ratio_ &&
           candidate.extreme_distance_ratio <=
               waveform_plateau_extreme_distance_ratio_;
@@ -3748,10 +4073,14 @@ FreqCCv4Sender::DetectDualSignalPlateaus(
       candidates.push_back(candidate);
     }
   };
-  collect(true, srtt, srtt_slopes, drate_slopes,
-          srtt_thresholds, drate_thresholds);
-  collect(false, drate, drate_slopes, srtt_slopes,
-          drate_thresholds, srtt_thresholds);
+  if (srtt_thresholds.valid) {
+    collect(true, srtt, srtt_slopes, drate_slopes,
+            srtt_thresholds, drate_thresholds);
+  }
+  if (drate_thresholds.valid) {
+    collect(false, drate, drate_slopes, srtt_slopes,
+            drate_thresholds, srtt_thresholds);
+  }
 
   result.plateau_candidate_count = candidates.size();
   Candidate selected;
@@ -3982,13 +4311,12 @@ void FreqCCv4Sender::ResetWaveformCruiseState(QuicTime now) {
   waveform_delta_reference_valid_ = false;
   waveform_delta_reference_bps_ = 0.0;
   consecutive_overload_count_ = 0;
-  latest_waveform_overload_srtt_mean_valid_ = false;
-  latest_waveform_overload_srtt_mean_ms_ = 0.0;
   waveform_last_delta_source_ = kWaveformDeltaSourceNone;
   waveform_last_raw_delta_bw_bps_ = 0.0;
   waveform_last_applied_delta_bw_bps_ = 0.0;
   baseline_adjustment_count_ = 0;
   inconclusive_extension_count_ = 0;
+  waveform_inconclusive_amplification_count_ = 0;
   floor_clip_confirmation_count_ = 0;
   waveform_last_clip_direction_ = 0;
   waveform_decision_count_ = 0;
@@ -4089,15 +4417,22 @@ FreqCCv4Sender::AnalyzeWaveformWindow(QuicTime window_start,
   result.window_end = window_end;
   result.window_periods = window_periods;
   result.extended_window = extended_window;
+  const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
   auto apply_r6_fallback = [&]() {
     WaveformDecisionInputs decision;
-    decision.adaptive_guard_enabled = adaptive_guard_enabled_;
+    decision.adaptive_guard_enabled = use_adaptive_load_judgment;
     decision.srtt_window_stats_valid = result.srtt_stats_valid;
+    decision.srtt_mean_ms = result.srtt_mean_ms;
+    decision.srtt_min_ms = result.srtt_min_ms;
     decision.srtt_max_ms = result.srtt_max_ms;
     decision.latest_waveform_overload_srtt_mean_valid =
         result.latest_waveform_overload_srtt_mean_valid;
     decision.latest_waveform_overload_srtt_mean_ms =
         result.latest_waveform_overload_srtt_mean_ms;
+    decision.latest_waveform_underload_srtt_mean_valid =
+        result.latest_waveform_underload_srtt_mean_valid;
+    decision.latest_waveform_underload_srtt_mean_ms =
+        result.latest_waveform_underload_srtt_mean_ms;
     result.classification = ClassifyWaveformState(
         decision, &result.decision_rule);
   };
@@ -4135,11 +4470,16 @@ FreqCCv4Sender::AnalyzeWaveformWindow(QuicTime window_start,
   result.srtt_stat_sample_count = srtt_stats.sample_count;
   result.srtt_stats_valid = srtt_stats.valid;
   result.srtt_mean_ms = srtt_stats.mean_ms;
+  result.srtt_min_ms = srtt_stats.min_ms;
   result.srtt_max_ms = srtt_stats.max_ms;
   result.latest_waveform_overload_srtt_mean_valid =
       latest_waveform_overload_srtt_mean_valid_;
   result.latest_waveform_overload_srtt_mean_ms =
       latest_waveform_overload_srtt_mean_ms_;
+  result.latest_waveform_underload_srtt_mean_valid =
+      latest_waveform_underload_srtt_mean_valid_;
+  result.latest_waveform_underload_srtt_mean_ms =
+      latest_waveform_underload_srtt_mean_ms_;
   result.delivery_rate_stat_sample_count = delivery_stats.sample_count;
   result.delivery_rate_stats_valid = delivery_stats.valid;
   result.delivery_rate_min_bps = delivery_stats.min_bps;
@@ -4457,10 +4797,41 @@ FreqCCv4Sender::AnalyzeWaveformWindow(QuicTime window_start,
           result.drate_without_middle_completeness.valid;
     }
   }
+  std::vector<bool> srtt_half_valid(srtt.valid.size(), false);
+  std::vector<bool> drate_half_valid(drate.valid.size(), false);
+  const bool srtt_mask_valid =
+      result.plateau.srtt_middle_sequential_mask.size() == srtt.valid.size();
+  const bool drate_mask_valid =
+      result.plateau.drate_middle_sequential_mask.size() == drate.valid.size();
+  for (size_t i = 0; i < best_sender.valid.size(); ++i) {
+    srtt_half_valid[i] = best_sender.valid[i] && srtt.valid[i] &&
+        (!srtt_mask_valid ||
+         !result.plateau.srtt_middle_sequential_mask[i]);
+    drate_half_valid[i] = best_sender.valid[i] && drate.valid[i] &&
+        (!drate_mask_valid ||
+         !result.plateau.drate_middle_sequential_mask[i]);
+  }
+  result.plateau.srtt_only_negative_half = HasOnlyNegativeHalfWaveform(
+      srtt_detrended, best_sender_residual, srtt_half_valid,
+      shape_independent_srtt_noise_sigma,
+      &result.plateau.srtt_positive_half_span_ms,
+      &result.plateau.srtt_negative_half_span_ms);
+  result.plateau.srtt_only_positive_half = HasOnlyPositiveHalfWaveform(
+      srtt_detrended, best_sender_residual, srtt_half_valid,
+      shape_independent_srtt_noise_sigma, nullptr, nullptr);
+  result.plateau.drate_only_negative_half = HasOnlyNegativeHalfWaveform(
+      drate_detrended, best_sender_residual, drate_half_valid,
+      shape_independent_drate_noise_sigma,
+      &result.plateau.drate_positive_half_span_bps,
+      &result.plateau.drate_negative_half_span_bps);
   result.srtt_positive_half_clipped =
       result.plateau.positive_half_clipped;
   result.srtt_negative_half_clipped =
       result.plateau.negative_half_clipped;
+  result.srtt_only_negative_half =
+      result.plateau.srtt_only_negative_half;
+  result.srtt_only_positive_half =
+      result.plateau.srtt_only_positive_half;
   result.srtt_clip_ambiguous = result.plateau.ambiguous;
   result.srtt_similar = result.srtt_similar_frequency;
   result.srtt_effective_similar =
@@ -4547,14 +4918,20 @@ FreqCCv4Sender::AnalyzeWaveformWindow(QuicTime window_start,
 
   WaveformDecisionInputs decision;
   decision.prechecks_valid = true;
-  decision.adaptive_guard_enabled = adaptive_guard_enabled_;
+  decision.adaptive_guard_enabled = use_adaptive_load_judgment;
   decision.srtt_input_valid = result.srtt_input_valid;
   decision.srtt_window_stats_valid = result.srtt_stats_valid;
+  decision.srtt_mean_ms = result.srtt_mean_ms;
+  decision.srtt_min_ms = result.srtt_min_ms;
   decision.srtt_max_ms = result.srtt_max_ms;
   decision.latest_waveform_overload_srtt_mean_valid =
       result.latest_waveform_overload_srtt_mean_valid;
   decision.latest_waveform_overload_srtt_mean_ms =
       result.latest_waveform_overload_srtt_mean_ms;
+  decision.latest_waveform_underload_srtt_mean_valid =
+      result.latest_waveform_underload_srtt_mean_valid;
+  decision.latest_waveform_underload_srtt_mean_ms =
+      result.latest_waveform_underload_srtt_mean_ms;
   decision.drate_input_valid = result.drate_input_valid;
   decision.srtt_similar = result.srtt_similar;
   decision.srtt_similar_without_middle =
@@ -4566,8 +4943,12 @@ FreqCCv4Sender::AnalyzeWaveformWindow(QuicTime window_start,
       result.srtt_positive_half_clipped;
   decision.srtt_negative_half_clipped =
       result.srtt_negative_half_clipped;
+  decision.srtt_only_negative_half = result.srtt_only_negative_half;
+  decision.srtt_only_positive_half = result.srtt_only_positive_half;
   decision.drate_positive_half_clipped =
       result.plateau.drate_positive_half_clipped;
+  decision.drate_only_negative_half =
+      result.plateau.drate_only_negative_half;
   decision.positive_half_clips_simultaneous =
       result.plateau.positive_half_clips_simultaneous;
   decision.drate_has_waveform = result.plateau.drate_has_waveform;
@@ -4598,14 +4979,6 @@ void FreqCCv4Sender::ApplyWaveformClassification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
   WaveformWindowAnalysis trace_analysis = analysis;
-  if (adaptive_guard_enabled_ &&
-      analysis.classification == WaveformClassification::kOverload &&
-      std::string(analysis.decision_rule) != "R6.1" &&
-      analysis.srtt_stats_valid && std::isfinite(analysis.srtt_mean_ms) &&
-      analysis.srtt_mean_ms > 0.0) {
-    latest_waveform_overload_srtt_mean_ms_ = analysis.srtt_mean_ms;
-    latest_waveform_overload_srtt_mean_valid_ = true;
-  }
   const double baseline_before_bps = static_cast<double>(
       current_injection_baseline_bw_.ToBitsPerSecond());
   const double amplitude_before_bps =
@@ -4635,15 +5008,7 @@ void FreqCCv4Sender::ApplyWaveformClassification(
   }
   trace_analysis.queue_delay_ms = queue_delay_us / 1000.0;
   trace_analysis.queue_delay_min_rtt_ratio = queue_delay_ratio;
-  const bool queue_feedback_active =
-      adaptive_guard_enabled_ && waveform_queue_guard_enabled_ &&
-      queue_signal_valid;
-  if (adaptive_guard_enabled_ &&
-      analysis.classification == WaveformClassification::kOverload) {
-    ++consecutive_overload_count_;
-  } else {
-    consecutive_overload_count_ = 0;
-  }
+  consecutive_overload_count_ = 0;
   trace_analysis.overload_confirmation_count = consecutive_overload_count_;
 
   auto adjustment_limit_reached = [&]() {
@@ -4692,36 +5057,45 @@ void FreqCCv4Sender::ApplyWaveformClassification(
 
     double next_baseline_bps = baseline_before_bps;
     const char* delta_source = kWaveformDeltaSourceNone;
+    const bool waveform_derived =
+        IsWaveformDecisionRule(analysis.decision_rule);
+    const bool waveform_srtt_mean_valid =
+        waveform_derived && analysis.srtt_stats_valid &&
+        std::isfinite(analysis.srtt_mean_ms) && analysis.srtt_mean_ms > 0.0;
     switch (analysis.classification) {
       case WaveformClassification::kFullLoad: {
         const double latest_trusted_bps = analysis.delivery_rate_mean_bps;
-        const double historical_smoothed_bps = static_cast<double>(
-            hybrid_smoothed_trusted_bw_.ToBitsPerSecond());
-        const double smoothed_trusted_bps = SmoothTrustedBandwidth(
-            historical_smoothed_bps,
-            hybrid_smoothed_trusted_bw_valid_,
-            latest_trusted_bps);
         hybrid_latest_trusted_bw_ = BandwidthFromBps(latest_trusted_bps);
         hybrid_smoothed_trusted_bw_ =
-            BandwidthFromBps(smoothed_trusted_bps);
+            BandwidthFromBps(latest_trusted_bps);
         hybrid_smoothed_trusted_bw_valid_ =
             !hybrid_smoothed_trusted_bw_.IsZero();
-        next_baseline_bps = smoothed_trusted_bps;
+        next_baseline_bps = latest_trusted_bps;
         current_injection_baseline_bw_ = hybrid_smoothed_trusted_bw_;
         trusted_baseline_locked_ = hybrid_smoothed_trusted_bw_valid_;
         trusted_bw_candidate_ = hybrid_smoothed_trusted_bw_;
         trusted_bw_candidate_source_ =
-            kTrustedBwSourceHybridSmoothedWindowMean;
+            kTrustedBwSourceHybridWindowMean;
         ++trusted_bw_candidate_update_count_;
         trace_analysis.latest_trusted_bw_bps = latest_trusted_bps;
-        trace_analysis.smoothed_trusted_bw_bps = smoothed_trusted_bps;
-        delta_source = kWaveformDeltaSourceHybridSmoothedTrustedBw;
-        action = "HYBRID_FULL_LOAD_USE_SMOOTHED_WINDOW_MEAN";
+        trace_analysis.smoothed_trusted_bw_bps = latest_trusted_bps;
+        delta_source = kWaveformDeltaSourceHybridTrustedBw;
+        action = "HYBRID_FULL_LOAD_USE_WINDOW_MEAN";
         break;
       }
       case WaveformClassification::kUnderload:
         if (adjustment_limit_reached()) {
           return;
+        }
+        if (waveform_derived) {
+          adaptive_baseline_low_ =
+              BandwidthFromBps(analysis.delivery_rate_mean_bps);
+          adaptive_baseline_low_valid_ = !adaptive_baseline_low_.IsZero();
+          if (waveform_srtt_mean_valid) {
+            latest_waveform_underload_srtt_mean_ms_ =
+                analysis.srtt_mean_ms;
+            latest_waveform_underload_srtt_mean_valid_ = true;
+          }
         }
         underload_located_ = true;
         next_baseline_bps = analysis.delivery_rate_max_bps;
@@ -4733,6 +5107,16 @@ void FreqCCv4Sender::ApplyWaveformClassification(
       case WaveformClassification::kOverload:
         if (adjustment_limit_reached()) {
           return;
+        }
+        if (waveform_derived) {
+          adaptive_baseline_up_ =
+              BandwidthFromBps(analysis.delivery_rate_mean_bps);
+          adaptive_baseline_up_valid_ = !adaptive_baseline_up_.IsZero();
+          if (waveform_srtt_mean_valid) {
+            latest_waveform_overload_srtt_mean_ms_ =
+                analysis.srtt_mean_ms;
+            latest_waveform_overload_srtt_mean_valid_ = true;
+          }
         }
         next_baseline_bps = analysis.delivery_rate_min_bps;
         current_injection_baseline_bw_ = BandwidthFromBps(next_baseline_bps);
@@ -4856,191 +5240,187 @@ void FreqCCv4Sender::ApplyWaveformClassification(
     return;
   }
 
-  if (analysis.drate_similar &&
-      std::isfinite(analysis.current_drate_response_amplitude_bps) &&
-      analysis.current_drate_response_amplitude_bps > 0.0) {
-    last_similar_drate_amplitude_bps_ =
-        analysis.current_drate_response_amplitude_bps;
-    has_last_similar_drate_amplitude_ = true;
-    const double amplitude_delta_bps =
-        waveform_delta_drate_amplitude_ratio_ *
-        analysis.current_drate_response_amplitude_bps;
-    if (std::isfinite(amplitude_delta_bps) && amplitude_delta_bps > 0.0) {
-      if (!waveform_delta_reference_valid_) {
-        waveform_delta_reference_bps_ = amplitude_delta_bps;
-        waveform_delta_reference_valid_ = true;
-      } else {
-        waveform_delta_reference_bps_ =
-            (1.0 - waveform_delta_ewma_alpha_) *
-                waveform_delta_reference_bps_ +
-            waveform_delta_ewma_alpha_ * amplitude_delta_bps;
-      }
-    }
+  if (!analysis.delivery_rate_stats_valid) {
+    waveform_last_invalid_reason_ = "adaptive_delivery_rate_stats_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = "ADAPTIVE_RETRY_WITHOUT_BASELINE_CHANGE";
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
   }
-
-  const bool delta_reference_from_drate =
-      waveform_delta_reference_valid_ &&
-      std::isfinite(waveform_delta_reference_bps_) &&
-      waveform_delta_reference_bps_ > 0.0;
-  const char* delta_source = delta_reference_from_drate
-      ? kWaveformDeltaSourceSmoothedDrate
-      : kWaveformDeltaSourceAdaptiveBaselineFallback;
-  const double unclamped_delta_reference_bps = delta_reference_from_drate
-      ? waveform_delta_reference_bps_
-      : waveform_adaptive_delta_fallback_baseline_ratio_ *
-            baseline_before_bps;
-  const double minimum_delta_bps =
-      waveform_delta_min_baseline_ratio_ * baseline_before_bps;
-  const double maximum_delta_bps =
-      waveform_delta_max_baseline_ratio_ * baseline_before_bps;
-  double delta_reference_bps = ClampValue(
-      unclamped_delta_reference_bps, minimum_delta_bps, maximum_delta_bps);
-  if (!std::isfinite(delta_reference_bps) || delta_reference_bps < 0.0) {
-    delta_reference_bps = 0.0;
-  }
-  trace_analysis.delta_reference_bps = delta_reference_bps;
 
   if (analysis.classification == WaveformClassification::kFullLoad) {
-    trusted_baseline_locked_ = true;
-    trusted_bw_candidate_ = current_injection_baseline_bw_;
-    trusted_bw_candidate_source_ = kTrustedBwSourceTimeWaveformBaseline;
-    ++trusted_bw_candidate_update_count_;
+    trusted_bw_candidate_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    trusted_baseline_locked_ = !trusted_bw_candidate_.IsZero();
+    trusted_bw_candidate_source_ = kTrustedBwSourceAdaptiveWindowMean;
+    if (trusted_baseline_locked_) {
+      ++trusted_bw_candidate_update_count_;
+    }
+    trace_analysis.latest_trusted_bw_bps =
+        analysis.delivery_rate_mean_bps;
     trace_analysis.delta_source = kWaveformDeltaSourceNone;
     trace_analysis.raw_delta_bw_bps = 0.0;
     trace_analysis.applied_delta_bw_bps = 0.0;
     waveform_last_delta_source_ = kWaveformDeltaSourceNone;
     waveform_last_raw_delta_bw_bps_ = 0.0;
     waveform_last_applied_delta_bw_bps_ = 0.0;
-    waveform_last_action_ = "UPDATE_TRUSTED_BW_FROM_FULL_LOAD";
+    waveform_last_action_ = "ADAPTIVE_UPDATE_TRUSTED_BW_FROM_WINDOW_MEAN";
     ScheduleWaveformCollectionAfterSettle(now, false);
-    EmitWaveformSearchTrace(trace_analysis,
-                            waveform_last_action_,
-                            baseline_before_bps,
-                            amplitude_before_bps);
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
     return;
   }
 
-  trace_analysis.delta_source = delta_source;
-  trace_analysis.raw_delta_bw_bps = delta_reference_bps;
-  trace_analysis.applied_delta_bw_bps = 0.0;
-  waveform_last_delta_source_ = delta_source;
-  waveform_last_raw_delta_bw_bps_ = delta_reference_bps;
-  waveform_last_applied_delta_bw_bps_ = 0.0;
-
-  switch (analysis.classification) {
-    case WaveformClassification::kFullLoad: {
-      break;
-    }
-    case WaveformClassification::kUnderload: {
-      underload_located_ = true;
-      if (!analysis.delivery_rate_stats_valid) {
-        waveform_last_invalid_reason_ =
-            "underload_delivery_rate_stats_invalid";
-        trace_analysis.invalid_reason = waveform_last_invalid_reason_;
-        trace_analysis.delta_source = kWaveformDeltaSourceNone;
-        trace_analysis.raw_delta_bw_bps = 0.0;
-        waveform_last_delta_source_ = kWaveformDeltaSourceNone;
-        waveform_last_raw_delta_bw_bps_ = 0.0;
-        action = "RETRY_UNDERLOAD_WITHOUT_BASELINE_CHANGE";
-        ScheduleWaveformCollectionAfterSettle(now, false);
-        break;
-      }
-      if (queue_feedback_active &&
-          queue_delay_ratio > waveform_queue_target_min_rtt_ratio_) {
-        action = "HOLD_UNDERLOAD_QUEUE_ABOVE_TARGET";
-        ScheduleWaveformCollectionAfterSettle(now, false);
-        break;
-      }
-      const double window_gap_bps = std::max(
-          0.0, analysis.delivery_rate_max_bps - baseline_before_bps);
-      const double step_multiplier = queue_feedback_active
-          ? UnderloadStepMultiplier(
-                queue_delay_ratio,
-                waveform_queue_low_min_rtt_ratio_,
-                waveform_queue_target_min_rtt_ratio_,
-                waveform_underload_max_delta_multiplier_)
-          : 1.0;
-      const double applied_delta_bw_bps =
-          step_multiplier * delta_reference_bps;
-      trace_analysis.window_extreme_gap_bps = window_gap_bps;
-      trace_analysis.actuator_step_multiplier = step_multiplier;
-      trace_analysis.applied_delta_bw_bps = applied_delta_bw_bps;
-      waveform_last_applied_delta_bw_bps_ = applied_delta_bw_bps;
-      if (adjustment_limit_reached()) {
-        return;
-      }
-      current_injection_baseline_bw_ = BandwidthFromBps(
-          baseline_before_bps + applied_delta_bw_bps);
-      ++baseline_adjustment_count_;
-      action = "UNDERLOAD_RAISE_BY_QUEUE_GUARDED_DELTA";
-      ScheduleWaveformCollectionAfterSettle(now, false);
-      break;
-    }
-    case WaveformClassification::kOverload: {
-      if (!analysis.delivery_rate_stats_valid) {
-        waveform_last_invalid_reason_ =
-            "overload_delivery_rate_stats_invalid";
-        trace_analysis.invalid_reason = waveform_last_invalid_reason_;
-        trace_analysis.delta_source = kWaveformDeltaSourceNone;
-        trace_analysis.raw_delta_bw_bps = 0.0;
-        waveform_last_delta_source_ = kWaveformDeltaSourceNone;
-        waveform_last_raw_delta_bw_bps_ = 0.0;
-        action = "RETRY_OVERLOAD_WITHOUT_BASELINE_CHANGE";
-        ScheduleWaveformCollectionAfterSettle(now, false);
-        break;
-      }
-      const bool queue_above_target = queue_feedback_active &&
-          queue_delay_ratio > waveform_queue_target_min_rtt_ratio_;
-      if (!queue_above_target &&
-          consecutive_overload_count_ < waveform_overload_confirmations_) {
-        action = "CONFIRM_OVERLOAD_BEFORE_DECREASE";
-        ScheduleWaveformCollectionAfterSettle(now, false);
-        break;
-      }
-      const double window_gap_bps = std::max(
-          0.0, baseline_before_bps - analysis.delivery_rate_min_bps);
-      const double step_multiplier = queue_feedback_active
-          ? OverloadStepMultiplier(
-                queue_delay_ratio,
-                waveform_queue_target_min_rtt_ratio_,
-                waveform_queue_high_min_rtt_ratio_,
-                waveform_overload_max_delta_multiplier_)
-          : 1.0;
-      double applied_delta_bw_bps = CappedWindowStep(
-          window_gap_bps, delta_reference_bps, step_multiplier);
-      applied_delta_bw_bps = std::min(
-          applied_delta_bw_bps,
-          std::max(0.0, baseline_before_bps -
-                            static_cast<double>(minimum_pacing_rate_bps_)));
-      trace_analysis.window_extreme_gap_bps = window_gap_bps;
-      trace_analysis.actuator_step_multiplier = step_multiplier;
-      trace_analysis.applied_delta_bw_bps = applied_delta_bw_bps;
-      waveform_last_applied_delta_bw_bps_ = applied_delta_bw_bps;
-      if (applied_delta_bw_bps <= 0.0) {
-        action = "HOLD_OVERLOAD_NO_POSITIVE_WINDOW_GAP";
-        ScheduleWaveformCollectionAfterSettle(now, false);
-        break;
-      }
-      if (adjustment_limit_reached()) {
-        return;
-      }
-      const double updated = baseline_before_bps - applied_delta_bw_bps;
-      current_injection_baseline_bw_ = BandwidthFromBps(updated);
-      ++baseline_adjustment_count_;
-      action = "OVERLOAD_DECREASE_BY_CAPPED_DELTA";
-      consecutive_overload_count_ = 0;
-      ScheduleWaveformCollectionAfterSettle(now, false);
-      break;
-    }
-    case WaveformClassification::kInconclusive:
-    default:
-      break;
+  const bool waveform_derived =
+      IsWaveformDecisionRule(analysis.decision_rule);
+  if (waveform_derived &&
+      (!analysis.srtt_stats_valid || !std::isfinite(analysis.srtt_mean_ms) ||
+       analysis.srtt_mean_ms <= 0.0)) {
+    waveform_last_invalid_reason_ = "adaptive_srtt_stats_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = "ADAPTIVE_RETRY_WITHOUT_BOUND_UPDATE";
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
   }
+  if (adjustment_limit_reached()) {
+    return;
+  }
+
+  if (analysis.classification == WaveformClassification::kOverload &&
+      waveform_derived) {
+    adaptive_baseline_up_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    adaptive_baseline_up_valid_ = !adaptive_baseline_up_.IsZero();
+    latest_waveform_overload_srtt_mean_ms_ = analysis.srtt_mean_ms;
+    latest_waveform_overload_srtt_mean_valid_ = true;
+  } else if (analysis.classification == WaveformClassification::kUnderload &&
+             waveform_derived) {
+    adaptive_baseline_low_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    adaptive_baseline_low_valid_ = !adaptive_baseline_low_.IsZero();
+    latest_waveform_underload_srtt_mean_ms_ = analysis.srtt_mean_ms;
+    latest_waveform_underload_srtt_mean_valid_ = true;
+    underload_located_ = true;
+  }
+
+  const double baseline_low_bps = static_cast<double>(
+      adaptive_baseline_low_.ToBitsPerSecond());
+  const double baseline_up_bps = static_cast<double>(
+      adaptive_baseline_up_.ToBitsPerSecond());
+  const bool bracket_valid = adaptive_baseline_low_valid_ &&
+      adaptive_baseline_up_valid_ && baseline_up_bps > baseline_low_bps;
+  const bool overload =
+      analysis.classification == WaveformClassification::kOverload;
+  const double baseline_gap_bps = bracket_valid
+      ? baseline_up_bps - baseline_low_bps
+      : 0.0;
+  const double bracket_target_bps = bracket_valid
+      ? baseline_low_bps + baseline_gap_bps / (overload ? 4.0 : 2.0)
+      : 0.0;
+  const bool use_bracket_target = bracket_valid &&
+      ((overload && baseline_before_bps > bracket_target_bps) ||
+       (!overload && baseline_before_bps < bracket_target_bps));
+  const double next_baseline_bps = ComputeAdaptiveNextBaseline(
+      analysis.classification,
+      adaptive_baseline_low_valid_, baseline_low_bps,
+      adaptive_baseline_up_valid_, baseline_up_bps,
+      baseline_before_bps,
+      analysis.delivery_rate_min_bps,
+      analysis.delivery_rate_max_bps,
+      static_cast<double>(minimum_pacing_rate_bps_));
+  const double baseline_change_bps =
+      std::abs(next_baseline_bps - baseline_before_bps);
+  const char* delta_source = use_bracket_target
+      ? kWaveformDeltaSourceAdaptiveBracketBound
+      : (overload ? kWaveformDeltaSourceAdaptiveWindowMinimum
+                  : kWaveformDeltaSourceAdaptiveWindowMaximum);
+  trace_analysis.delta_source = delta_source;
+  trace_analysis.raw_delta_bw_bps = baseline_change_bps;
+  trace_analysis.applied_delta_bw_bps = baseline_change_bps;
+  trace_analysis.delta_reference_bps = bracket_valid
+      ? bracket_target_bps
+      : 0.0;
+  trace_analysis.window_extreme_gap_bps = bracket_valid
+      ? baseline_gap_bps
+      : std::abs((overload ? analysis.delivery_rate_min_bps
+                           : analysis.delivery_rate_max_bps) -
+                 baseline_before_bps);
+  trace_analysis.actuator_step_multiplier = 1.0;
+  waveform_last_delta_source_ = delta_source;
+  waveform_last_raw_delta_bw_bps_ = baseline_change_bps;
+  waveform_last_applied_delta_bw_bps_ = baseline_change_bps;
+  current_injection_baseline_bw_ = BandwidthFromBps(next_baseline_bps);
+  if (baseline_change_bps > 0.5) {
+    ++baseline_adjustment_count_;
+  }
+  if (overload) {
+    action = use_bracket_target
+        ? "ADAPTIVE_OVERLOAD_USE_LOW_PLUS_QUARTER_GAP"
+        : "ADAPTIVE_OVERLOAD_USE_WINDOW_MINIMUM";
+  } else {
+    action = use_bracket_target
+        ? "ADAPTIVE_UNDERLOAD_USE_LOW_PLUS_HALF_GAP"
+        : "ADAPTIVE_UNDERLOAD_USE_WINDOW_MAXIMUM";
+  }
+  ScheduleWaveformCollectionAfterSettle(now, false);
   waveform_last_action_ = action;
   EmitWaveformSearchTrace(trace_analysis,
                           action,
                           baseline_before_bps,
                           amplitude_before_bps);
+}
+
+bool FreqCCv4Sender::AmplifyWaveformProbeAfterInconclusive(
+    const WaveformWindowAnalysis& analysis,
+    QuicTime now) {
+  const uint64_t initial_amplitude_bps =
+      waveform_initial_probe_amplitude_bps_ == 0
+          ? GetCurrentAmplitudeBps()
+          : waveform_initial_probe_amplitude_bps_;
+  const uint64_t amplified_amplitude_bps = AmplifiedWaveformProbeAmplitude(
+      current_probe_amplitude_bps_, initial_amplitude_bps,
+      waveform_inconclusive_signal_amplification_factor_,
+      waveform_inconclusive_signal_amplification_max_ratio_);
+  if (amplified_amplitude_bps <= current_probe_amplitude_bps_) {
+    return false;
+  }
+
+  WaveformWindowAnalysis trace_analysis = analysis;
+  const double baseline_before_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_before_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  current_probe_amplitude_bps_ = amplified_amplitude_bps;
+  if (waveform_inconclusive_amplification_count_ <
+      std::numeric_limits<uint32_t>::max()) {
+    ++waveform_inconclusive_amplification_count_;
+  }
+  ++waveform_decision_count_;
+  const std::string action = "AMPLIFY_INCONCLUSIVE_SIGNAL_AND_RETRY";
+  waveform_last_action_ = action;
+  waveform_last_invalid_reason_ = AppendReason(
+      analysis.invalid_reason,
+      "signal_amplified_after_second_inconclusive");
+  trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+  waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+  waveform_last_raw_delta_bw_bps_ = 0.0;
+  waveform_last_applied_delta_bw_bps_ = 0.0;
+  ScheduleWaveformCollectionAfterSettle(now, false);
+  EmitWaveformSearchTrace(trace_analysis,
+                          action,
+                          baseline_before_bps,
+                          amplitude_before_bps);
+  return true;
 }
 
 void FreqCCv4Sender::RunWaveformCruiseStateMachine(QuicTime now) {
@@ -5069,17 +5449,57 @@ void FreqCCv4Sender::RunWaveformCruiseStateMachine(QuicTime now) {
       continue;
     }
     if (waveform_cruise_state_ == WaveformCruiseState::kAnalyzeCycle) {
-      WaveformWindowAnalysis analysis = AnalyzeWaveformWindow(
-          waveform_window_start_, waveform_window_end_,
-          waveform_window_periods_, waveform_window_extended_);
+      WaveformWindowAnalysis analysis;
+      const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
+      if (use_adaptive_load_judgment && waveform_window_extended_ &&
+          waveform_window_periods_ >= 3.0 &&
+          cruise_modulation_freq_hz_ > 0.0) {
+        const TimeDelta period = TimeDelta::FromMicroseconds(
+            static_cast<int64_t>(std::llround(
+                1000000.0 / cruise_modulation_freq_hz_)));
+        const QuicTime later_window_start = waveform_window_start_ + period;
+        const QuicTime prior_window_end = later_window_start + period;
+        const WaveformWindowAnalysis prior = AnalyzeWaveformWindow(
+            waveform_window_start_, prior_window_end, 2.0, false);
+        analysis = AnalyzeWaveformWindow(
+            later_window_start, waveform_window_end_, 2.0, true);
+        analysis.collection_window_start = waveform_window_start_;
+        analysis.collection_window_end = waveform_window_end_;
+        analysis.collection_window_periods = waveform_window_periods_;
+        analysis.extended_window = true;
+        analysis.analysis_uses_later_cycle = true;
+        analysis.prior_cycle_srtt_input_valid = prior.srtt_input_valid;
+        analysis.prior_cycle_srtt_similar = prior.srtt_effective_similar;
+        analysis.prior_cycle_drate_input_valid = prior.drate_input_valid;
+        analysis.prior_cycle_drate_similar = prior.drate_effective_similar;
+        analysis.prior_cycle_classification = prior.classification;
+      } else {
+        analysis = AnalyzeWaveformWindow(
+            waveform_window_start_, waveform_window_end_,
+            waveform_window_periods_, waveform_window_extended_);
+      }
       if (analysis.classification ==
               WaveformClassification::kInconclusive &&
-          inconclusive_extension_count_ <
-              waveform_max_inconclusive_extensions_ &&
-          waveform_window_periods_ < waveform_max_window_periods_) {
-        const double extended_periods = std::min(
-            waveform_max_window_periods_, waveform_window_periods_ + 1.0);
-        if (extended_periods <= waveform_window_periods_ + 1e-12) {
+          inconclusive_extension_count_ > 0 &&
+          AmplifyWaveformProbeAfterInconclusive(analysis, now)) {
+        return;
+      }
+      if (analysis.classification ==
+              WaveformClassification::kInconclusive &&
+          ShouldObserveAfterInconclusive(
+              use_adaptive_load_judgment, inconclusive_extension_count_,
+              waveform_max_inconclusive_extensions_,
+              waveform_window_periods_, waveform_max_window_periods_)) {
+        const double start_advance_periods =
+            InconclusiveWindowStartAdvancePeriods(
+                use_adaptive_load_judgment, waveform_window_extended_,
+                waveform_window_periods_);
+        const double extended_periods = use_adaptive_load_judgment
+            ? std::min(3.0, waveform_max_window_periods_)
+            : std::min(waveform_max_window_periods_,
+                       waveform_window_periods_ + 1.0);
+        if (start_advance_periods == 0.0 &&
+            extended_periods <= waveform_window_periods_ + 1e-12) {
           ApplyWaveformClassification(analysis, now);
           return;
         }
@@ -5087,7 +5507,10 @@ void FreqCCv4Sender::RunWaveformCruiseStateMachine(QuicTime now) {
             current_injection_baseline_bw_.ToBitsPerSecond());
         const double amplitude_before_bps =
             static_cast<double>(current_probe_amplitude_bps_);
-        ++inconclusive_extension_count_;
+        if (inconclusive_extension_count_ <
+            std::numeric_limits<uint32_t>::max()) {
+          ++inconclusive_extension_count_;
+        }
         ++waveform_decision_count_;
         waveform_last_action_ = "OBSERVE_ONE_MORE_PERIOD";
         waveform_last_delta_source_ = kWaveformDeltaSourceNone;
@@ -5098,11 +5521,14 @@ void FreqCCv4Sender::RunWaveformCruiseStateMachine(QuicTime now) {
                                 waveform_last_action_,
                                 baseline_before_bps,
                                 amplitude_before_bps);
+        const TimeDelta period = TimeDelta::FromMicroseconds(
+            static_cast<int64_t>(std::llround(
+                1000000.0 / cruise_modulation_freq_hz_)));
+        const QuicTime next_window_start = start_advance_periods > 0.5
+            ? waveform_window_start_ + period
+            : waveform_window_start_;
         StartWaveformCollectionAt(
-            waveform_window_start_,
-            std::min(extended_periods,
-                     waveform_extended_window_periods_),
-            true);
+            next_window_start, extended_periods, true);
         return;
       }
       ApplyWaveformClassification(analysis, now);
@@ -5164,11 +5590,16 @@ void FreqCCv4Sender::EmitWaveformSearchTrace(
       << analysis.srtt_stat_sample_count << ","
       << (analysis.srtt_stats_valid ? "true" : "false") << ","
       << analysis.srtt_mean_ms << ","
+      << analysis.srtt_min_ms << ","
       << analysis.srtt_max_ms << ","
       << (analysis.latest_waveform_overload_srtt_mean_valid
               ? "true"
               : "false") << ","
       << analysis.latest_waveform_overload_srtt_mean_ms << ","
+      << (analysis.latest_waveform_underload_srtt_mean_valid
+              ? "true"
+              : "false") << ","
+      << analysis.latest_waveform_underload_srtt_mean_ms << ","
       << analysis.coverage_ratio << ","
       << analysis.app_limited_ratio << ","
       << (analysis.sender_waveform_valid ? "true" : "false") << ","
@@ -5184,6 +5615,10 @@ void FreqCCv4Sender::EmitWaveformSearchTrace(
       << (analysis.srtt_cycle_complete ? "true" : "false") << ","
       << (analysis.srtt_positive_half_clipped ? "true" : "false") << ","
       << (analysis.srtt_negative_half_clipped ? "true" : "false") << ","
+      << (analysis.srtt_only_negative_half ? "true" : "false") << ","
+      << (analysis.srtt_only_positive_half ? "true" : "false") << ","
+      << analysis.plateau.srtt_positive_half_span_ms << ","
+      << analysis.plateau.srtt_negative_half_span_ms << ","
       << (analysis.srtt_clip_ambiguous ? "true" : "false") << ","
       << analysis.srtt_direct_ncc << ","
       << analysis.srtt_integral_ncc << ","
@@ -5252,6 +5687,10 @@ void FreqCCv4Sender::EmitWaveformSearchTrace(
       << ","
       << (analysis.plateau.drate_negative_half_clipped ? "true" : "false")
       << ","
+      << (analysis.plateau.drate_only_negative_half ? "true" : "false")
+      << ","
+      << analysis.plateau.drate_positive_half_span_bps << ","
+      << analysis.plateau.drate_negative_half_span_bps << ","
       << (analysis.plateau.positive_half_clips_simultaneous ? "true" : "false")
       << ","
       << (analysis.plateau.srtt_middle_sequential_plateau ? "true" : "false")
@@ -5280,7 +5719,20 @@ void FreqCCv4Sender::EmitWaveformSearchTrace(
       << analysis.boundary_lift_time_s << ","
       << analysis.boundary_delta_bps << ","
       << waveform_amplitude_reduction_count_ << ","
-      << floor_clip_confirmation_count_;
+      << floor_clip_confirmation_count_ << ","
+      << (adaptive_bounds_inherited_this_cruise_ ? "true" : "false")
+      << ","
+      << adaptive_cruise_start_max_bw_.ToBitsPerSecond() << ","
+      << (adaptive_baseline_low_valid_ ? "true" : "false") << ","
+      << adaptive_baseline_low_.ToBitsPerSecond() << ","
+      << (adaptive_baseline_up_valid_ ? "true" : "false") << ","
+      << adaptive_baseline_up_.ToBitsPerSecond() << ","
+      << (latest_waveform_underload_srtt_mean_valid_ ? "true" : "false")
+      << ","
+      << latest_waveform_underload_srtt_mean_ms_ << ","
+      << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
+      << ","
+      << latest_waveform_overload_srtt_mean_ms_;
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -5298,60 +5750,6 @@ void FreqCCv4Sender::PublishWaveformTrustedBw() {
       trusted_bw_candidate_.ToBitsPerSecond());
   if (!trusted_baseline_locked_ || trusted_bw_candidate_.IsZero() ||
       !std::isfinite(candidate_bps) || candidate_bps <= 0.0) {
-    if (adaptive_guard_enabled_) {
-      const double tmp_bps = static_cast<double>(
-          current_injection_baseline_bw_.ToBitsPerSecond());
-      if (std::isfinite(tmp_bps) && tmp_bps > 0.0) {
-        double historical_bps = static_cast<double>(
-            adaptive_trusted_bw_history_.ToBitsPerSecond());
-        bool historical_valid =
-            adaptive_trusted_bw_history_valid_ &&
-            std::isfinite(historical_bps) && historical_bps > 0.0;
-        if (!historical_valid && trusted_bw_valid_ &&
-            !trusted_bw_.IsZero()) {
-          historical_bps =
-              static_cast<double>(trusted_bw_.ToBitsPerSecond());
-          historical_valid =
-              std::isfinite(historical_bps) && historical_bps > 0.0;
-        }
-
-        const double smoothed_bps = SmoothBandwidthEwma(
-            historical_bps,
-            historical_valid,
-            tmp_bps,
-            kAdaptiveFallbackTrustedBwAlpha);
-        const QuicBandwidth smoothed_bw = BandwidthFromBps(smoothed_bps);
-        if (!smoothed_bw.IsZero() &&
-            std::isfinite(static_cast<double>(
-                smoothed_bw.ToBitsPerSecond()))) {
-          trusted_bw_candidate_ = smoothed_bw;
-          trusted_bw_candidate_source_ =
-              kTrustedBwSourceAdaptiveBaselineSmoothedFallback;
-          ++trusted_bw_candidate_update_count_;
-          TrustedBwSelectionResult selection = {
-              BandwidthEstimate(),
-              smoothed_bw,
-              true,
-              1.0,
-              kTrustedBwSourceAdaptiveBaselineSmoothedFallback,
-              std::numeric_limits<double>::quiet_NaN(),
-              std::numeric_limits<double>::quiet_NaN(),
-              std::numeric_limits<double>::quiet_NaN(),
-              false,
-              false,
-              false,
-              "NOT_APPLICABLE",
-              false,
-              false,
-              0,
-              0,
-              0,
-              0};
-          PublishTrustedBwSelection(selection);
-          return;
-        }
-      }
-    }
     ClearTrustedBw(waveform_last_invalid_reason_.empty() ||
                            waveform_last_invalid_reason_ == "none"
                        ? "waveform_not_locked"
@@ -6204,10 +6602,23 @@ void FreqCCv4Sender::EmitCruiseSummaryTrace(QuicTime now) const {
 	      << waveform_decision_count_ << ","
 	      << baseline_adjustment_count_ << ","
 	      << waveform_amplitude_reduction_count_ << ","
-	      << (underload_located_ ? "true" : "false") << ","
-	      << (trusted_bw_candidate_source_ == nullptr
-	              ? kTrustedBwSourceNone
-	              : trusted_bw_candidate_source_);
+		      << (underload_located_ ? "true" : "false") << ","
+		      << (trusted_bw_candidate_source_ == nullptr
+		              ? kTrustedBwSourceNone
+		              : trusted_bw_candidate_source_) << ","
+		      << (adaptive_bounds_inherited_this_cruise_ ? "true" : "false")
+		      << ","
+		      << adaptive_cruise_start_max_bw_.ToBitsPerSecond() << ","
+		      << (adaptive_baseline_low_valid_ ? "true" : "false") << ","
+		      << adaptive_baseline_low_.ToBitsPerSecond() << ","
+		      << (adaptive_baseline_up_valid_ ? "true" : "false") << ","
+		      << adaptive_baseline_up_.ToBitsPerSecond() << ","
+		      << (latest_waveform_underload_srtt_mean_valid_ ? "true" : "false")
+		      << ","
+		      << latest_waveform_underload_srtt_mean_ms_ << ","
+		      << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
+		      << ","
+		      << latest_waveform_overload_srtt_mean_ms_;
   cruise_load_trace_cb_(cruise_start_s,
                         cruise_end_s,
                         0.0,
@@ -6265,34 +6676,28 @@ FreqCCv4Sender::SrttWindowStats FreqCCv4Sender::ComputeSrttWindowStats(
     const std::vector<FreqCCv4RttSample>& samples) {
   SrttWindowStats stats;
   double sum_ms = 0.0;
+  stats.min_ms = std::numeric_limits<double>::infinity();
   stats.max_ms = -std::numeric_limits<double>::infinity();
   for (const auto& sample : samples) {
     if (!std::isfinite(sample.rtt_ms) || sample.rtt_ms <= 0.0) {
       continue;
     }
     ++stats.sample_count;
+    stats.min_ms = std::min(stats.min_ms, sample.rtt_ms);
     stats.max_ms = std::max(stats.max_ms, sample.rtt_ms);
     sum_ms += sample.rtt_ms;
   }
   stats.valid = stats.sample_count > 0 && std::isfinite(sum_ms);
   if (!stats.valid) {
+    stats.min_ms = 0.0;
     stats.max_ms = 0.0;
     return stats;
   }
   stats.mean_ms = sum_ms / static_cast<double>(stats.sample_count);
   stats.valid = std::isfinite(stats.mean_ms) && stats.mean_ms > 0.0 &&
+                std::isfinite(stats.min_ms) && stats.min_ms > 0.0 &&
                 std::isfinite(stats.max_ms) && stats.max_ms > 0.0;
   return stats;
-}
-
-double FreqCCv4Sender::SmoothTrustedBandwidth(
-    double historical_smoothed_bps,
-    bool historical_valid,
-    double latest_trusted_bps) {
-  return SmoothBandwidthEwma(historical_smoothed_bps,
-                             historical_valid,
-                             latest_trusted_bps,
-                             kHybridTrustedBwAlpha);
 }
 
 std::vector<FreqCCv4RttSample> FreqCCv4Sender::SelectRttSamples(

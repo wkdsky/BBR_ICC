@@ -750,8 +750,18 @@ void DqcTrace::OpenFreqCCv4CruiseSummaryFile(){
 	                                <<",waveform_baseline_adjustments"
 	                                <<",waveform_amplitude_reductions"
 	                                <<",waveform_underload_located"
-	                                <<",waveform_trusted_source"
-	                                <<std::endl;
+		                                <<",waveform_trusted_source"
+		                                <<",adaptive_bounds_inherited"
+		                                <<",adaptive_cruise_start_max_bw_bps"
+		                                <<",adaptive_baseline_low_valid"
+		                                <<",adaptive_baseline_low_bps"
+		                                <<",adaptive_baseline_up_valid"
+		                                <<",adaptive_baseline_up_bps"
+		                                <<",adaptive_srtt_low_valid"
+		                                <<",adaptive_srtt_low_ms"
+		                                <<",adaptive_srtt_up_valid"
+		                                <<",adaptive_srtt_up_ms"
+		                                <<std::endl;
     }
 }
 void DqcTrace::OpenFreqCCv4WaveformSearchFile(){
@@ -782,16 +792,21 @@ void DqcTrace::OpenFreqCCv4WaveformSearchFile(){
             <<",prior_cycle_classification"
             <<",sender_sample_count,drate_sample_count,srtt_sample_count"
             <<",srtt_stat_sample_count,srtt_stats_valid"
-            <<",srtt_window_mean_ms,srtt_window_max_ms"
+            <<",srtt_window_mean_ms,srtt_window_min_ms,srtt_window_max_ms"
             <<",latest_waveform_overload_srtt_mean_valid"
             <<",latest_waveform_overload_srtt_mean_ms"
+            <<",latest_waveform_underload_srtt_mean_valid"
+            <<",latest_waveform_underload_srtt_mean_ms"
             <<",coverage_ratio,app_limited_ratio,sender_waveform_valid"
             <<",best_lag_s"
             <<",srtt_input_valid,srtt_similar_frequency,srtt_similar"
             <<",srtt_similar_without_middle,srtt_effective_similar"
             <<",srtt_masked_period_s,srtt_masked_periodicity_correlation"
             <<",srtt_cycle_complete,srtt_positive_half_clipped"
-            <<",srtt_negative_half_clipped,srtt_clip_ambiguous"
+            <<",srtt_negative_half_clipped"
+            <<",srtt_only_negative_half,srtt_only_positive_half"
+            <<",srtt_positive_half_span_ms,srtt_negative_half_span_ms"
+            <<",srtt_clip_ambiguous"
             <<",srtt_direct_ncc,srtt_integral_ncc,srtt_derivative_ncc"
             <<",srtt_slope_direction_agreement,srtt_period_s"
             <<",srtt_period_error_ratio,srtt_periodicity_correlation"
@@ -827,6 +842,8 @@ void DqcTrace::OpenFreqCCv4WaveformSearchFile(){
             <<",delivery_rate_window_mean_bps"
             <<",latest_trusted_bw_bps,smoothed_trusted_bw_bps"
             <<",drate_positive_half_clipped,drate_negative_half_clipped"
+            <<",drate_only_negative_half"
+            <<",drate_positive_half_span_bps,drate_negative_half_span_bps"
             <<",positive_half_clips_simultaneous"
             <<",srtt_middle_sequential_plateau"
             <<",drate_middle_sequential_plateau,drate_middle_any_plateau"
@@ -841,7 +858,13 @@ void DqcTrace::OpenFreqCCv4WaveformSearchFile(){
             <<",clip_half_overlap_ratio,clip_extreme_distance_ratio"
             <<",boundary_lift_time_s"
             <<",boundary_delta_bps,amplitude_reduction"
-            <<",clip_floor_confirmation\n";
+            <<",clip_floor_confirmation"
+            <<",adaptive_bounds_inherited"
+            <<",adaptive_cruise_start_max_bw_bps"
+            <<",adaptive_baseline_low_valid,adaptive_baseline_low_bps"
+            <<",adaptive_baseline_up_valid,adaptive_baseline_up_bps"
+            <<",adaptive_srtt_low_valid,adaptive_srtt_low_ms"
+            <<",adaptive_srtt_up_valid,adaptive_srtt_up_ms\n";
     }
 }
 void DqcTrace::OpenFreqCCv4GateFile(){

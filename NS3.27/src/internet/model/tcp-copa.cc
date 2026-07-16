@@ -555,7 +555,7 @@ bool TcpCopa::modeSwitch(Ptr<TcpSocketState> tcb, const Time& rtt)
 	outa = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
 	ina = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
 	double *rtt_amp = new double [n];
-	double simi;
+	double simi=0.0;
 	double tempRTTavg=0,tempCwndavg=0;
 	
 	for(int i=0;i<n;i++)

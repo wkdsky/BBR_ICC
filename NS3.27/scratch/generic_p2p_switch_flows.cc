@@ -650,6 +650,10 @@ SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
                      waveform_max_baseline_adjustments)
     SET_WAVEFORM_U32("waveform.max_inconclusive_extensions",
                      waveform_max_inconclusive_extensions)
+    SET_WAVEFORM_DOUBLE("waveform.inconclusive_signal_amplification_factor",
+                        waveform_inconclusive_signal_amplification_factor)
+    SET_WAVEFORM_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio",
+                        waveform_inconclusive_signal_amplification_max_ratio)
     SET_WAVEFORM_DOUBLE("waveform.max_app_limited_sample_ratio",
                         waveform_max_app_limited_sample_ratio)
     SET_WAVEFORM_DOUBLE("waveform.max_interpolation_gap_period_ratio",

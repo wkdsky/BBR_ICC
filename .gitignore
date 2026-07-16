@@ -2,6 +2,8 @@
 test*.log
 NS3.27/build/
 NS3.27/build-local/
+NS3.27/build-*/
+NS3.27/.lock-*
 NS3.27/.waf*
 NS3.27/traces
 NS3.27/analysis
@@ -26,4 +28,3 @@ oBBR/nginx-quic/build/
 oBBR/nginx-quic/objs/
 oBBR/nginx-quic/.git/
 oBBR/ssl/.git/
-

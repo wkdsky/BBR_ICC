@@ -404,6 +404,8 @@ bool SetFreqBbrConfigValue(FreqBbrConfig* config,
     SET_U32("waveform.clip_floor_confirmations", waveform_clip_floor_confirmations)
     SET_U32("waveform.max_baseline_adjustments", waveform_max_baseline_adjustments)
     SET_U32("waveform.max_inconclusive_extensions", waveform_max_inconclusive_extensions)
+    SET_DOUBLE("waveform.inconclusive_signal_amplification_factor", waveform_inconclusive_signal_amplification_factor)
+    SET_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio", waveform_inconclusive_signal_amplification_max_ratio)
     SET_DOUBLE("waveform.max_app_limited_sample_ratio", waveform_max_app_limited_sample_ratio)
     SET_DOUBLE("waveform.max_interpolation_gap_period_ratio", waveform_max_interpolation_gap_period_ratio)
     if(key == "trace.gate_trace_mode"){
@@ -987,7 +989,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformClipMaxSlopeRatio", "Maximum clipping slope ratio", g_freq_bbr_config.waveform_clip_max_slope_ratio);
 	    cmd.AddValue("waveformDeltaDrateAmplitudeRatio", "Search delta ratio of recent Delivery Rate amplitude", g_freq_bbr_config.waveform_delta_drate_amplitude_ratio);
 	    cmd.AddValue("waveformDeltaFallbackBaselineRatio", "Fallback search delta ratio of injection baseline", g_freq_bbr_config.waveform_delta_fallback_baseline_ratio);
-	    cmd.AddValue("waveformAdaptiveDeltaFallbackBaselineRatio", "Adaptive Guard fallback delta ratio of injection baseline", g_freq_bbr_config.waveform_adaptive_delta_fallback_baseline_ratio);
+	    cmd.AddValue("waveformAdaptiveDeltaFallbackBaselineRatio", "Deprecated Adaptive compatibility option; the bracket controller ignores it", g_freq_bbr_config.waveform_adaptive_delta_fallback_baseline_ratio);
 	    cmd.AddValue("waveformPlateauMinDurationRatio", "Minimum plateau duration ratio", g_freq_bbr_config.waveform_plateau_min_duration_ratio);
 	    cmd.AddValue("waveformPlateauMaxSlopeRatio", "Maximum plateau slope ratio", g_freq_bbr_config.waveform_plateau_max_slope_ratio);
 	    cmd.AddValue("waveformPlateauMaxLevelSpanRatio", "Maximum plateau level span ratio", g_freq_bbr_config.waveform_plateau_max_level_span_ratio);
@@ -997,6 +999,8 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformClipFloorConfirmations", "Valid clip windows required at amplitude floor", g_freq_bbr_config.waveform_clip_floor_confirmations);
 	    cmd.AddValue("waveformMaxBaselineAdjustments", "Maximum waveform baseline adjustments", g_freq_bbr_config.waveform_max_baseline_adjustments);
 	    cmd.AddValue("waveformMaxInconclusiveExtensions", "Maximum one-period extensions after an inconclusive decision", g_freq_bbr_config.waveform_max_inconclusive_extensions);
+	    cmd.AddValue("waveformInconclusiveSignalAmplificationFactor", "Probe amplitude multiplier after a second inconclusive waveform decision", g_freq_bbr_config.waveform_inconclusive_signal_amplification_factor);
+	    cmd.AddValue("waveformInconclusiveSignalAmplificationMaxRatio", "Maximum amplified probe amplitude as a ratio of the cruise entry amplitude", g_freq_bbr_config.waveform_inconclusive_signal_amplification_max_ratio);
 	    cmd.AddValue("waveformMaxAppLimitedSampleRatio", "Maximum app-limited sample ratio", g_freq_bbr_config.waveform_max_app_limited_sample_ratio);
 	    cmd.AddValue("waveformMaxInterpolationGapPeriodRatio", "Maximum interpolation gap as period ratio", g_freq_bbr_config.waveform_max_interpolation_gap_period_ratio);
 	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
