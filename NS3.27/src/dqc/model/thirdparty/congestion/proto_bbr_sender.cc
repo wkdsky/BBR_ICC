@@ -61,6 +61,7 @@ ProtoBbrSender::DebugState::DebugState(const ProtoBbrSender& sender)
       max_bandwidth(sender.max_bandwidth_.GetBest()),
       round_trip_count(sender.round_trip_count_),
       gain_cycle_index(sender.cycle_current_offset_),
+      pacing_gain(sender.pacing_gain_),
       congestion_window(sender.congestion_window_),
       is_at_full_bandwidth(sender.is_at_full_bandwidth_),
       bandwidth_at_last_round(sender.bandwidth_at_last_round_),
@@ -86,6 +87,7 @@ ProtoBbrSender::ProtoBbrSender(ProtoTime now,
       mode_(STARTUP),
       round_trip_count_(0),
       max_bandwidth_(kBandwidthWindowSize, QuicBandwidth::Zero(), 0),
+      bandwidth_latest_(QuicBandwidth::Zero()),
       max_ack_height_(kBandwidthWindowSize, 0, 0),
       aggregation_epoch_start_time_(ProtoTime::Zero()),
       aggregation_epoch_bytes_(0),
@@ -350,6 +352,29 @@ TimeDelta ProtoBbrSender::GetMinRtt() const {
   return !min_rtt_.IsZero() ? min_rtt_ : rtt_stats_->initial_rtt();
 }
 
+QuicBandwidth ProtoBbrSender::GetPacingBandwidthForRate() {
+  return BandwidthEstimate();
+}
+
+TimeDelta ProtoBbrSender::GetMinRttExpiry() const {
+  return kMinRttExpiry;
+}
+
+bool ProtoBbrSender::ShouldRefreshMinRttTimestamp(
+    TimeDelta /*sample_min_rtt*/,
+    TimeDelta /*current_min_rtt*/,
+    bool /*min_rtt_expired*/) const {
+  return false;
+}
+
+TimeDelta ProtoBbrSender::GetGainCycleDuration() const {
+  return GetMinRtt();
+}
+
+bool ProtoBbrSender::RequireDrainTargetBeforeGainCycleAdvance() const {
+  return false;
+}
+
 QuicByteCount ProtoBbrSender::GetTargetCongestionWindow(float gain) const {
   QuicByteCount bdp = GetMinRtt() * BandwidthEstimate();
   QuicByteCount congestion_window = gain * bdp;
@@ -441,6 +466,7 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
     last_sample_is_app_limited_ = bandwidth_sample.state_at_send.is_app_limited;
     has_non_app_limited_sample_ |=
         !bandwidth_sample.state_at_send.is_app_limited;
+    bandwidth_latest_ = bandwidth_sample.bandwidth;
     if (!bandwidth_sample.rtt.IsZero()) {
       sample_min_rtt = std::min(sample_min_rtt, bandwidth_sample.rtt);
     }
@@ -460,7 +486,7 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
 
   // Do not expire min_rtt if none was ever available.
   bool min_rtt_expired =
-      !min_rtt_.IsZero() && (now > (min_rtt_timestamp_ + kMinRttExpiry));
+      !min_rtt_.IsZero() && (now > (min_rtt_timestamp_ + GetMinRttExpiry()));
 
   if (min_rtt_expired || sample_min_rtt < min_rtt_ || min_rtt_.IsZero()) {
     //QUIC_DVLOG(2) << "Min RTT updated, old value: " << min_rtt_
@@ -476,6 +502,10 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
     // Reset since_last_probe_rtt fields.
     min_rtt_since_last_probe_rtt_ = TimeDelta::Infinite();
     app_limited_since_last_probe_rtt_ = false;
+  } else if (ShouldRefreshMinRttTimestamp(sample_min_rtt,
+                                          min_rtt_,
+                                          min_rtt_expired)) {
+    min_rtt_timestamp_ = now;
   }
   DCHECK(!min_rtt_.IsZero());
 
@@ -504,7 +534,8 @@ void ProtoBbrSender::UpdateGainCyclePhase(ProtoTime now,
                                      bool has_losses) {
   const QuicByteCount bytes_in_flight = unacked_packets_->bytes_in_flight();
   // In most cases, the cycle is advanced after an RTT passes.
-  bool should_advance_gain_cycling = now - last_cycle_start_ > GetMinRtt();
+  bool should_advance_gain_cycling =
+      now - last_cycle_start_ > GetGainCycleDuration();
 
   // If the pacing gain is above 1.0, the connection is trying to probe the
   // bandwidth by increasing the number of bytes in flight to at least
@@ -520,8 +551,15 @@ void ProtoBbrSender::UpdateGainCyclePhase(ProtoTime now,
   // queue which could have been incurred by probing prior to it.  If the number
   // of bytes in flight falls down to the estimated BDP value earlier, conclude
   // that the queue has been successfully drained and exit this cycle early.
-  if (pacing_gain_ < 1.0 && bytes_in_flight <= GetTargetCongestionWindow(1)) {
-    should_advance_gain_cycling = true;
+  if (pacing_gain_ < 1.0) {
+    const bool drain_target_reached =
+        bytes_in_flight <= GetTargetCongestionWindow(1);
+    if (RequireDrainTargetBeforeGainCycleAdvance()) {
+      should_advance_gain_cycling =
+          should_advance_gain_cycling && drain_target_reached;
+    } else if (drain_target_reached) {
+      should_advance_gain_cycling = true;
+    }
   }
 
   if (should_advance_gain_cycling) {
@@ -709,7 +747,7 @@ void ProtoBbrSender::CalculatePacingRate() {
     return;
   }
 
-  QuicBandwidth target_rate = pacing_gain_ * BandwidthEstimate();
+  QuicBandwidth target_rate = pacing_gain_ * GetPacingBandwidthForRate();
   if (is_at_full_bandwidth_) {
     pacing_rate_ = target_rate;
     return;

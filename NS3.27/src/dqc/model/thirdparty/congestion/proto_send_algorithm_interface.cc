@@ -16,10 +16,12 @@
 #include "lia_sender_enhance.h"
 #include "lia_sender_enhance3.h"
 #include "nmcc_sender_bytes.h"
+#include "ns3_cubic_sender.h"
 #include "olia_sender_bytes.h"
 #include "pcc_sender.h"
 
 #include "proto_bbr_plus_sender.h"
+#include "bbr_r_sender.h"
 #include "proto_bbr_sender.h"
 #include "proto_bbr_rand_sender.h"
 #include "obbr_sender.h"
@@ -241,6 +243,22 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                initial_congestion_window,
                                max_congestion_window,
                                random,false
+                               );
+        }
+        case kNs3Cubic:{
+            return new Ns3CubicSender(clock,
+                                      rtt_stats,
+                                      initial_congestion_window,
+                                      max_congestion_window,
+                                      stats);
+        }
+        case kBBRR:{
+            return new BbrRSender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random
                                );
         }
         case kOBBR:{

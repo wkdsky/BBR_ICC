@@ -31,7 +31,7 @@ DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
 CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
-OPTIONAL_CCS = ("FBBR-adaptive", "FreqCCv3")
+OPTIONAL_CCS = ("FBBR-adaptive", "FreqCCv3", "BBR-R", "CUBIC")
 SELECTABLE_CCS = (*CCS, *OPTIONAL_CCS)
 
 PLOT_SCRIPT = Path(__file__).with_name("plot_4cc_comparison.py")
@@ -308,6 +308,21 @@ def run_command(cfg: RunnerConfig, dry_run: bool) -> int:
 
 PAPER_REFERENCES = [
     {
+        "name": "ns-3.47 TcpCubic (official release source)",
+        "url": "https://gitlab.com/nsnam/ns-3-dev/-/blob/ns-3.47/src/internet/model/tcp-cubic.cc",
+        "note": "Primary migration baseline: C=0.4, beta=0.7, fast convergence, TCP friendliness, and HyStart.",
+    },
+    {
+        "name": "RFC 9438: CUBIC for Fast and Long-Distance Networks",
+        "url": "https://www.rfc-editor.org/rfc/rfc9438.html",
+        "note": "Current Standards Track CUBIC specification; it obsoletes RFC 8312.",
+    },
+    {
+        "name": "BBR-R: Improving BBR performance in multi-flow competition scenarios",
+        "url": "https://github.com/SamsonZheng/BBR-R-Source-Code",
+        "note": "BBR-R reduces pacing bandwidth in response to persistent RTT inflation during BBRv1 PROBE_BW.",
+    },
+    {
         "name": "BBR: Congestion-Based Congestion Control",
         "url": "https://queue.acm.org/detail.cfm?id=3022184",
         "note": "BBR uses bottleneck bandwidth, RTprop and BDP; queueing begins when inflight exceeds BDP.",
@@ -330,6 +345,41 @@ PAPER_REFERENCES = [
 ]
 
 ALGORITHM_PARAMS = {
+    "CUBIC": {
+        "source": "src/dqc/model/thirdparty/congestion/ns3_cubic_sender.cc",
+        "reference_source": "ns-3.47::src/internet/model/tcp-cubic.{cc,h}",
+        "config_file": "",
+        "parameters": {
+            "c": 0.4,
+            "beta": 0.7,
+            "fast_convergence": True,
+            "tcp_friendliness": True,
+            "hystart": True,
+            "hystart_low_window_packets": 16,
+            "hystart_min_samples": 8,
+            "hystart_ack_delta_ms": 2,
+            "hystart_delay_min_ms": 4,
+            "hystart_delay_max_ms": 1000,
+            "cubic_delta_ms": 10,
+            "count_clamp": 20,
+        },
+        "notes": "逐 ACK 计数、CUBIC target、Reno friendliness、fast convergence 与 HyStart 按 ns-3.47 TcpCubic 迁移；PRR 与 pacing 是 DQC 传输适配层。",
+    },
+    "BBR-R": {
+        "source": "src/dqc/model/thirdparty/congestion/bbr_r_sender.cc",
+        "reference_source": "../BBR-R-Source-Code-main.zip::BBR-R/bbr_r.c",
+        "config_file": "",
+        "parameters": {
+            "inflated_rtt_window_samples": 10,
+            "normal_rtt_ratio": 1.05,
+            "strong_reduction_rtt_ratio": 1.25,
+            "mild_pacing_bandwidth_factor": 0.95,
+            "strong_pacing_bandwidth_factor": 0.8,
+            "min_rtt_window_s": 13,
+            "min_rtt_timestamp_slack_ms": 10,
+        },
+        "notes": "基于 DQC BBRv1 宿主的语义移植；自适应 RTT 状态按 flow 隔离，避免参考内核源码全局变量造成多流串扰。",
+    },
     "BBRv2": {
         "source": "src/dqc/model/thirdparty/congestion/quic_bbr2_sender.cc",
         "config_file": "",
@@ -540,11 +590,11 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         encoding="utf-8",
     )
     lines = [
-        "# 4CC 对比实验方案",
+        f"# {len(selected)}CC 对比实验方案",
         "",
         "## 目录结构",
         "",
-        *[f"- `{cc}/`：{cc} 四流子实验" for cc in selected],
+        *[f"- `{cc}/`：{cc} {args.n_flows} 流子实验" for cc in selected],
         "- `compare/`：汇总 CSV 和对比图",
         "",
         "## 默认场景",
@@ -682,7 +732,8 @@ def make_parser() -> argparse.ArgumentParser:
         "--only-cc",
         default="",
         help=(
-            "只运行指定 CC，可用逗号分隔。支持 FBBR、FBBR-adaptive 和 FreqCCv3。"
+            "只运行指定 CC，可用逗号分隔。支持默认四种 CC，以及 "
+            "FBBR-adaptive、FreqCCv3、BBR-R 和 CUBIC。"
         ),
     )
 

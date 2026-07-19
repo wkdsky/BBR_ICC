@@ -1116,6 +1116,15 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kOBBR, "oBBR", false, false};
     }
+    if (key == "BBR-R" || key == "BBRR" || key == "bbr_r")
+    {
+        return {dqc::kBBRR, "BBR-R", false, false};
+    }
+    if (key == "CUBIC" || key == "Cubic" || key == "TcpCubic" ||
+        key == "ns3-CUBIC")
+    {
+        return {dqc::kNs3Cubic, "CUBIC", false, false};
+    }
     if (key == "BBRv2plus")
     {
         return {dqc::kBBRv2Plus, "BBRv2plus", false, false};
@@ -1141,7 +1150,7 @@ ParseAlgorithm(const std::string& name)
         return {dqc::kBBRv2, "BBRv2", false, false};
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
-                                           << " (supported: oBBR, BBRv2plus, "
+                                           << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
                                               "FBBR, FBBR-adaptive, "
                                               "FreqCCv3, BBRv2)");
 }

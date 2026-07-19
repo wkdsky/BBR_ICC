@@ -253,6 +253,8 @@ void ns3_rtt(int ins,std::string algo,DqcTraceState *stat,int sim_time=200,int l
     dqc::CongestionControlType cc=kBBRPlus;
     if(algo.compare("bbr")==0){
         cc=kBBR;
+    }else if(algo.compare("bbrr")==0 || algo.compare("bbr-r")==0){
+        cc=kBBRR;
     }else if(algo.compare("bbrd")==0){
         cc=kBBRD;
     }else if(algo.compare("bbrplus")==0){

@@ -33,6 +33,7 @@ set(source_files
     model/thirdparty/src/string_utils.cc
     model/thirdparty/src/unacked_packet_map.cc
     model/thirdparty/congestion/balia_sender_bytes.cc
+    model/thirdparty/congestion/bbr_r_sender.cc
     model/thirdparty/congestion/couple_bbr_sender.cc
     model/thirdparty/congestion/couple_cc_manager.cc
     model/thirdparty/congestion/couple_cc_source.cc
@@ -48,6 +49,7 @@ set(source_files
     model/thirdparty/congestion/lia_sender_enhance3.cc
     model/thirdparty/congestion/lptcp_sender_bytes.cc
     model/thirdparty/congestion/nmcc_sender_bytes.cc
+    model/thirdparty/congestion/ns3_cubic_sender.cc
     model/thirdparty/congestion/mp_veno_sender_bytes.cc
     model/thirdparty/congestion/mp_westwood_sender_bytes.cc
     model/thirdparty/congestion/olia_sender_bytes.cc
@@ -152,6 +154,8 @@ set(header_files
     model/thirdparty/congestion/couple_cc_manager.h
     model/thirdparty/congestion/couple_cc_source.h
     model/thirdparty/congestion/dqc_cc_param_config.h
+    model/thirdparty/congestion/bbr_r_sender.h
+    model/thirdparty/congestion/proto_bbr_sender.h
     model/thirdparty/congestion/proto_pacing_sender.h
     model/thirdparty/congestion/proto_send_algorithm_interface.h
     model/thirdparty/congestion/unknow_random.h

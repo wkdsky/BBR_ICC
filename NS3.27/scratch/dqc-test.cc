@@ -232,6 +232,9 @@ int main(int argc, char *argv[]){
 	if(cc_tmp==std::string("bbr")){
 		cc=kBBR;
 		cc1=cc;
+	}else if(cc_tmp==std::string("bbrr")){
+		cc=kBBRR;
+		cc1=cc;
 	}else if(cc_tmp==std::string("obbr")){
 		cc=kOBBR;
 		cc1=cc;

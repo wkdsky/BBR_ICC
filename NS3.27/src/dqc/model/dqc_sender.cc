@@ -562,10 +562,17 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	            const uint32_t min_rtt_ms = bbr->GetMinRtt().ToMilliseconds();
 	            const uint32_t queue_delay_ms = latest_rtt_ms > min_rtt_ms ? latest_rtt_ms - min_rtt_ms : 0;
 	            m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
-	        } else if(algo && algo->GetCongestionControlType() == kBBR){
+	        } else if(algo && (algo->GetCongestionControlType() == kBBR ||
+	                         algo->GetCongestionControlType() == kBBRR)){
 	            ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
 	            const uint32_t latest_rtt_ms = sent_manager->GetRttStats()->latest_rtt().ToMilliseconds();
 	            const uint32_t min_rtt_ms = bbr->GetMinRtt().ToMilliseconds();
+	            const uint32_t queue_delay_ms = latest_rtt_ms > min_rtt_ms ? latest_rtt_ms - min_rtt_ms : 0;
+	            m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
+	        } else if(algo && algo->GetCongestionControlType() == kNs3Cubic){
+	            const RttStats* rtt_stats = sent_manager->GetRttStats();
+	            const uint32_t latest_rtt_ms = rtt_stats->latest_rtt().ToMilliseconds();
+	            const uint32_t min_rtt_ms = rtt_stats->min_rtt().ToMilliseconds();
 	            const uint32_t queue_delay_ms = latest_rtt_ms > min_rtt_ms ? latest_rtt_ms - min_rtt_ms : 0;
 	            m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
 	        }
@@ -604,7 +611,8 @@ void DqcSender::SendToNetwork(Ptr<Packet> p){
 	        } else if(algo && algo->GetCongestionControlType() == kOBBR){
 	            ObbrSender* bbr = static_cast<ObbrSender*>(algo);
 	            m_traceBbrModeCb(bbr->GetCurrentBbrModeIndex());
-	        } else if(algo && algo->GetCongestionControlType() == kBBR){
+	        } else if(algo && (algo->GetCongestionControlType() == kBBR ||
+	                         algo->GetCongestionControlType() == kBBRR)){
 	            ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
 	            m_traceBbrModeCb(ProtoBbrModeToTraceIndex(bbr->ExportDebugState().mode));
 	        }
@@ -746,6 +754,11 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 } else if(algo->GetCongestionControlType() == kOBBR){
                     ObbrSender* obbr = static_cast<ObbrSender*>(algo);
                     instant_kbps = (int32_t)obbr->BandwidthLatest().ToKBitsPerSecond();
+                } else if(algo->GetCongestionControlType() == kBBR ||
+                          algo->GetCongestionControlType() == kBBRR){
+                    ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
+                    instant_kbps =
+                        (int32_t)bbr->BandwidthLatest().ToKBitsPerSecond();
                 } else {
                     // Fallback to bandwidth estimate for other algorithms
                     instant_kbps = (int32_t)bw_estimate.ToKBitsPerSecond();
@@ -764,6 +777,11 @@ void DqcSender::PostProceeAfterReceiveFromPeer(){
                 } else if(algo->GetCongestionControlType() == kOBBR){
                     ObbrSender* obbr = static_cast<ObbrSender*>(algo);
                     raw_kbps = static_cast<int32_t>(obbr->BandwidthLatest().ToKBitsPerSecond());
+                } else if(algo->GetCongestionControlType() == kBBR ||
+                          algo->GetCongestionControlType() == kBBRR){
+                    ProtoBbrSender* bbr = static_cast<ProtoBbrSender*>(algo);
+                    raw_kbps = static_cast<int32_t>(
+                        bbr->BandwidthLatest().ToKBitsPerSecond());
                 }
                 if(raw_kbps > 0){
                     m_traceRecvRateRawCb(raw_kbps);

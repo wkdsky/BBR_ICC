@@ -42,6 +42,7 @@ class ProtoBbrSender : public SendAlgorithmInterface {
     QuicBandwidth max_bandwidth;
     QuicRoundTripCount round_trip_count;
     int gain_cycle_index;
+    float pacing_gain;
     QuicByteCount congestion_window;
 
     bool is_at_full_bandwidth;
@@ -135,8 +136,22 @@ class ProtoBbrSender : public SendAlgorithmInterface {
   // Returns the current estimate of the RTT of the connection.  Outside of the
   // edge cases, this is minimum RTT.
   TimeDelta GetMinRtt() const;
+  // Most recent valid delivery-rate sample.  This is exported for traces;
+  // BBR's control model continues to use the windowed maximum.
+  QuicBandwidth BandwidthLatest() const { return bandwidth_latest_; }
 
   DebugState ExportDebugState() const;
+
+ protected:
+  // Hooks for BBRv1-hosted variants such as BBR-R.  Defaults preserve the
+  // existing ProtoBbrSender behavior.
+  virtual QuicBandwidth GetPacingBandwidthForRate();
+  virtual TimeDelta GetMinRttExpiry() const;
+  virtual bool ShouldRefreshMinRttTimestamp(TimeDelta sample_min_rtt,
+                                            TimeDelta current_min_rtt,
+                                            bool min_rtt_expired) const;
+  virtual TimeDelta GetGainCycleDuration() const;
+  virtual bool RequireDrainTargetBeforeGainCycleAdvance() const;
 
  private:
   typedef WindowedFilter<QuicBandwidth,
@@ -241,6 +256,9 @@ class ProtoBbrSender : public SendAlgorithmInterface {
   // The filter that tracks the maximum bandwidth over the multiple recent
   // round-trips.
   MaxBandwidthFilter max_bandwidth_;
+
+  // Most recent valid sampler delivery rate, kept for experiment traces.
+  QuicBandwidth bandwidth_latest_;
 
   // Tracks the maximum number of bytes acked faster than the sending rate.
   MaxAckHeightFilter max_ack_height_;
