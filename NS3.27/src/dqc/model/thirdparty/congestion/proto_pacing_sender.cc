@@ -116,7 +116,7 @@ void PacingSender::OnPacketSent(
       lumpy_tokens_ = 1u;
     }
   }
-  // F-BBR's coded carrier is only a few percent of the baseline.  Sending a
+  // The coded carrier is only a few percent of the baseline. Sending a
   // lumpy group at one timestamp quantizes away that signal even when the
   // average pacing rate is correct, so use one packet per pacing interval
   // while its CRUISE identification probe is active.

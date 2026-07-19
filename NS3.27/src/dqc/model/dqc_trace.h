@@ -20,10 +20,8 @@ enum DqcTraceEnable:uint32_t{
     E_DQC_LOSS_RATE=0x800,
     E_DQC_QUEUE_DELAY=0x4000,
     E_DQC_RECV_RATE_RAW=0x8000,
-    E_DQC_FREQCCV4_LOAD=0x10000,
-    E_DQC_FREQCCV4_GATE=0x20000,
-    E_DQC_FBBR_LOAD=0x40000,
-    E_DQC_FBBR_GATE=0x80000,
+    E_DQC_FBBR_LOAD=0x10000,
+    E_DQC_FBBR_GATE=0x20000,
     E_DQC_ALL=E_DQC_OWD|E_DQC_RTT|E_DQC_BW|E_DQC_STAT,
 };
 void set_dqc_trace_folder(std::string &path);
@@ -51,16 +49,11 @@ public:
     void OnUpPhase(double start_time,double duration_ms,double freq_hz,bool exit_due_to_queueing,int cycles,float pacing_gain,int32_t bw_estimate_kbps);
     void OnFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double receiver_peak_freq_hz, int32_t avg_rate_kbps);
     void OnRttFreqAnalysis(double start_time, double duration_sec, double sender_peak_freq_hz, double rtt_peak_freq_hz, double avg_smoothed_rtt_ms);
-    void OnFreqCCv4Load(double window_start_s, double window_end_s,
+    void OnFBBRLoad(double window_start_s, double window_end_s,
                         double p_underload, double p_full_load,
                         double p_overload, double confidence,
                         std::string label, bool low_confidence,
                         std::string diagnostics);
-    void OnFBBRLoad(double window_start_s, double window_end_s,
-                    double p_underload, double p_full_load,
-                    double p_overload, double confidence,
-                    std::string label, bool low_confidence,
-                    std::string diagnostics);
     void OnStats(uint64_t recv_count,uint64_t largest,
                  uint64_t recv_bytes,uint64_t duration,
                        float avg_owd);
@@ -80,17 +73,10 @@ private:
     void OpenUpPhaseFile();
     void OpenFreqAnalysisFile();
     void OpenRttFreqAnalysisFile();
-    void OpenFreqCCv4LoadFile();
-    void OpenFreqCCv4CruiseSummaryFile();
-    void OpenFreqCCv4GateFile();
-    void OpenFreqCCv4WaveformSearchFile();
-    void OpenFbbrGateFile();
-    void OpenFbbrTriggerCycleFile();
-    void OpenFbbrBinFile();
-    void OpenFbbrEventWindowFile();
-    void OpenFbbrCruiseFile();
-    void OpenFbbrDiagnosticWindowFile();
-    void OpenFbbrQueueServoFile();
+    void OpenFBBRLoadFile();
+    void OpenFBBRCruiseSummaryFile();
+    void OpenFBBRGateFile();
+    void OpenFBBRWaveformSearchFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -106,17 +92,10 @@ private:
     void CloseUpPhaseFile();
     void CloseFreqAnalysisFile();
     void CloseRttFreqAnalysisFile();
-    void CloseFreqCCv4LoadFile();
-    void CloseFreqCCv4CruiseSummaryFile();
-    void CloseFreqCCv4GateFile();
-    void CloseFreqCCv4WaveformSearchFile();
-    void CloseFbbrGateFile();
-    void CloseFbbrTriggerCycleFile();
-    void CloseFbbrBinFile();
-    void CloseFbbrEventWindowFile();
-    void CloseFbbrCruiseFile();
-    void CloseFbbrDiagnosticWindowFile();
-    void CloseFbbrQueueServoFile();
+    void CloseFBBRLoadFile();
+    void CloseFBBRCruiseSummaryFile();
+    void CloseFBBRGateFile();
+    void CloseFBBRWaveformSearchFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
@@ -137,17 +116,10 @@ private:
     std::fstream m_upPhase;
     std::fstream m_freqAnalysis;
     std::fstream m_rttFreqAnalysis;
-    std::fstream m_freqccv4Load;
-    std::fstream m_freqccv4CruiseSummary;
-    std::fstream m_freqccv4Gate;
-    std::fstream m_freqccv4WaveformSearch;
+    std::fstream m_fbbrLoad;
+    std::fstream m_fbbrCruiseSummary;
     std::fstream m_fbbrGate;
-    std::fstream m_fbbrTriggerCycle;
-    std::fstream m_fbbrBin;
-    std::fstream m_fbbrEventWindow;
-    std::fstream m_fbbrCruise;
-    std::fstream m_fbbrDiagnosticWindow;
-    std::fstream m_fbbrQueueServo;
+    std::fstream m_fbbrWaveformSearch;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
     int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates

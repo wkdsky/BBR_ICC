@@ -21,7 +21,6 @@
 #include "ns3/proto_con.h"
 #include "ns3/dqc_trace.h"
 namespace dqc{
-struct FreqBbrConfig;
 struct FBBRConfig;
 }
 namespace ns3{
@@ -78,8 +77,6 @@ public:
     void SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb);
     typedef Callback<void,double,double,double,double,double> TraceRttFreqAnalysis;
     void SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb);
-    typedef Callback<void,double,double,double,double,double,double,std::string,bool,std::string> TraceFreqCCv4Load;
-    void SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb);
     typedef Callback<void,double,double,double,double,double,double,std::string,bool,std::string> TraceFBBRLoad;
     void SetFBBRLoadTraceFuc(TraceFBBRLoad cb);
     void Bind(uint16_t port);
@@ -98,20 +95,15 @@ public:
 	void SetNumEmulatedConnections(int num_connections);
     // FreqCC configuration methods
 	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="delivery_rate_latest");
-	    void ConfigureFreqBbr(const dqc::FreqBbrConfig& config, uint32_t flow_id);
 	    void ConfigureFBBR(const dqc::FBBRConfig& config, uint32_t flow_id);
-	    void ConfigureFreqCCv4ConvergenceGate(bool enable_trace,
+	    void ConfigureFBBRConvergenceGate(bool enable_trace,
 	                                          bool enable_control,
 	                                          const std::string& gate_trace_mode="round_only",
 	                                          uint64_t gate_trace_sample_interval_us=1000);
-	    void ConfigureFBBRConvergenceGate(bool enable_trace,
-	                                     bool enable_control,
-	                                     const std::string& gate_trace_mode="round_only",
-	                                     uint64_t gate_trace_sample_interval_us=1000);
     void SetFreqCCIntervalWindowMultiplier(double multiplier);
     void SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier);
     void SetFreqCCFairShareBandwidth(uint64_t fair_share_bps);
-    void SetFreqCCv4CruiseBaselineCap(uint64_t cap_bps);
+    void SetFBBRCruiseBaselineCap(uint64_t cap_bps);
     struct Bbr2ExperimentSnapshot {
         int32_t bbr_state{0};
         std::string probe_phase;
@@ -156,7 +148,6 @@ private:
     uint64_t GetLossWindowId(dqc::ProtoTime sent_ts) const;
     void EnsureLossTraceHooked();
     void EnsureRttTraceHooked();
-    void AttachFBBRPacingAudit();
     void CloseEquivalenceAuditTrace();
     void PostProceeAfterReceiveFromPeer();
     bool m_ecn{false};
@@ -202,7 +193,6 @@ private:
     TraceUpPhase m_traceUpPhaseCb;
     TraceFreqAnalysis m_traceFreqAnalysisCb;
     TraceRttFreqAnalysis m_traceRttFreqAnalysisCb;
-    TraceFreqCCv4Load m_traceFreqCCv4LoadCb;
     TraceFBBRLoad m_traceFBBRLoadCb;
     TraceLossRate m_traceLossRateCb;
     std::string m_equivalenceAuditPrefix;

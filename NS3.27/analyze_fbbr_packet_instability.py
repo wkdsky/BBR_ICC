@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate FreqCCv4 TrustedBw selection and pacing invariants in trace trees."""
+"""Validate FBBR TrustedBw selection and pacing invariants in trace trees."""
 
 import argparse
 import csv

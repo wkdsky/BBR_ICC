@@ -2,7 +2,7 @@
 """
 Emit a per-cruise frequency-domain score table.
 
-For every cruise, read the FreqCCv4 per-flow
+For every cruise, read the FBBR per-flow
   <run>/*_flowN_<cc>_cruise_best_full_load_window.csv
 file and print, for the single window that was selected as the best full-load
 window in that cruise, the delivery-rate and srtt frequency-domain scores.
@@ -10,7 +10,7 @@ window in that cruise, the delivery-rate and srtt frequency-domain scores.
 The mean delivery rate over the selected window is also computed by averaging
 the per-packet samples from the matching
   <run>/*_flowN_<cc>_recvrate_raw.txt
-trace (kbps -> Mbps), which is the same raw trace that the FreqCCv4 debug plots
+trace (kbps -> Mbps), which is the same raw trace that the FBBR debug plots
 use for delivery-rate overlays.
 
 Output is a fixed-width plain-text table written to stdout (and optionally to a
@@ -163,7 +163,7 @@ def render_table(rows: List[Dict[str, object]], run_dir: Path) -> str:
     sep_line = " ".join("-" * w for w in widths)
 
     lines: List[str] = []
-    lines.append(f"FreqCCv4 per-cruise best-window frequency-domain scores")
+    lines.append(f"FBBR per-cruise best-window frequency-domain scores")
     lines.append(f"run_dir: {run_dir}")
     lines.append("")
     lines.append(header_line)
@@ -241,11 +241,11 @@ def parse_args(argv: Iterable[str] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Emit per-cruise drate/srtt frequency-domain score table."
     )
-    parser.add_argument("--run-dir", required=True, help="FreqCCv4 run directory.")
+    parser.add_argument("--fbbr-run-dir", dest="run_dir", required=True, help="FBBR run directory.")
     parser.add_argument(
         "--output",
         default="",
-        help="Output txt path. Defaults to <run-dir>/debug_plots/cruise_freq_scores.txt.",
+        help="Output txt path. Defaults to <FBBR_RUN_DIR>/debug_plots/cruise_freq_scores.txt.",
     )
     return parser.parse_args(argv)
 

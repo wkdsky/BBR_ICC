@@ -278,7 +278,7 @@ def main() -> int:
         f"{args.synthetic_start_s:g}to{args.end_s:g}"
     ).replace(".", "p")
     csv_path = output_dir / f"{stem}.csv"
-    raw_path = output_dir / f"synthetic_flow{args.flow_id}_F-BBR_recvrate_raw.txt"
+    raw_path = output_dir / f"synthetic_flow{args.flow_id}_counterfactual_recvrate_raw.txt"
     metadata_path = output_dir / f"{stem}.json"
 
     with csv_path.open("w", encoding="utf-8", newline="") as fh:

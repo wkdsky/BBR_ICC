@@ -8,7 +8,7 @@ Input directory layout:
     BBRv2/
     oBBR/
     BBRv2plus/
-    F-BBR/
+    FBBR/
     compare/
 """
 
@@ -26,15 +26,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-DEFAULT_CCS = ("BBRv2", "oBBR", "BBRv2plus", "F-BBR")
+DEFAULT_CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
 PLOT_COLORS = {
     "BBRv2": "#1f77b4",
-    "FreqCCv4": "#ff7f0e",
-    "FreqCCv4-adaptive": "#17becf",
-    "FreqCCv4-hybrid": "#8c564b",
     "oBBR": "#2ca02c",
     "BBRv2plus": "#d62728",
-    "F-BBR": "#9467bd",
+    "FBBR": "#ff7f0e",
+    "FBBR-adaptive": "#17becf",
+    "FreqCCv3": "#9467bd",
 }
 
 
@@ -90,7 +89,11 @@ def read_queue_trace(path: Path, service_rate_bps: float) -> List[Tuple[float, f
                     queue_bytes = float(item["queue_bytes"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                delay_ms = queue_bytes * 8.0 / service_rate_bps * 1000.0
+                try:
+                    capacity_bps = float(item.get("capacity_bps") or service_rate_bps)
+                except (TypeError, ValueError):
+                    capacity_bps = service_rate_bps
+                delay_ms = queue_bytes * 8.0 / max(capacity_bps, 1.0) * 1000.0
                 rows.append((time_s, delay_ms))
         rows.sort(key=lambda item: item[0])
         return rows
@@ -110,6 +113,22 @@ def read_queue_trace(path: Path, service_rate_bps: float) -> List[Tuple[float, f
                 continue
             delay_ms = queue_bytes * 8.0 / service_rate_bps * 1000.0
             rows.append((time_s, delay_ms))
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+def read_capacity_trace(path: Path) -> List[Tuple[float, float]]:
+    if path.name != "bottleneck_queue.csv":
+        return []
+    rows: List[Tuple[float, float]] = []
+    with path.open("r", newline="", encoding="utf-8", errors="replace") as fh:
+        for item in csv.DictReader(fh):
+            try:
+                time_s = float(item["time_s"])
+                capacity_bps = float(item["capacity_bps"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows.append((time_s, capacity_bps / 1e6))
     rows.sort(key=lambda item: item[0])
     return rows
 
@@ -199,8 +218,13 @@ def load_cc_data(
 
     goodput = [read_two_column_trace(path) for path in goodput_files]
     queue_delay = [read_queue_trace(path, service_rate_bps) for path in queue_files]
+    capacity = []
+    for path in queue_files:
+        capacity = read_capacity_trace(path)
+        if capacity:
+            break
     max_time = 0.0
-    for series in goodput + queue_delay:
+    for series in goodput + queue_delay + ([capacity] if capacity else []):
         if series:
             max_time = max(max_time, series[-1][0])
     return {
@@ -209,6 +233,7 @@ def load_cc_data(
         "queue_files": queue_files,
         "goodput": goodput,
         "queue_delay": queue_delay,
+        "capacity": capacity,
         "max_time": max_time,
     }
 
@@ -233,6 +258,7 @@ def plot_lines(
     title: str,
     ideal_line: Optional[float] = None,
     ideal_values: Optional[Sequence[float]] = None,
+    ideal_values_label: str = "ideal fair share",
     transition_times: Sequence[float] = (),
 ) -> None:
     fig, ax = plt.subplots(figsize=(10.5, 5.6))
@@ -247,7 +273,7 @@ def plot_lines(
             color="#555555",
             linestyle="--",
             linewidth=1.0,
-            label="ideal fair share",
+            label=ideal_values_label,
         )
     for time_s in transition_times:
         ax.axvline(time_s, color="#777777", linestyle=":", linewidth=1.0)
@@ -279,7 +305,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="汇总四个 CC 子实验的 goodput/队列 trace，并在 compare 目录画对比图。",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--experiment-dir", required=True, help="复合实验根目录，里面应包含 BBRv2/oBBR/BBRv2plus/F-BBR 子目录。")
+    parser.add_argument("--experiment-dir", required=True, help="复合实验根目录，里面应包含 BBRv2/oBBR/BBRv2plus/FBBR 子目录。")
     parser.add_argument("--service-rate", default="100Mbps", help="共享瓶颈链路速率，用于把队列字节换算成排队延迟。")
     parser.add_argument("--n-flows", type=int, default=4, help="每个子实验的流数量。默认 4。")
     parser.add_argument("--ccs", default=",".join(DEFAULT_CCS), help="要比较的 CC 子目录名，逗号分隔。")
@@ -324,6 +350,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         ]
 
     active_counts = [len(active_indexes(time_s)) for time_s in grid]
+    capacity_series: List[Tuple[float, float]] = []
+    for cc in ccs:
+        candidate = raw[cc].get("capacity", [])  # type: ignore[union-attr]
+        if candidate:
+            capacity_series = candidate  # type: ignore[assignment]
+            break
+    capacity_mbps = (
+        sample_previous(capacity_series, grid)
+        if capacity_series
+        else [service_rate_bps / 1e6 for _ in grid]
+    )
 
     aggregate_tput: Dict[str, List[float]] = {}
     mean_tput: Dict[str, List[float]] = {}
@@ -393,7 +430,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         steady_tput = [aggregate[idx] for idx in steady_indexes]
         steady_q = [q_mean[idx] for idx in steady_indexes]
         avg_aggregate_tput[cc] = mean_ignore_nan(steady_tput)
-        avg_utilization[cc] = avg_aggregate_tput[cc] / (service_rate_bps / 1e6)
+        avg_utilization[cc] = mean_ignore_nan(
+            aggregate[idx] / capacity_mbps[idx]
+            for idx in steady_indexes
+            if capacity_mbps[idx] > 0.0
+        )
         avg_qdelay[cc] = mean_ignore_nan(steady_q)
         p95_qdelay[cc] = percentile(steady_q, 95.0)
         avg_jain_fairness[cc] = mean_ignore_nan(
@@ -402,8 +443,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     total_capacity_mbps = service_rate_bps / 1e6
     ideal_per_flow_mbps = [
-        total_capacity_mbps / count if count > 0 else 0.0
-        for count in active_counts
+        capacity_mbps[idx] / count if count > 0 else 0.0
+        for idx, count in enumerate(active_counts)
     ]
 
     write_timeseries_csv(compare_dir / "timeseries_throughput_aggregate_mbps.csv", grid, aggregate_tput)
@@ -411,6 +452,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     write_timeseries_csv(compare_dir / "timeseries_queue_delay_mean_ms.csv", grid, mean_qdelay)
     write_timeseries_csv(compare_dir / "timeseries_jain_fairness.csv", grid, jain_fairness)
     write_timeseries_csv(compare_dir / "timeseries_active_flows.csv", grid, {"active_flows": active_counts})
+    write_timeseries_csv(compare_dir / "timeseries_capacity_mbps.csv", grid, {"capacity_mbps": capacity_mbps})
 
     with (compare_dir / "summary_metrics.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -487,6 +529,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 avg_queue = mean_ignore_nan(mean_qdelay[cc][idx] for idx in indexes)
                 p95_queue = percentile((mean_qdelay[cc][idx] for idx in indexes), 95.0)
                 avg_fairness = mean_ignore_nan(jain_fairness[cc][idx] for idx in indexes)
+                avg_capacity = mean_ignore_nan(capacity_mbps[idx] for idx in indexes)
                 writer.writerow([
                     cc,
                     phase_index,
@@ -495,7 +538,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"{phase_end:.6f}",
                     active,
                     f"{avg_tput:.6f}",
-                    f"{avg_tput / total_capacity_mbps:.6f}",
+                    f"{avg_tput / avg_capacity:.6f}" if avg_capacity > 0.0 else "",
                     f"{avg_per_flow:.6f}",
                     f"{avg_queue:.6f}",
                     f"{p95_queue:.6f}",
@@ -508,7 +551,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         aggregate_tput,
         "Aggregate throughput (Mbps)",
         "Aggregate throughput over time",
-        total_capacity_mbps,
+        None if capacity_series else total_capacity_mbps,
+        ideal_values=capacity_mbps if capacity_series else None,
+        ideal_values_label="ideal capacity",
         transition_times=phase_boundaries[1:-1],
     )
     plot_lines(
@@ -518,6 +563,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "Mean per-flow throughput (Mbps)",
         "Mean per-flow throughput over time",
         ideal_values=ideal_per_flow_mbps,
+        ideal_values_label="ideal fair share",
         transition_times=phase_boundaries[1:-1],
     )
     plot_lines(

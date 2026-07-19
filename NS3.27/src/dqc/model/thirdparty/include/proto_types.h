@@ -120,14 +120,14 @@ kNmccBytes,kOlia,kWvegas,kMpVeno,
 kDwcBytes,kCoupleBBR,kBBR_DELAY, 
 kBBR,kBBRD,kBBRPlus,kOBBR,
 kBBRRand,kTsunami,kHighSpeedRail,
-kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,kFreqCCv4,
+kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,kFBBR,kFBBRAdaptive,
 kCopa,kPCC,kVivace,
 kWebRTCVivace,kVegas,
 kLedbat,kLpTcp,kLpBBR,kLpBBRNo,
 kLearningBytes,kLearningBytesHalf,
 kHunnanBytes,kXmpBytes,
 kDctcp,
-kQuicBBR,kQuicBBRD,kFBBR,kFreqCCv4Hybrid,kFreqCCv4Adaptive};
+kQuicBBR,kQuicBBRD};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);

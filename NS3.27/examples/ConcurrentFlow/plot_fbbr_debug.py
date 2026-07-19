@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Plot single-run FreqCCv4 debug figures.
+Plot single-run FBBR debug figures.
 
 The script is intentionally trace-format driven. It works with the current
-FreqCCv4 summary traces and automatically uses richer pacing traces if a run was
+FBBR summary traces and automatically uses richer pacing traces if a run was
 captured with flow*_freq_gate_trace.csv or *_sendrate.txt enabled.
 """
 
@@ -107,17 +107,18 @@ PHASE_SHORT_LABELS = {
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create FreqCCv4 per-run debug plots from an FreqCCv4 trace directory."
+        description="Create FBBR per-run debug plots from an FBBR trace directory."
     )
     parser.add_argument(
-        "--run-dir",
+        "--fbbr-run-dir",
+        dest="run_dir",
         required=True,
-        help="FreqCCv4 run directory, e.g. .../four_cc.../FreqCCv4.",
+        help="FBBR run directory, e.g. .../four_cc.../FBBR.",
     )
     parser.add_argument(
         "--output-dir",
         default="",
-        help="Output directory. Defaults to RUN_DIR/debug_plots.",
+        help="Output directory. Defaults to FBBR_RUN_DIR/debug_plots.",
     )
     parser.add_argument(
         "--service-rate",
@@ -255,9 +256,9 @@ def clean_output_dir(output_dir: Path) -> None:
         "*_timeseries.csv",
         "aggregate_round_bandwidth.csv",
         "delivery_rate_first10_timeseries.csv",
-        "delivery_rate_bbrv2_vs_freqccv4_*.csv",
+        "delivery_rate_bbrv2_vs_fbbr_*.csv",
         "delivery_rate_trace_missing.txt",
-        "delivery_rate_bbrv2_vs_freqccv4_missing.txt",
+        "delivery_rate_bbrv2_vs_fbbr_missing.txt",
         "debug_summary.csv",
         "manifest.txt",
         "pacing_trace_missing.txt",
@@ -757,7 +758,7 @@ def plot_round_bandwidth_per_flow(
     add_phase_legend(axes[0, 0])
     axes[0, 0].legend(ncol=5, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time at cruise end (s)")
-    fig.suptitle("FreqCCv4 per-cruise bandwidth actually selected", y=0.995)
+    fig.suptitle("FBBR per-cruise bandwidth actually selected", y=0.995)
     fig.tight_layout()
     path = output_dir / "round_bandwidth_per_flow.png"
     fig.savefig(path, dpi=180)
@@ -864,7 +865,7 @@ def plot_round_aggregate(
     ax.axhline(service_rate_bps / 1e6, color="#333333", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Mbps")
-    ax.set_title("FreqCCv4 aggregate bandwidth selection across flows")
+    ax.set_title("FBBR aggregate bandwidth selection across flows")
     ax.grid(True, alpha=0.25)
     add_phase_legend(ax)
     ax.legend(ncol=2, frameon=False)
@@ -1074,7 +1075,7 @@ def plot_queue_delay_per_flow(
         ax.set_ylabel(f"Flow {flow_id}\nms")
         ax.grid(True, alpha=0.25)
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 queueing delay per flow", y=0.995)
+    fig.suptitle("FBBR queueing delay per flow", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "queue_delay_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -1087,7 +1088,7 @@ def plot_queue_delay_per_flow(
     ax.plot(grid, aggregate_max, label="max across flows", linewidth=0.9)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Queueing delay (ms)")
-    ax.set_title("Aggregate FreqCCv4 per-flow queueing delay")
+    ax.set_title("Aggregate FBBR per-flow queueing delay")
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False)
     fig.tight_layout()
@@ -1151,7 +1152,7 @@ def plot_mode_timeline(output_dir: Path, run_dir: Path, max_time_s: float) -> Op
     ax.set_yticklabels([f"flow{flow_id}" for flow_id in sorted(by_flow)])
     ax.set_xlim(0.0, max_time_s)
     ax.set_xlabel("Time (s)")
-    ax.set_title("FreqCCv4 mode timeline")
+    ax.set_title("FBBR mode timeline")
     ax.grid(True, axis="x", alpha=0.25)
     ax.legend(handles=handles, ncol=min(4, max(1, len(handles))), frameon=False, fontsize=8, loc="upper right")
     fig.tight_layout()
@@ -1258,7 +1259,7 @@ def plot_pacing_from_gate(
     add_phase_legend(axes[0, 0])
     axes[0, 0].legend(ncol=2, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 pacing rate from freq gate trace", y=0.995)
+    fig.suptitle("FBBR pacing rate from freq gate trace", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "pacing_rate_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -1277,7 +1278,7 @@ def plot_pacing_from_gate(
     ax.axhline(service_rate_bps / 1e6, color="#555555", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Mbps")
-    ax.set_title("Aggregate FreqCCv4 pacing rate")
+    ax.set_title("Aggregate FBBR pacing rate")
     ax.grid(True, alpha=0.25)
     add_phase_legend(ax)
     ax.legend(frameon=False)
@@ -1556,7 +1557,7 @@ def plot_trusted_bw_per_flow(
     handles.append(Patch(facecolor="#888888", alpha=0.6, label="fair share"))
     axes[0, 0].legend(handles, labels + ["trusted_bw valid", "fair share"], ncol=3, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 trusted_bw per flow", y=0.995)
+    fig.suptitle("FBBR trusted_bw per flow", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "trusted_bw_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -1595,7 +1596,7 @@ def plot_trusted_bw_per_flow(
     host.axhline(service_rate_bps / 1e6, color="#555555", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     host.set_xlabel("Time (s)")
     host.set_ylabel("Mbps")
-    host.set_title("Aggregate FreqCCv4 trusted_bw")
+    host.set_title("Aggregate FBBR trusted_bw")
     host.grid(True, alpha=0.25)
     host.legend(loc="upper left", frameon=False)
 
@@ -1656,7 +1657,7 @@ def plot_pacing_from_sendrate(
     add_phase_legend(axes[0, 0])
     axes[0, 0].legend(frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 pacing rate from sendrate trace", y=0.995)
+    fig.suptitle("FBBR pacing rate from sendrate trace", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "pacing_rate_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -1674,7 +1675,7 @@ def plot_pacing_from_sendrate(
     ax.axhline(service_rate_bps / 1e6, color="#555555", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Mbps")
-    ax.set_title("Aggregate FreqCCv4 pacing rate")
+    ax.set_title("Aggregate FBBR pacing rate")
     ax.grid(True, alpha=0.25)
     add_phase_legend(ax)
     ax.legend(frameon=False)
@@ -1807,7 +1808,7 @@ def plot_delivery_rate_first_window(
         ax.grid(True, axis="x", alpha=0.08)
     axes[0, 0].legend(frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 delivery rate in the first 10 seconds", y=0.995)
+    fig.suptitle("FBBR delivery rate in the first 10 seconds", y=0.995)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.08, hspace=0.42)
     path = output_dir / "delivery_rate_first10_by_flow.png"
     fig.savefig(path, dpi=180)
@@ -1864,7 +1865,7 @@ def plot_delivery_rate_per_flow_and_aggregate(
         ax.set_ylabel(f"Flow {flow_id}\nMbps")
         ax.grid(True, alpha=0.25)
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 Delivery Rate per flow", y=0.995)
+    fig.suptitle("FBBR Delivery Rate per flow", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "delivery_rate_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -1878,7 +1879,7 @@ def plot_delivery_rate_per_flow_and_aggregate(
                linewidth=1.0, label="bottleneck capacity")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Mbps")
-    ax.set_title("Aggregate FreqCCv4 Delivery Rate")
+    ax.set_title("Aggregate FBBR Delivery Rate")
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False)
     fig.tight_layout()
@@ -1924,7 +1925,7 @@ def delivery_compare_file_stem(
     highlight_end_s: Optional[float] = None,
     highlight_windows: Optional[Sequence[Tuple[float, float]]] = None,
 ) -> str:
-    stem = f"delivery_rate_bbrv2_vs_freqccv4_{delivery_window_slug(start_s, end_s)}"
+    stem = f"delivery_rate_bbrv2_vs_fbbr_{delivery_window_slug(start_s, end_s)}"
     if selected_flow_ids:
         suffix = "_".join(f"flow{flow_id}" for flow_id in selected_flow_ids)
         stem = f"{stem}_{suffix}"
@@ -2360,21 +2361,21 @@ def _deduplicated_legend_entries(ax) -> Tuple[List[object], List[str]]:
     return list(unique.values()), list(unique.keys())
 
 
-def plot_bbrv2_vs_freqccv4_delivery_rate(
+def plot_bbrv2_vs_fbbr_delivery_rate(
     output_dir: Path,
-    freqccv4_run_dir: Path,
+    fbbr_run_dir: Path,
     service_rate_bps: float,
     end_s: float = 5.0,
     start_s: float = 0.0,
     selected_flow_ids: Optional[Sequence[int]] = None,
     highlight_start_s: Optional[float] = None,
     highlight_end_s: Optional[float] = None,
-    highlight_cc: str = "FreqCCv4",
+    highlight_cc: str = "FBBR",
     highlight_label_prefix: str = "TrustedBw",
     highlight_windows: Optional[Sequence[Tuple[float, float]]] = None,
     highlight_values_mbps: Optional[Sequence[float]] = None,
     show_bbrv2_maxbw: bool = True,
-    comparison_cc_label: str = "FreqCCv4",
+    comparison_cc_label: str = "FBBR",
     maxbw_cycle_phase: str = "probeBW_refill",
     maxbw_cycle_count: int = 1,
     initial_state_value_mbps: Optional[float] = None,
@@ -2414,10 +2415,10 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
     )
     if comparison_raw_file is not None:
         stem = f"{stem}_synthetic"
-    root = freqccv4_run_dir.parent
+    root = fbbr_run_dir.parent
     runs = {
         "BBRv2": root / "BBRv2",
-        comparison_cc_label: freqccv4_run_dir,
+        comparison_cc_label: fbbr_run_dir,
     }
     by_cc_flow: Dict[str, Dict[int, List[Tuple[float, float]]]] = {}
     for cc, run_dir in runs.items():
@@ -2436,9 +2437,9 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
     all_flow_ids = sorted(set(by_cc_flow["BBRv2"]) | set(by_cc_flow[comparison_cc_label]))
     flow_ids = [flow_id for flow_id in all_flow_ids if not requested_flow_ids or flow_id in requested_flow_ids]
     if not flow_ids or not by_cc_flow["BBRv2"] or not by_cc_flow[comparison_cc_label]:
-        (output_dir / "delivery_rate_bbrv2_vs_freqccv4_missing.txt").write_text(
-            "Cannot plot BBRv2 vs FreqCCv4 delivery-rate comparison.\n\n"
-            "Expected files in both BBRv2 and FreqCCv4 run directories:\n"
+        (output_dir / "delivery_rate_bbrv2_vs_fbbr_missing.txt").write_text(
+            "Cannot plot BBRv2 vs FBBR delivery-rate comparison.\n\n"
+            "Expected files in both BBRv2 and FBBR run directories:\n"
             "  - *_flow*_*_recvrate_raw.txt\n\n"
             "Rerun missing CCs with --enableHeavyTrace=true.\n",
             encoding="utf-8",
@@ -2471,7 +2472,7 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
     for ax, flow_id in zip(axes[:, 0], flow_ids):
         add_phase_separators_with_labels(
             ax,
-            freqccv4_run_dir,
+            fbbr_run_dir,
             flow_id,
             start_s,
             end_s,
@@ -2481,7 +2482,7 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
         trusted_window_results: List[Tuple[float, float, float]] = []
         if all_highlight_windows:
             highlight_cc_key = (
-                comparison_cc_label if highlight_cc == "FreqCCv4" else highlight_cc
+                comparison_cc_label if highlight_cc == "FBBR" else highlight_cc
             )
             for window_idx, ((window_start, window_end), selected_value_mbps) in enumerate(
                 zip(all_highlight_windows, all_highlight_values), start=1
@@ -2571,7 +2572,7 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
             trusted_updates: List[Tuple[float, float, float, float]] = []
             for window_start, window_end, trusted_value in trusted_window_results:
                 update_time = cruise_end_for_sampling_window(
-                    freqccv4_run_dir,
+                    fbbr_run_dir,
                     flow_id,
                     window_start,
                     window_end,
@@ -2652,7 +2653,7 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
             ax.set_xticks(relative_ticks, relative_labels)
         if show_probe_cycle_braces:
             probe_cycles = complete_probe_bw_cycles_in_window(
-                freqccv4_run_dir,
+                fbbr_run_dir,
                 flow_id,
                 start_s,
                 end_s,
@@ -2668,7 +2669,7 @@ def plot_bbrv2_vs_freqccv4_delivery_rate(
                 )
         if show_partial_probe_cycle_brace:
             freqcc_up_starts = phase_starts_for_flow(
-                freqccv4_run_dir, flow_id, "probeBW_up"
+                fbbr_run_dir, flow_id, "probeBW_up"
             )
             partial_start = next(
                 (
@@ -2830,7 +2831,7 @@ def plot_rtt(
     add_phase_legend(axes[0, 0])
     axes[0, 0].legend(ncol=2, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FreqCCv4 latest RTT and smoothed RTT", y=0.995)
+    fig.suptitle("FBBR latest RTT and smoothed RTT", y=0.995)
     fig.tight_layout()
     per_flow_path = output_dir / "srtt_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
@@ -2871,7 +2872,7 @@ def plot_rtt(
     ax.plot(grid, p95_latest, color=LINE_COLORS["latest_rtt"], linewidth=1.0, alpha=0.75, label="p95 latest RTT")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("RTT (ms)")
-    ax.set_title("Aggregate FreqCCv4 RTT view")
+    ax.set_title("Aggregate FBBR RTT view")
     ax.grid(True, alpha=0.25)
     add_phase_legend(ax)
     ax.legend(frameon=False)
@@ -3048,7 +3049,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         + "\n",
         encoding="utf-8",
     )
-    print(f"FreqCCv4 debug plots written to: {output_dir}")
+    print(f"FBBR debug plots written to: {output_dir}")
     return 0
 
 

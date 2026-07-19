@@ -17,10 +17,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RUNNER = SCRIPT_DIR / "run_4cc_comparison.py"
 NS3_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
-DEFAULT_FREQCCV4_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "freqccv4_default.conf"
+DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 CCS = (
-    "FreqCCv4-adaptive",
-    "FreqCCv4-hybrid",
+    "FBBR-adaptive",
+    "FBBR",
     "BBRv2",
     "BBRv2plus",
     "oBBR",
@@ -62,7 +62,7 @@ SCENARIOS = (
     ),
     Scenario(
         "scenario3_16flows_100M_5BDP",
-        "16条流从0s同步启动并持续到480s；共享瓶颈100Mbps；buffer=5BDP；两个FreqCCv4算法幅度=2sr",
+        "16条流从0s同步启动并持续到480s；共享瓶颈100Mbps；buffer=5BDP；两个FBBR算法幅度=2sr",
         480,
         3,
         16,
@@ -72,7 +72,7 @@ SCENARIOS = (
     ),
     Scenario(
         "scenario4_32flows_500M_5BDP",
-        "32条流从0s同步启动并持续到480s；共享瓶颈500Mbps；buffer=5BDP；两个FreqCCv4算法幅度=2sr",
+        "32条流从0s同步启动并持续到480s；共享瓶颈500Mbps；buffer=5BDP；两个FBBR算法幅度=2sr",
         480,
         4,
         32,
@@ -159,7 +159,7 @@ def run_scenario(root: Path, scenario: Scenario, batch_log) -> int:
     print(f"\n开始场景：{scenario.description}")
     use_2sr = scenario.n_flows in {16, 32}
     freq_config_args = (
-        ["--freqccv4-config", str(root / "freqccv4_2sr.conf")]
+        ["--fbbr-config", str(root / "fbbr_2sr.conf")]
         if use_2sr
         else []
     )
@@ -177,7 +177,7 @@ def run_scenario(root: Path, scenario: Scenario, batch_log) -> int:
             "--skip-completed",
             "--no-plot",
             "--direct-binary",
-            *(freq_config_args if cc.startswith("FreqCCv4") else []),
+            *(freq_config_args if cc.startswith("FBBR") else []),
             *common_args,
         ]
         driver_log_path = scenario_dir / f"{cc}_driver.log"
@@ -260,11 +260,11 @@ def build_ns3(root: Path) -> int:
 
 
 def write_2sr_config(root: Path) -> Path:
-    source = DEFAULT_FREQCCV4_CONFIG.read_text(encoding="utf-8")
+    source = DEFAULT_FBBR_CONFIG.read_text(encoding="utf-8")
     old = "default_amplitude_mode = 4sr"
     if old not in source:
         raise RuntimeError(f"默认配置中找不到待替换项：{old}")
-    output = root / "freqccv4_2sr.conf"
+    output = root / "fbbr_2sr.conf"
     output.write_text(
         source.replace(old, "default_amplitude_mode = 2sr", 1),
         encoding="utf-8",
@@ -310,7 +310,7 @@ def write_summary(root: Path) -> Path:
             read_phase_results(phase_path) if phase_path.exists() else None
         )
     output = root / "all_scenarios_summary.csv"
-    base = "场景1/2为300s，场景3/4为480s，场景5/6为600s；动态流在300s切换；RTT约42ms；access=1Gbps；长流；buffer=5BDP；队列1ms采样；场景3/4的FreqCCv4幅度=2sr；seed按场景为1,2,3,4,5,6；runId=1"
+    base = "场景1/2为300s，场景3/4为480s，场景5/6为600s；动态流在300s切换；RTT约42ms；access=1Gbps；长流；buffer=5BDP；队列1ms采样；场景3/4的FBBR幅度=2sr；seed按场景为1,2,3,4,5,6；runId=1"
     headers = ["基础设置", "对比CC"]
     for index in range(1, len(SCENARIOS) + 1):
         headers.extend([f"场景{index}", f"结果{index}"])
@@ -357,8 +357,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             {
                 "ccs": list(CCS),
                 "scenarios": [asdict(scenario) for scenario in SCENARIOS],
-                "freqccv4_2sr_config": str(two_sr_config),
-                "freqccv4_2sr_scenarios": [
+                "fbbr_2sr_config": str(two_sr_config),
+                "fbbr_2sr_scenarios": [
                     scenario.directory
                     for scenario in SCENARIOS
                     if scenario.n_flows in {16, 32}

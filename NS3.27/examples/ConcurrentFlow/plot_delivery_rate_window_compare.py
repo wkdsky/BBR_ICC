@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot BBRv2 vs FreqCCv4 raw delivery-rate samples, sampling windows, and
+Plot BBRv2 vs FBBR raw delivery-rate samples, sampling windows, and
 peak-triggered maxBw / CRUISE-exit TrustedBw update trajectories.
 """
 
@@ -9,26 +9,25 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from plot_freqccv4_debug import (
+from plot_fbbr_debug import (
     delivery_compare_file_stem,
     infer_service_rate,
-    plot_bbrv2_vs_freqccv4_delivery_rate,
+    plot_bbrv2_vs_fbbr_delivery_rate,
 )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a BBRv2 vs FreqCCv4 delivery-rate comparison with "
+            "Create a BBRv2 vs FBBR delivery-rate comparison with "
             "maxBw and TrustedBw update trajectories."
         )
     )
     parser.add_argument(
-        "--freqccv4-run-dir",
-        "--run-dir",
-        dest="freqccv4_run_dir",
+        "--fbbr-run-dir",
+        dest="fbbr_run_dir",
         required=True,
-        help="FreqCCv4 run directory. Its parent is expected to contain the BBRv2 directory.",
+        help="FBBR run directory. Its parent is expected to contain the BBRv2 directory.",
     )
     parser.add_argument(
         "--start-s",
@@ -45,7 +44,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="",
-        help="Output directory. Defaults to FREQCCV4_RUN_DIR/debug_plots/delivery_rate_windows.",
+        help="Output directory. Defaults to FBBR_RUN_DIR/debug_plots/delivery_rate_windows.",
     )
     parser.add_argument(
         "--service-rate",
@@ -92,8 +91,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--highlight-cc",
-        default="FreqCCv4",
-        help="CC name to average in the highlight window. Default: FreqCCv4.",
+        default="FBBR",
+        help="CC name to average in the highlight window. Default: FBBR.",
     )
     parser.add_argument(
         "--highlight-label",
@@ -220,22 +219,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 2
 
-    freqccv4_run_dir = Path(args.freqccv4_run_dir).resolve()
-    if not freqccv4_run_dir.is_dir():
-        print(f"FreqCCv4 run directory does not exist: {freqccv4_run_dir}", file=sys.stderr)
+    fbbr_run_dir = Path(args.fbbr_run_dir).resolve()
+    if not fbbr_run_dir.is_dir():
+        print(f"FBBR run directory does not exist: {fbbr_run_dir}", file=sys.stderr)
         return 2
 
     output_dir = (
         Path(args.output_dir).resolve()
         if args.output_dir
-        else freqccv4_run_dir / "debug_plots" / "delivery_rate_windows"
+        else fbbr_run_dir / "debug_plots" / "delivery_rate_windows"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    service_rate_bps = infer_service_rate(freqccv4_run_dir, args.service_rate)
-    png_path = plot_bbrv2_vs_freqccv4_delivery_rate(
+    service_rate_bps = infer_service_rate(fbbr_run_dir, args.service_rate)
+    png_path = plot_bbrv2_vs_fbbr_delivery_rate(
         output_dir,
-        freqccv4_run_dir,
+        fbbr_run_dir,
         service_rate_bps,
         args.end_s,
         start_s=args.start_s,
@@ -247,7 +246,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         highlight_windows=highlight_windows,
         highlight_values_mbps=args.highlight_value_mbps,
         show_bbrv2_maxbw=not args.hide_maxbw,
-        comparison_cc_label=freqccv4_run_dir.name,
+        comparison_cc_label=fbbr_run_dir.name,
         maxbw_cycle_phase=f"probeBW_{args.maxbw_cycle_phase}",
         maxbw_cycle_count=args.maxbw_cycle_count,
         initial_state_value_mbps=args.initial_state_value_mbps,

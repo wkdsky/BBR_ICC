@@ -13,7 +13,6 @@
 #include "ns3/freqcc_sender.h"
 #include "ns3/freqccv2_sender.h"
 #include "ns3/freqccv3_sender.h"
-#include "ns3/freqccv4_sender.h"
 #include "ns3/fbbr_sender.h"
 #include "ns3/obbr_sender.h"
 #include "proto_bbr_sender.h"
@@ -50,37 +49,20 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
-           type == kFreqCCv3 || type == kFreqCCv4 ||
-           type == kFreqCCv4Adaptive || type == kFreqCCv4Hybrid ||
-           type == kFBBR;
+           type == kFreqCCv3 || type == kFBBR ||
+           type == kFBBRAdaptive;
 }
 
 bool
-IsFreqCCv4Algorithm(CongestionControlType type)
+IsFBBRAlgorithm(CongestionControlType type)
 {
-    return type == kFreqCCv4 || type == kFreqCCv4Adaptive ||
-           type == kFreqCCv4Hybrid;
+    return type == kFBBR || type == kFBBRAdaptive;
 }
 
 std::string
 Bbr2ProbePhaseName(Bbr2ProbeBwMode::CyclePhase phase)
 {
     return Bbr2ProbeBwMode::CyclePhaseToString(phase);
-}
-
-FreqCCv4GateTraceMode
-ParseFreqCCv4GateTraceMode(const std::string& mode)
-{
-    if(mode == "off"){
-        return FreqCCv4GateTraceMode::kOff;
-    }
-    if(mode == "sampled_pacing"){
-        return FreqCCv4GateTraceMode::kSampledPacing;
-    }
-    if(mode == "full"){
-        return FreqCCv4GateTraceMode::kFull;
-    }
-    return FreqCCv4GateTraceMode::kRoundOnly;
 }
 
 FBBRGateTraceMode
@@ -181,9 +163,6 @@ void DqcSender::SetFreqAnalysisTraceFuc(TraceFreqAnalysis cb){
 void DqcSender::SetRttFreqAnalysisTraceFuc(TraceRttFreqAnalysis cb){
     m_traceRttFreqAnalysisCb=cb;
 }
-void DqcSender::SetFreqCCv4LoadTraceFuc(TraceFreqCCv4Load cb){
-    m_traceFreqCCv4LoadCb=cb;
-}
 void DqcSender::SetFBBRLoadTraceFuc(TraceFBBRLoad cb){
     m_traceFBBRLoadCb=cb;
 }
@@ -222,7 +201,6 @@ void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
     m_equivalenceSentBytes=0;
     m_equivalenceAckedBytes=0;
     EnsureLossTraceHooked();
-    AttachFBBRPacingAudit();
 }
 void DqcSender::CloseEquivalenceAuditTrace(){
     if(m_equivalenceSent.is_open()){
@@ -233,41 +211,6 @@ void DqcSender::CloseEquivalenceAuditTrace(){
     }
     if(m_equivalencePacing.is_open()){
         m_equivalencePacing.close();
-    }
-}
-void DqcSender::AttachFBBRPacingAudit(){
-    if(m_equivalenceAuditPrefix.empty()){
-        return;
-    }
-    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-    if(sent_manager == nullptr){
-        return;
-    }
-    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFBBR){
-        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
-        fbbr->SetPacingAuditTraceCallback(
-            [this](double time_s,
-                   uint64_t native_pacing_bps,
-                   uint64_t final_pacing_bps,
-                   uint64_t current_native_bw_bps,
-                   uint64_t pacing_base_bw_bps,
-                   const std::string& pacing_base_source,
-                   double phase_pacing_gain,
-                   bool should_oscillate,
-                   bool trusted_bw_valid){
-                if(m_equivalencePacing.is_open()){
-                    m_equivalencePacing<<time_s<<","
-                                       <<native_pacing_bps<<","
-                                       <<final_pacing_bps<<","
-                                       <<current_native_bw_bps<<","
-                                       <<pacing_base_bw_bps<<","
-                                       <<pacing_base_source<<","
-                                       <<phase_pacing_gain<<","
-                                       <<(should_oscillate?"true":"false")<<","
-                                       <<(trusted_bw_valid?"true":"false")<<"\n";
-                }
-            });
     }
 }
 void DqcSender::OnPacketLossInfo(dqc::PacketNumber seq,uint32_t rtt,uint32_t bytes_lost,dqc::ProtoTime sent_ts){
@@ -288,28 +231,21 @@ void DqcSender::OnPacketSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts,uint32
         PacingSender::DebugState pacer;
         ByteCount inflight=0;
         ByteCount cwnd=0;
-        FbbrPacketPacingDebugState fbbr;
         if(manager){
             pacer=manager->GetPacingDebugState();
             manager->InFlight(&inflight,&cwnd);
-            SendAlgorithmInterface *algo=manager->GetSendAlgorithm();
-            if(algo && algo->GetCongestionControlType()==kFBBR){
-                FBBRSender *sender=static_cast<FBBRSender*>(algo);
-                const uint64_t commanded=pacer.commanded_pacing_bps>0
-                    ? pacer.commanded_pacing_bps
-                    : manager->PacingRate().ToBitsPerSecond();
-                pacer.commanded_pacing_bps=commanded;
-                fbbr=sender->ExportPacketPacingDebugState(
-                    sent_ts,inflight,commanded);
+            if(pacer.commanded_pacing_bps == 0){
+                pacer.commanded_pacing_bps = manager->PacingRate().ToBitsPerSecond();
             }
         }
+        const bool is_cwnd_limited = cwnd > 0 && inflight >= cwnd;
         m_equivalenceSent
             <<m_id<<","<<seq.ToUint64()<<","<<
               static_cast<double>(sent_ts.ToDebuggingValue())/1e6<<","<<bytes_sent
             <<","<<pacer.commanded_pacing_bps
-            <<","<<fbbr.search_baseline_bps
-            <<","<<fbbr.commanded_probe_offset_bps
-            <<","<<fbbr.carrier_phase
+            <<",0"
+            <<",0"
+            <<",0"
             <<","<<pacer.requested_delay_us
             <<","<<pacer.ideal_send_time_before_us
             <<","<<pacer.ideal_next_send_time_us
@@ -318,12 +254,12 @@ void DqcSender::OnPacketSent(dqc::PacketNumber seq,dqc::ProtoTime sent_ts,uint32
             <<","<<kDefaultTCPMSS
             <<","<<pacer.burst_tokens<<","<<pacer.lumpy_tokens
             <<","<<inflight<<","<<cwnd
-            <<","<<(fbbr.is_cwnd_limited?"true":"false")
-            <<","<<(fbbr.is_app_limited?"true":"false")
+            <<","<<(is_cwnd_limited?"true":"false")
+            <<",false"
             <<","<<(pacer.pacing_limited?"true":"false")
             <<","<<(pacer.fine_grained?"true":"false")
-            <<","<<(fbbr.is_pulser?"true":"false")
-            <<","<<(fbbr.search_active?"true":"false")
+            <<",false"
+            <<",false"
             <<","<<m_equivalenceSentBytes<<"\n";
     }
 }
@@ -467,17 +403,17 @@ void DqcSender::Bind(uint16_t port){
                 m_traceRttFreqAnalysisCb(start_time, adopted_window_ms, sender_peak_freq_hz, rtt_peak_freq_hz, avg_smoothed_rtt_ms);
             }
         });
-    } else if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetTraceFlowId(m_id);
-        freqccv4->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
+    } else if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetTraceFlowId(m_id);
+        fbbr->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
                                                     uint32_t latest_rtt_ms,
                                                     uint32_t min_rtt_ms){
             if(!m_traceQueueDelayCb.IsNull()){
                 m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
             }
         });
-        freqccv4->SetCruiseLoadTraceCallback([this](double window_start_s,
+        fbbr->SetCruiseLoadTraceCallback([this](double window_start_s,
                                                     double window_end_s,
                                                     double p_underload,
                                                     double p_full_load,
@@ -486,37 +422,11 @@ void DqcSender::Bind(uint16_t port){
                                                     const std::string& label,
                                                     bool low_confidence,
                                                     const std::string& diagnostics){
-            if(!m_traceFreqCCv4LoadCb.IsNull()){
-                m_traceFreqCCv4LoadCb(window_start_s, window_end_s,
+            if(!m_traceFBBRLoadCb.IsNull()){
+                m_traceFBBRLoadCb(window_start_s, window_end_s,
                                       p_underload, p_full_load, p_overload,
                                       confidence, label, low_confidence,
                                       diagnostics);
-            }
-        });
-    } else if(algo && algo->GetCongestionControlType() == kFBBR){
-        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
-        fbbr->SetTraceFlowId(m_id);
-        fbbr->SetQueueDelayTraceCallback([this](uint32_t queue_delay_ms,
-                                                uint32_t latest_rtt_ms,
-                                                uint32_t min_rtt_ms){
-            if(!m_traceQueueDelayCb.IsNull()){
-                m_traceQueueDelayCb(queue_delay_ms, latest_rtt_ms, min_rtt_ms);
-            }
-        });
-        fbbr->SetCruiseLoadTraceCallback([this](double window_start_s,
-                                                double window_end_s,
-                                                double p_underload,
-                                                double p_full_load,
-                                                double p_overload,
-                                                double confidence,
-                                                const std::string& label,
-                                                bool low_confidence,
-                                                const std::string& diagnostics){
-            if(!m_traceFBBRLoadCb.IsNull()){
-                m_traceFBBRLoadCb(window_start_s, window_end_s,
-                                  p_underload, p_full_load, p_overload,
-                                  confidence, label, low_confidence,
-                                  diagnostics);
             }
         });
     } else if(algo && (algo->GetCongestionControlType() == kBBRv2 ||
@@ -883,21 +793,18 @@ void DqcSender::SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier){
 void DqcSender::SetFreqCCFairShareBandwidth(uint64_t fair_share_bps){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetFairShareBandwidthBps(fair_share_bps);
-    } else if(algo && algo->GetCongestionControlType() == kFBBR){
+    if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
         FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
         fbbr->SetFairShareBandwidthBps(fair_share_bps);
     }
 }
 
-void DqcSender::SetFreqCCv4CruiseBaselineCap(uint64_t cap_bps){
+void DqcSender::SetFBBRCruiseBaselineCap(uint64_t cap_bps){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetCruiseBaselineCapBps(cap_bps);
+    if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetCruiseBaselineCapBps(cap_bps);
     }
 }
 
@@ -1010,7 +917,7 @@ void DqcSender::SetProcessIntervalUs(int64_t interval_us){
     }
 }
 
-void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
+void DqcSender::ConfigureFBBR(const dqc::FBBRConfig& config,
                                 uint32_t flow_id){
     double freq_hz = config.default_modulation_freq_hz;
     double fixed_mbps = config.default_fixed_amplitude_mbps;
@@ -1029,44 +936,15 @@ void DqcSender::ConfigureFreqBbr(const dqc::FreqBbrConfig& config,
 
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->ConfigureFreqBbr(config);
+    if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->ConfigureFBBR(config);
     }
 }
 void DqcSender::SetDataChunkVariationBytes(uint32_t variation_bytes,
                                            uint64_t variation_seed){
     m_dataChunkVariationBytes = variation_bytes;
     m_dataChunkVariationSeed = variation_seed;
-}
-
-void DqcSender::ConfigureFBBR(const dqc::FBBRConfig& config,
-                              uint32_t flow_id){
-    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFBBR){
-        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
-        fbbr->SetTraceFlowId(flow_id);
-        fbbr->ConfigureFBBR(config);
-    }
-}
-
-void DqcSender::ConfigureFreqCCv4ConvergenceGate(
-    bool enable_trace,
-    bool enable_control,
-    const std::string& gate_trace_mode,
-    uint64_t gate_trace_sample_interval_us){
-    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
-    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetTraceFlowId(m_id);
-        freqccv4->SetConvergenceGateTraceEnabled(enable_trace);
-        freqccv4->SetConvergenceGateControlEnabled(enable_control);
-        freqccv4->SetGateTraceMode(
-            ParseFreqCCv4GateTraceMode(gate_trace_mode),
-            gate_trace_sample_interval_us);
-    }
 }
 
 void DqcSender::ConfigureFBBRConvergenceGate(
@@ -1076,7 +954,7 @@ void DqcSender::ConfigureFBBRConvergenceGate(
     uint64_t gate_trace_sample_interval_us){
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
-    if(algo && algo->GetCongestionControlType() == kFBBR){
+    if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
         FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
         fbbr->SetTraceFlowId(m_id);
         fbbr->SetConvergenceGateTraceEnabled(enable_trace);
@@ -1199,28 +1077,28 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
         freqccv3->SetOscillationFrequency(freq_hz);
 
         // Set amplitude mode (only used during PROBE_UP)
-        FreqCCv3AmplitudeMode amp_mode = FreqCCv3AmplitudeMode::kFixed;
+        FBBRAmplitudeMode amp_mode = FBBRAmplitudeMode::kFixed;
         uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
 
         if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
-            amp_mode = FreqCCv3AmplitudeMode::kMiu2;
+            amp_mode = FBBRAmplitudeMode::kMiu2;
         } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
-            amp_mode = FreqCCv3AmplitudeMode::kMiu3;
+            amp_mode = FBBRAmplitudeMode::kMiu3;
         } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
-            amp_mode = FreqCCv3AmplitudeMode::kMiu4;
+            amp_mode = FBBRAmplitudeMode::kMiu4;
         } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
-            amp_mode = FreqCCv3AmplitudeMode::kMiu8;
+            amp_mode = FBBRAmplitudeMode::kMiu8;
         } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
-            amp_mode = FreqCCv3AmplitudeMode::kSR2;
+            amp_mode = FBBRAmplitudeMode::kSR2;
         } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
-            amp_mode = FreqCCv3AmplitudeMode::kSR3;
+            amp_mode = FBBRAmplitudeMode::kSR3;
         } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
-            amp_mode = FreqCCv3AmplitudeMode::kSR4;
+            amp_mode = FBBRAmplitudeMode::kSR4;
         } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
-            amp_mode = FreqCCv3AmplitudeMode::kSR8;
+            amp_mode = FBBRAmplitudeMode::kSR8;
         } else {
             // Default to fixed mode
-            amp_mode = FreqCCv3AmplitudeMode::kFixed;
+            amp_mode = FBBRAmplitudeMode::kFixed;
             if(amplitude_mode != "0" && !amplitude_mode.empty()) {
                 try {
                     double val = std::stod(amplitude_mode);
@@ -1239,35 +1117,35 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
             recv_signal_mode == "raw_delivery" ||
             recv_signal_mode == "recvrate_raw";
         freqccv3->SetRecvSignalMode(use_delivery_rate_latest);
-    } else if(algo && IsFreqCCv4Algorithm(algo->GetCongestionControlType())){
-        FreqCCv4Sender* freqccv4 = static_cast<FreqCCv4Sender*>(algo);
-        freqccv4->SetOscillationFrequency(freq_hz);
+    } else if(algo && IsFBBRAlgorithm(algo->GetCongestionControlType())){
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        fbbr->SetOscillationFrequency(freq_hz);
 
-        FreqCCv4AmplitudeMode amp_mode = FreqCCv4AmplitudeMode::kFixed;
+        FBBRAmplitudeMode amp_mode = FBBRAmplitudeMode::kFixed;
         uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
 
         if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu2;
+            amp_mode = FBBRAmplitudeMode::kMiu2;
         } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu3;
+            amp_mode = FBBRAmplitudeMode::kMiu3;
         } else if(amplitude_mode == "4miu" || amplitude_mode == "miu4"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu4;
+            amp_mode = FBBRAmplitudeMode::kMiu4;
         } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
-            amp_mode = FreqCCv4AmplitudeMode::kMiu8;
+            amp_mode = FBBRAmplitudeMode::kMiu8;
         } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR2;
+            amp_mode = FBBRAmplitudeMode::kSR2;
         } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR3;
+            amp_mode = FBBRAmplitudeMode::kSR3;
         } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR4;
+            amp_mode = FBBRAmplitudeMode::kSR4;
         } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR8;
+            amp_mode = FBBRAmplitudeMode::kSR8;
         } else if(amplitude_mode == "12sr" || amplitude_mode == "sr12"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR12;
+            amp_mode = FBBRAmplitudeMode::kSR12;
         } else if(amplitude_mode == "16sr" || amplitude_mode == "sr16"){
-            amp_mode = FreqCCv4AmplitudeMode::kSR16;
+            amp_mode = FBBRAmplitudeMode::kSR16;
         } else {
-            amp_mode = FreqCCv4AmplitudeMode::kFixed;
+            amp_mode = FBBRAmplitudeMode::kFixed;
             if(amplitude_mode != "0" && !amplitude_mode.empty()) {
                 try {
                     double val = std::stod(amplitude_mode);
@@ -1278,13 +1156,13 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
                 }
             }
         }
-        freqccv4->SetOscillationAmplitude(amp_mode, fixed_bps);
+        fbbr->SetOscillationAmplitude(amp_mode, fixed_bps);
         bool use_delivery_rate_latest =
             recv_signal_mode == "delivery_rate_latest" ||
             recv_signal_mode == "delivery_latest" ||
             recv_signal_mode == "raw_delivery" ||
             recv_signal_mode == "recvrate_raw";
-        freqccv4->SetRecvSignalMode(use_delivery_rate_latest);
+        fbbr->SetRecvSignalMode(use_delivery_rate_latest);
     }
 }
 }  // namespace ns3

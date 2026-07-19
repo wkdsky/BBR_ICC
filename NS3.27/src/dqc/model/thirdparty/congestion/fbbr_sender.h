@@ -1,4 +1,4 @@
-// F-BBR - BBRv2 with coded-sine CRUISE operating-point identification.
+// FBBR - BBRv2 with fixed-frequency CRUISE modulation and FBBR branches.
 
 #ifndef FBBR_SENDER_H_
 #define FBBR_SENDER_H_
@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "quic_bbr2_sender.h"
-#include "fbbr_frequency_search.h"
 #include "quic_export.h"
 
 namespace dqc {
@@ -21,6 +20,9 @@ namespace dqc {
 struct FBBRRateSample {
   QuicTime time;
   QuicBandwidth rate;
+  bool valid = true;
+  bool is_app_limited = false;
+  QuicByteCount acked_bytes = 0;
 };
 
 struct FBBRRttSample {
@@ -51,8 +53,31 @@ enum class FBBRGateTraceMode {
 
 enum class FBBRPacingBaseSource {
   kNativeBbr,
-  kAdaptiveSearch,
   kTrustedBw,
+  kWaveformCruiseBaseline,
+};
+
+enum class FBBRCruiseDetectorMode {
+  kTimeWaveform,
+  kLegacySpectral,
+};
+
+enum class WaveformCruiseState {
+  kDisabled,
+  kWaitInitialSettle,
+  kCollectCycle,
+  kExtendCycle,
+  kAnalyzeCycle,
+  kWaitPostAdjustmentSettle,
+  kTrustedLocked,
+  kFallbackLocked,
+};
+
+enum class WaveformClassification {
+  kFullLoad,
+  kUnderload,
+  kOverload,
+  kInconclusive,
 };
 
 struct FBBRFlowConfig {
@@ -63,12 +88,10 @@ struct FBBRFlowConfig {
 };
 
 struct FBBRConfig {
-  // Canonical F-BBR Frequency Search configuration.  Legacy fields below are retained
-  // only for explicit A/B diagnostics when frequency_search_enabled is false.
-  FBBRFrequencySearchConfig frequency_search;
   double default_modulation_freq_hz = 5.0;
   std::string default_amplitude_mode = "fixed_mbps";
   double default_fixed_amplitude_mbps = 50.0;
+  double pacing_minimum_rate_mbps = 1.0;
   std::map<uint32_t, FBBRFlowConfig> flow;
 
   double stability_single_round_exit_threshold = 0.25;
@@ -100,35 +123,82 @@ struct FBBRConfig {
 
   bool trusted_bw_clear_on_cruise_start = true;
 
+  std::string cruise_detector_mode = "time_waveform";
+  std::string waveform_recv_signal_mode = "delivery_rate_latest";
+  double waveform_initial_settle_rtt_mult = 1.0;
+  double waveform_post_adjust_settle_rtt_mult = 1.0;
+  bool waveform_negative_half_first = true;
+  double waveform_initial_window_periods = 2.0;
+  double waveform_extended_window_periods = 3.0;
+  double waveform_max_window_periods = 3.0;
+  double waveform_period_tolerance_ratio = 0.15;
+  double waveform_min_periodicity_correlation = 0.50;
+  double waveform_min_cycle_coverage_ratio = 0.85;
+  double waveform_masked_min_cycle_coverage_ratio = 0.50;
+  double waveform_min_completeness_score = 0.60;
+  double waveform_min_rising_duration_ratio = 0.15;
+  double waveform_min_falling_duration_ratio = 0.15;
+  double waveform_min_shape_ncc = 0.35;
+  double waveform_min_slope_direction_agreement = 0.65;
+  double waveform_min_response_snr = 2.0;
+  double waveform_local_slope_window_period_ratio = 0.05;
+  double waveform_min_local_slope_window_ms = 5.0;
+  double waveform_clip_min_duration_ratio = 0.15;
+  double waveform_clip_min_half_overlap_ratio = 0.75;
+  double waveform_clip_max_slope_ratio = 0.10;
+  double waveform_delta_drate_amplitude_ratio = 0.50;
+  double waveform_delta_fallback_baseline_ratio = 0.25;
+  double waveform_adaptive_delta_fallback_baseline_ratio = 0.10;
+  double waveform_delta_ewma_alpha = 0.125;
+  double waveform_delta_min_baseline_ratio = 0.02;
+  double waveform_delta_max_baseline_ratio = 0.15;
+  double waveform_overload_max_delta_multiplier = 6.0;
+  double waveform_underload_max_delta_multiplier = 2.0;
+  uint32_t waveform_overload_confirmations = 2;
+  bool waveform_queue_guard_enabled = true;
+  double waveform_queue_low_min_rtt_ratio = 0.10;
+  double waveform_queue_target_min_rtt_ratio = 0.25;
+  double waveform_queue_high_min_rtt_ratio = 0.75;
+
+  // Parsed for configuration compatibility only unless noted otherwise.
+  double waveform_min_drate_ncc = 0.50;
+  double waveform_min_srtt_integral_ncc = 0.45;
+  double waveform_min_srtt_derivative_ncc = 0.45;
+  double waveform_plateau_min_duration_ratio = 0.10;
+  double waveform_plateau_max_slope_ratio = 0.20;
+  double waveform_plateau_max_level_span_ratio = 0.15;
+  // Active obvious-clipping guards in the time-waveform control path.
+  double waveform_plateau_extreme_distance_ratio = 0.15;
+  double waveform_baseline_step_ratio = 0.25;
+  double waveform_amplitude_floor_ratio = 0.125;
+  uint32_t waveform_clip_floor_confirmations = 2;
+  uint32_t waveform_max_baseline_adjustments = 8;
+  uint32_t waveform_max_inconclusive_extensions = 1;
+  double waveform_inconclusive_signal_amplification_factor = 1.25;
+  double waveform_inconclusive_signal_amplification_max_ratio = 2.0;
+  double waveform_max_app_limited_sample_ratio = 0.25;
+  double waveform_max_interpolation_gap_period_ratio = 0.10;
+
   std::string trace_gate_trace_mode = "round_only";
   uint64_t trace_gate_trace_sample_interval_us = 10000;
   bool trace_enable_cruise_window_trace = true;
   bool trace_enable_trusted_bw_selection_trace = true;
 };
 
-struct FbbrPacketPacingDebugState {
-  uint64_t search_baseline_bps = 0;
-  int64_t commanded_probe_offset_bps = 0;
-  double carrier_phase = 0.0;
-  uint64_t cwnd_bytes = 0;
-  bool search_active = false;
-  bool is_pulser = false;
-  bool is_cwnd_limited = false;
-  bool is_app_limited = false;
-};
-
-class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
+class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
  public:
-  FBBRSender(const ProtoClock* clock,
-                 QuicTime now,
+  FBBRSender(QuicTime now,
                  const RttStats* rtt_stats,
                  const QuicUnackedPacketMap* unacked_packets,
                  QuicPacketCount initial_cwnd_in_packets,
                  QuicPacketCount max_cwnd_in_packets,
                  Random* random,
                  QuicConnectionStats* stats,
-                 bool enable_ecn = false);
-  ~FBBRSender() override;
+                 bool enable_ecn = false,
+                 bool fbbr_window_baseline = false,
+                 bool adaptive_guard = false,
+                 CongestionControlType congestion_control_type = kFBBR);
+  ~FBBRSender() override = default;
 
   void SetOscillationFrequency(double freq_hz);
   void SetOscillationAmplitude(FBBRAmplitudeMode mode,
@@ -137,6 +207,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   void SetCruiseWindowConfig(double min_cycles_per_window,
                              double window_step_ratio);
   void SetFairShareBandwidthBps(uint64_t fair_share_bps);
+  void SetCruiseBaselineCapBps(uint64_t cap_bps);
   void SetConvergenceGateTraceEnabled(bool enabled);
   void SetConvergenceGateControlEnabled(bool enabled);
   void ConfigureFBBR(const FBBRConfig& config);
@@ -146,10 +217,14 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   static bool RunConvergenceGateStateMachineSelfTest(std::ostream& os);
   static bool RunTrustedBwSelectionSelfTest(std::ostream& os);
   static bool RunTrustedBwPacingSelfTest(std::ostream& os);
-  static bool RunFBBRFrequencySearchSelfTests(std::ostream& os);
+  static bool RunWaveformCruiseSelfTest(std::ostream& os);
+  static bool RunFbbrBaselineSelfTest(std::ostream& os);
+  static bool RunHybridBaselineSelfTest(std::ostream& os) {
+    return RunFbbrBaselineSelfTest(os);
+  }
 
   CongestionControlType GetCongestionControlType() const override {
-    return kFBBR;
+    return Bbr2Sender::GetCongestionControlType();
   }
 
   void OnPacketSent(QuicTime sent_time,
@@ -165,14 +240,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
                          const LostPacketVector& lost_packets) override;
 
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
-  bool RequiresFineGrainedPacing() const override {
-    return fbbr_probe_active_ && in_cruise_;
-  }
 
   int32_t GetCurrentBbrModeIndex() const override;
-  FbbrPacketPacingDebugState ExportPacketPacingDebugState(
-      QuicTime sent_time, QuicByteCount bytes_in_flight,
-      uint64_t commanded_pacing_bps) const;
 
   typedef std::function<void(double window_start_s,
                              double window_end_s,
@@ -225,17 +294,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
     QuicTime time;
     QuicByteCount acked_bytes;
     bool has_loss;
-  };
-
-  struct QueueServoFastStats {
-    double q_floor_s = 0.0;
-    double q_median_s = 0.0;
-    double q_peak_s = 0.0;
-    double queue_trend_s_per_s = 0.0;
-    double delivery_median_bps = 0.0;
-    double loss_ratio = 0.0;
-    double ecn_ratio = 0.0;
-    bool samples_sufficient = false;
   };
 
   struct CycleQualityMetrics {
@@ -340,61 +398,182 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
     size_t spectral_invalid_count;
   };
 
+  struct ResampledWaveformSeries {
+    std::vector<double> values;
+    std::vector<bool> valid;
+    double coverage_ratio = 0.0;
+  };
+
+  struct CycleCompletenessResult {
+    bool valid = false;
+    double coverage_ratio = 0.0;
+    double estimated_period = 0.0;
+    double period_error_ratio = std::numeric_limits<double>::infinity();
+    double periodicity_correlation = -1.0;
+    bool has_peak = false;
+    bool has_trough = false;
+    double rising_duration_ratio = 0.0;
+    double falling_duration_ratio = 0.0;
+    double turning_point_score = 0.0;
+    double monotonicity_score = 0.0;
+    double completeness_score = 0.0;
+    std::string invalid_reason = "not_analyzed";
+  };
+
+  struct TemplateFitResult {
+    bool valid = false;
+    double alpha = 0.0;
+    double beta = 0.0;
+    double fitted_response_amplitude = 0.0;
+    double robust_noise_sigma = 0.0;
+    double response_snr = 0.0;
+  };
+
+  struct PlateauDetectionResult {
+    bool valid = false;
+    bool positive_half_clipped = false;
+    bool negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
+    bool top_clip = false;
+    bool bottom_clip = false;
+    bool ambiguous = false;
+    bool drate_positive_half_clipped = false;
+    bool drate_negative_half_clipped = false;
+    bool drate_only_negative_half = false;
+    bool drate_clip_ambiguous = false;
+    bool positive_half_clips_simultaneous = false;
+    bool srtt_middle_sequential_plateau = false;
+    bool drate_middle_sequential_plateau = false;
+    bool drate_middle_any_plateau = false;
+    bool drate_has_waveform = false;
+    size_t plateau_candidate_count = 0;
+    size_t middle_sequential_candidate_count = 0;
+    std::vector<bool> srtt_middle_sequential_mask;
+    std::vector<bool> drate_middle_sequential_mask;
+    double plateau_start = 0.0;
+    double plateau_end = 0.0;
+    double plateau_duration_ratio = 0.0;
+    double plateau_mean = 0.0;
+    double plateau_level_span_ratio = 0.0;
+    double plateau_extreme_distance_ratio = 1.0;
+    double plateau_abs_slope = 0.0;
+    double srtt_positive_half_span_ms = 0.0;
+    double srtt_negative_half_span_ms = 0.0;
+    double drate_positive_half_span_bps = 0.0;
+    double drate_negative_half_span_bps = 0.0;
+    double shoulder_slope_before = 0.0;
+    double shoulder_slope_after = 0.0;
+    double other_shoulder_slope_before = 0.0;
+    double other_shoulder_slope_after = 0.0;
+    bool shoulders_opposite = false;
+    double shoulder_change_before = 0.0;
+    double shoulder_change_after = 0.0;
+    double minimum_shoulder_change = 0.0;
+    double phase_at_plateau_start = 0.0;
+    double phase_at_plateau_end = 0.0;
+    double half_overlap_ratio = 0.0;
+    std::string invalid_reason = "not_analyzed";
+  };
+
+  struct WaveformWindowAnalysis {
+    QuicTime probe_epoch_start = QuicTime::Zero();
+    TimeDelta probe_epoch_rtt = TimeDelta::Zero();
+    QuicTime collection_window_start = QuicTime::Zero();
+    QuicTime collection_window_end = QuicTime::Zero();
+    double collection_window_periods = 0.0;
+    QuicTime window_start = QuicTime::Zero();
+    QuicTime window_end = QuicTime::Zero();
+    double window_periods = 0.0;
+    bool extended_window = false;
+    bool analysis_uses_later_cycle = false;
+    bool prior_cycle_srtt_input_valid = false;
+    bool prior_cycle_srtt_similar = false;
+    bool prior_cycle_drate_input_valid = false;
+    bool prior_cycle_drate_similar = false;
+    WaveformClassification prior_cycle_classification =
+        WaveformClassification::kInconclusive;
+    size_t sender_sample_count = 0;
+    size_t drate_sample_count = 0;
+    size_t srtt_sample_count = 0;
+    size_t srtt_stat_sample_count = 0;
+    bool srtt_stats_valid = false;
+    double srtt_mean_ms = 0.0;
+    double srtt_min_ms = 0.0;
+    double srtt_max_ms = 0.0;
+    bool latest_waveform_overload_srtt_mean_valid = false;
+    double latest_waveform_overload_srtt_mean_ms = 0.0;
+    bool latest_waveform_underload_srtt_mean_valid = false;
+    double latest_waveform_underload_srtt_mean_ms = 0.0;
+    size_t delivery_rate_stat_sample_count = 0;
+    bool delivery_rate_stats_valid = false;
+    double delivery_rate_min_bps = 0.0;
+    double delivery_rate_max_bps = 0.0;
+    double delivery_rate_mean_bps = 0.0;
+    double latest_trusted_bw_bps = 0.0;
+    double smoothed_trusted_bw_bps = 0.0;
+    double coverage_ratio = 0.0;
+    double app_limited_ratio = 0.0;
+    bool sender_waveform_valid = false;
+    double best_lag_s = 0.0;
+    bool drate_input_valid = false;
+    double drate_ncc = 0.0;
+    double drate_slope_direction_agreement = 0.0;
+    CycleCompletenessResult drate_completeness;
+    TemplateFitResult drate_fit;
+    bool drate_similar = false;
+    bool drate_similar_without_middle = false;
+    bool drate_effective_similar = false;
+    bool drate_match = false;
+    bool srtt_input_valid = false;
+    double srtt_direct_ncc = 0.0;
+    double srtt_integral_ncc = 0.0;
+    double srtt_derivative_ncc = 0.0;
+    double srtt_slope_direction_agreement = 0.0;
+    CycleCompletenessResult srtt_completeness;
+    TemplateFitResult srtt_fit;
+    bool srtt_similar_frequency = false;
+    bool srtt_similar = false;
+    bool srtt_similar_without_middle = false;
+    bool srtt_effective_similar = false;
+    bool srtt_cycle_complete = false;
+    bool srtt_positive_half_clipped = false;
+    bool srtt_negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
+    bool srtt_clip_ambiguous = false;
+    bool srtt_match = false;
+    PlateauDetectionResult plateau;
+    CycleCompletenessResult drate_without_middle_completeness;
+    CycleCompletenessResult srtt_without_middle_completeness;
+    double boundary_lift_time_s = 0.0;
+    double boundary_sender_phase = 0.0;
+    double boundary_rate_bps = 0.0;
+    double boundary_delta_bps = 0.0;
+    bool boundary_found = false;
+    bool cycle_detected_but_incomplete = false;
+    double current_drate_response_amplitude_bps = 0.0;
+    const char* delta_source = "NONE";
+    double raw_delta_bw_bps = 0.0;
+    double applied_delta_bw_bps = 0.0;
+    double delta_reference_bps = 0.0;
+    double window_extreme_gap_bps = 0.0;
+    double actuator_step_multiplier = 1.0;
+    double queue_delay_ms = 0.0;
+    double queue_delay_min_rtt_ratio = -1.0;
+    uint32_t overload_confirmation_count = 0;
+    WaveformClassification classification =
+        WaveformClassification::kInconclusive;
+    const char* decision_rule = "R6";
+    std::string invalid_reason = "none";
+  };
+
   void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                              QuicTime now) override;
+  float GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase phase,
+                           float cwnd_gain) const override;
   void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event) override;
-  bool ShouldDelayProbeBwCruiseExit(QuicTime now) const override;
-
-  void FBBRFrequencySearchInitializeCruise(QuicTime now);
-  void FBBRFrequencySearchAccumulateSend(QuicTime sent_time,
-                               QuicByteCount bytes_in_flight,
-                               QuicByteCount bytes,
-                               bool retransmittable);
-  void FBBRFrequencySearchAccumulateAck(
-      const Bbr2CongestionEvent& congestion_event);
-  void FBBRFrequencySearchEnsureBinsThrough(QuicTime now);
-  void FBBRFrequencySearchFinalizeReadyBlocks(QuicTime now, bool include_tail);
-  void FBBRSearchStartBaselineTransition(QuicTime now,
-                                        double next_baseline_bps);
-  double FBBRSearchSearchBaselineBps(QuicTime now) const;
-  void FBBRSearchApplyWindowDecision(
-      QuicTime now,
-      const FbbrOperatingPointBlockResult& result,
-      int64_t first_output_bin);
-  void FBBRSearchUpdateRtpropAnchor(const FbbrOperatingPointBlockResult& result,
-                                   int64_t first_output_bin,
-                                   int64_t output_bin_count);
-  void FBBRSearchEmitControlTrace(
-      const FbbrOperatingPointBlockResult& result,
-      const FBBRWindowControlDecision& decision) const;
-  FbbrPhaseBinSample FBBRFrequencySearchFinalizePhaseBin(
-      const FbbrPhaseBinAccumulator& accumulator) const;
-  int64_t FBBRFrequencySearchBinIndex(QuicTime now) const;
-  double FBBRFrequencySearchCodedSineValue(QuicTime now) const;
-  void FBBRSearchUpdateCarrierSense();
-  void FBBRQueueServoUpdate(const Bbr2CongestionEvent& congestion_event);
-  void FBBREmitQueueServoTrace(
-      QuicTime now,
-      const QueueServoFastStats& stats,
-      const FBBRQueueServoDecision& decision,
-      bool baseline_commit_applied,
-      double baseline_commit_bps) const;
-  uint32_t FBBRSearchElectionBackoff(uint64_t generation) const;
-  void FBBRFrequencySearchFinalizeCruise(QuicTime now);
-  void FBBRFrequencySearchPublishConsensus(const FbbrCruiseConsensusResult& consensus);
-  void FBBRFrequencySearchEmitBinTrace(const FbbrPhaseBinSample& sample,
-                             uint64_t block_id) const;
-  void FBBREmitTriggerCycleTrace(const FBBRTriggerCycleResult& result) const;
-  void FBBRFrequencySearchEmitBlockTrace(
-      const FbbrOperatingPointBlockResult& result) const;
-  void FBBRFrequencySearchEmitShadowWindowTrace(
-      const FbbrOperatingPointBlockResult& result) const;
-  void FBBRFrequencySearchEmitCruiseSummary(
-      QuicTime now,
-      const FbbrCruiseConsensusResult& consensus,
-      const FbbrHistoryUpdateResult& update) const;
-  bool FBBRFrequencySearchHasNativeChangeEvidence(double candidate_bps) const;
 
   Bbr2ProbeBwMode::CyclePhase GetCurrentProbeBwPhase() const;
   bool BaseShouldOscillate() const;
@@ -416,6 +595,27 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
                                              double window_duration_s,
                                              const std::string& window_source);
   void FinalizeCruise(QuicTime now);
+  void ResetWaveformCruiseState(QuicTime now);
+  void RunWaveformCruiseStateMachine(QuicTime now);
+  void ScheduleWaveformCollectionAfterSettle(QuicTime now,
+                                             bool initial_settle);
+  void StartWaveformCollectionAt(QuicTime cycle_start,
+                                 double window_periods,
+                                 bool extended_window);
+  void ApplyWaveformClassification(const WaveformWindowAnalysis& analysis,
+                                   QuicTime now);
+  bool AmplifyWaveformProbeAfterInconclusive(
+      const WaveformWindowAnalysis& analysis,
+      QuicTime now);
+  WaveformWindowAnalysis AnalyzeWaveformWindow(QuicTime window_start,
+                                               QuicTime window_end,
+                                               double window_periods,
+                                               bool extended_window) const;
+  void EmitWaveformSearchTrace(const WaveformWindowAnalysis& analysis,
+                               const std::string& action,
+                               double baseline_before_bps,
+                               double amplitude_before_bps) const;
+  void PublishWaveformTrustedBw();
   TrustedBwSelectionResult RunTrustedBwSelection(QuicTime now);
   void PublishTrustedBwSelection(const TrustedBwSelectionResult& selection);
   void RankCruiseWindows(const CruiseWindowResult* selected_window);
@@ -503,6 +703,156 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
       QuicTime start,
       QuicTime end,
       double sample_step_s) const;
+  ResampledWaveformSeries ResampleRateWaveform(
+      const std::vector<FBBRRateSample>& samples,
+      QuicTime start,
+      QuicTime end,
+      double sample_step_s,
+      double max_interpolation_gap_s) const;
+  ResampledWaveformSeries ResampleRttWaveform(
+      const std::vector<FBBRRttSample>& samples,
+      QuicTime start,
+      QuicTime end,
+      double sample_step_s,
+      double max_interpolation_gap_s) const;
+  static double ComputeNormalizedCrossCorrelation(
+      const std::vector<double>& lhs,
+      const std::vector<double>& rhs,
+      const std::vector<bool>& valid);
+  static double ComputeSlopeDirectionAgreement(
+      const std::vector<double>& lhs,
+      const std::vector<double>& rhs,
+      const std::vector<bool>& valid);
+  static double ComputeLaggedCorrelation(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      size_t lag_samples,
+      size_t* pair_count);
+  static bool HasMacroOpposingShoulders(
+      double slope_before,
+      double slope_after,
+      double shoulder_duration_s,
+      double minimum_abs_slope,
+      double minimum_signal_change);
+  static bool HasMacroSameDirectionShoulders(double slope_before,
+                                             double slope_after);
+  static bool HasDualMacroOpposingShoulders(
+      double first_before,
+      double first_after,
+      double first_minimum_abs_slope,
+      double first_minimum_signal_change,
+      double second_before,
+      double second_after,
+      double second_minimum_abs_slope,
+      double second_minimum_signal_change,
+      double shoulder_duration_s);
+  static std::vector<double> RobustNormalize(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid);
+  static TemplateFitResult EstimateRobustNoise(
+      const std::vector<double>& response,
+      const std::vector<double>& waveform_template,
+      const std::vector<bool>& valid);
+  CycleCompletenessResult AnalyzeCycleCompleteness(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double expected_period_s,
+      double minimum_coverage_ratio = -1.0) const;
+  PlateauDetectionResult DetectDualSignalPlateaus(
+      const std::vector<double>& srtt,
+      const std::vector<double>& srtt_slopes,
+      const std::vector<double>& drate,
+      const std::vector<double>& drate_slopes,
+      const std::vector<double>& sender_residual,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double period_s,
+      double srtt_noise_sigma,
+      double drate_noise_sigma) const;
+  bool LocateBoundaryLiftPoint(
+      const PlateauDetectionResult& plateau,
+      const std::vector<double>& srtt_slopes,
+      const std::vector<bool>& valid,
+      QuicTime receiver_window_start,
+      double sample_step_s,
+      double best_lag_s,
+      double* lift_time_s,
+      double* sender_phase,
+      double* boundary_rate_bps,
+      double* boundary_delta_bps) const;
+  static std::vector<double> DetrendLinear(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid);
+  static std::vector<double> MedianFilter3(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid);
+  static std::vector<double> ComputeLocalLinearSlopes(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double slope_window_s);
+  static std::vector<double> BuildQueueIntegralTemplate(
+      const std::vector<double>& sender_residual,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double period_s);
+  QuicTime AlignToNextTriangleCycle(QuicTime time) const;
+  TimeDelta CurrentSmoothedRtt() const;
+  static const char* WaveformStateName(WaveformCruiseState state);
+  static const char* WaveformClassificationName(
+      WaveformClassification classification);
+  struct DeliveryRateWindowStats {
+    size_t sample_count = 0;
+    bool valid = false;
+    double min_bps = 0.0;
+    double max_bps = 0.0;
+    double mean_bps = 0.0;
+  };
+  static DeliveryRateWindowStats ComputeDeliveryRateWindowStats(
+      const std::vector<FBBRRateSample>& samples);
+  struct SrttWindowStats {
+    size_t sample_count = 0;
+    bool valid = false;
+    double mean_ms = 0.0;
+    double min_ms = 0.0;
+    double max_ms = 0.0;
+  };
+  static SrttWindowStats ComputeSrttWindowStats(
+      const std::vector<FBBRRttSample>& samples);
+  bool UsesAdaptiveLoadJudgment() const;
+  struct WaveformDecisionInputs {
+    bool prechecks_valid = false;
+    bool adaptive_guard_enabled = false;
+    bool srtt_input_valid = false;
+    bool srtt_window_stats_valid = false;
+    double srtt_mean_ms = 0.0;
+    double srtt_min_ms = 0.0;
+    double srtt_max_ms = 0.0;
+    bool latest_waveform_overload_srtt_mean_valid = false;
+    double latest_waveform_overload_srtt_mean_ms = 0.0;
+    bool latest_waveform_underload_srtt_mean_valid = false;
+    double latest_waveform_underload_srtt_mean_ms = 0.0;
+    bool drate_input_valid = false;
+    bool srtt_similar = false;
+    bool srtt_similar_without_middle = false;
+    bool drate_similar = false;
+    bool drate_similar_without_middle = false;
+    bool srtt_positive_half_clipped = false;
+    bool srtt_negative_half_clipped = false;
+    bool srtt_only_negative_half = false;
+    bool srtt_only_positive_half = false;
+    bool drate_positive_half_clipped = false;
+    bool drate_only_negative_half = false;
+    bool positive_half_clips_simultaneous = false;
+    bool drate_has_waveform = false;
+    bool drate_middle_any_plateau = false;
+  };
+  static WaveformClassification ClassifyWaveformState(
+      const WaveformDecisionInputs& inputs,
+      const char** decision_rule = nullptr);
+  static const char* CruiseDetectorModeName(
+      FBBRCruiseDetectorMode mode);
 
   WindowSignalResult AnalyzeRateSeries(
       const std::vector<FBBRRateSample>& samples,
@@ -539,10 +889,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   static double WidthScore(double width_ratio, double r0, double sigma);
   static const char* LabelToString(int label);
 
+  const bool fbbr_window_baseline_enabled_;
+  const bool adaptive_guard_enabled_;
   double configured_modulation_freq_hz_;
-  const ProtoClock* const clock_;
   FBBRAmplitudeMode amplitude_mode_;
   uint64_t fixed_amplitude_bps_;
+  uint64_t minimum_pacing_rate_bps_;
   bool drain_completed_;
   bool in_cruise_;
   double cruise_modulation_freq_hz_;
@@ -553,6 +905,109 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   bool use_delivery_rate_latest_for_signal_history_;
   bool min_rtt_warning_logged_;
   int64_t cruise_id_;
+  FBBRCruiseDetectorMode cruise_detector_mode_;
+  WaveformCruiseState waveform_cruise_state_;
+  QuicBandwidth initial_cruise_baseline_bw_;
+  QuicBandwidth current_injection_baseline_bw_;
+  uint64_t current_probe_amplitude_bps_;
+  uint64_t waveform_initial_probe_amplitude_bps_;
+  mutable double current_probe_bw_phase_gain_;
+  QuicTime probe_epoch_start_time_;
+  TimeDelta probe_epoch_rtt_;
+  QuicTime waveform_settle_start_;
+  QuicTime waveform_settle_end_;
+  QuicTime waveform_window_start_;
+  QuicTime waveform_window_end_;
+  double waveform_window_periods_;
+  bool waveform_window_extended_;
+  bool underload_located_;
+  bool trusted_baseline_locked_;
+  bool has_last_similar_drate_amplitude_;
+  double last_similar_drate_amplitude_bps_;
+  bool waveform_delta_reference_valid_;
+  double waveform_delta_reference_bps_;
+  uint32_t consecutive_overload_count_;
+  bool latest_waveform_overload_srtt_mean_valid_;
+  double latest_waveform_overload_srtt_mean_ms_;
+  bool latest_waveform_underload_srtt_mean_valid_;
+  double latest_waveform_underload_srtt_mean_ms_;
+  bool adaptive_baseline_low_valid_;
+  QuicBandwidth adaptive_baseline_low_;
+  bool adaptive_baseline_up_valid_;
+  QuicBandwidth adaptive_baseline_up_;
+  bool adaptive_previous_cruise_max_bw_valid_;
+  QuicBandwidth adaptive_previous_cruise_max_bw_;
+  QuicBandwidth adaptive_cruise_start_max_bw_;
+  bool adaptive_bounds_inherited_this_cruise_;
+  const char* waveform_last_delta_source_;
+  double waveform_last_raw_delta_bw_bps_;
+  double waveform_last_applied_delta_bw_bps_;
+  uint32_t baseline_adjustment_count_;
+  uint32_t inconclusive_extension_count_;
+  uint32_t waveform_inconclusive_amplification_count_;
+  uint32_t floor_clip_confirmation_count_;
+  int waveform_last_clip_direction_;
+  uint32_t waveform_decision_count_;
+  uint32_t waveform_amplitude_reduction_count_;
+  uint32_t trusted_bw_candidate_update_count_;
+  QuicBandwidth trusted_bw_candidate_;
+  const char* trusted_bw_candidate_source_;
+  QuicBandwidth fbbr_latest_trusted_bw_;
+  QuicBandwidth fbbr_smoothed_trusted_bw_;
+  bool fbbr_smoothed_trusted_bw_valid_;
+  std::string waveform_last_action_;
+  std::string waveform_last_invalid_reason_;
+
+  double waveform_initial_settle_rtt_mult_;
+  double waveform_post_adjust_settle_rtt_mult_;
+  bool waveform_negative_half_first_;
+  double waveform_initial_window_periods_;
+  double waveform_extended_window_periods_;
+  double waveform_max_window_periods_;
+  double waveform_period_tolerance_ratio_;
+  double waveform_min_periodicity_correlation_;
+  double waveform_min_cycle_coverage_ratio_;
+  double waveform_masked_min_cycle_coverage_ratio_;
+  double waveform_min_completeness_score_;
+  double waveform_min_rising_duration_ratio_;
+  double waveform_min_falling_duration_ratio_;
+  double waveform_min_shape_ncc_;
+  double waveform_min_slope_direction_agreement_;
+  double waveform_min_drate_ncc_;
+  double waveform_min_srtt_integral_ncc_;
+  double waveform_min_srtt_derivative_ncc_;
+  double waveform_min_response_snr_;
+  double waveform_local_slope_window_period_ratio_;
+  double waveform_min_local_slope_window_ms_;
+  double waveform_clip_min_duration_ratio_;
+  double waveform_clip_min_half_overlap_ratio_;
+  double waveform_clip_max_slope_ratio_;
+  double waveform_delta_drate_amplitude_ratio_;
+  double waveform_delta_fallback_baseline_ratio_;
+  double waveform_adaptive_delta_fallback_baseline_ratio_;
+  double waveform_delta_ewma_alpha_;
+  double waveform_delta_min_baseline_ratio_;
+  double waveform_delta_max_baseline_ratio_;
+  double waveform_overload_max_delta_multiplier_;
+  double waveform_underload_max_delta_multiplier_;
+  uint32_t waveform_overload_confirmations_;
+  bool waveform_queue_guard_enabled_;
+  double waveform_queue_low_min_rtt_ratio_;
+  double waveform_queue_target_min_rtt_ratio_;
+  double waveform_queue_high_min_rtt_ratio_;
+  double waveform_plateau_min_duration_ratio_;
+  double waveform_plateau_max_slope_ratio_;
+  double waveform_plateau_max_level_span_ratio_;
+  double waveform_plateau_extreme_distance_ratio_;
+  double waveform_baseline_step_ratio_;
+  double waveform_amplitude_floor_ratio_;
+  uint32_t waveform_clip_floor_confirmations_;
+  uint32_t waveform_max_baseline_adjustments_;
+  uint32_t waveform_max_inconclusive_extensions_;
+  double waveform_inconclusive_signal_amplification_factor_;
+  double waveform_inconclusive_signal_amplification_max_ratio_;
+  double waveform_max_app_limited_sample_ratio_;
+  double waveform_max_interpolation_gap_period_ratio_;
 
   double min_cruise_cycles_per_window_;
   double cruise_window_step_ratio_;
@@ -560,6 +1015,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   double min_full_load_quality_for_reliable_window_;
   double default_ecn_congestion_ratio_;
   uint64_t fair_share_bandwidth_bps_;
+  uint64_t cruise_baseline_cap_bps_;
 
   std::deque<FBBRRateSample> sender_rate_history_;
   std::deque<FBBRRateSample> delivery_rate_history_;
@@ -587,7 +1043,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   double trusted_bw_conf_;
   const char* trusted_bw_source_;
   uint64_t trusted_bw_cruise_id_;
-  uint32_t trusted_bw_age_cruises_ = 0;
   mutable bool trusted_bw_fresh_;
   mutable bool trusted_bw_application_valid_;
   mutable bool trusted_bw_ready_for_post_cruise_;
@@ -642,86 +1097,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender final : public Bbr2Sender {
   FBBRGateTraceMode gate_trace_mode_;
   TimeDelta gate_trace_sample_interval_;
   mutable QuicTime last_pacing_gate_trace_time_;
-
-  FBBRFrequencySearchConfig fbbr_frequency_search_config_;
-  FbbrProbeSignature fbbr_probe_signature_;
-  bool fbbr_probe_active_ = false;
-  bool fbbr_block_invalidated_ = false;
-  std::string fbbr_probe_disabled_reason_ = "not_initialized";
-  TimeDelta fbbr_rtprop_frozen_ = TimeDelta::Zero();
-  TimeDelta fbbr_period_ = TimeDelta::Zero();
-  std::vector<FbbrPhaseBinAccumulator> fbbr_phase_bin_accumulators_;
-  std::vector<FbbrPhaseBinSample> fbbr_phase_bins_;
-  std::vector<FbbrOperatingPointBlockResult> fbbr_block_results_;
-  uint64_t fbbr_next_block_id_ = 0;
-  uint64_t fbbr_next_shadow_window_id_ = 0;
-  double fbbr_previous_block_delay_s_ =
-      std::numeric_limits<double>::quiet_NaN();
-  uint64_t fbbr_last_ecn_bytes_in_round_ = 0;
-  bool fbbr_last_sample_app_limited_ = false;
-  double fbbr_native_bw_at_cruise_start_bps_ = 0.0;
-  bool fbbr_history_valid_ = false;
-  double fbbr_history_bandwidth_bps_ = 0.0;
-  double fbbr_trusted_bw_raw_candidate_bps_ = 0.0;
-  double fbbr_trusted_bw_smoothed_bps_ = 0.0;
-  double fbbr_trusted_bw_robust_cv_ = 0.0;
-  double fbbr_trusted_bw_relative_ci_width_ = 0.0;
-  uint32_t fbbr_trusted_bw_cycle_count_ = 0;
-  uint64_t fbbr_trusted_bw_block_id_ = 0;
-  std::string fbbr_history_update_action_ = "NONE";
-
-  mutable FBBRSearchControllerState fbbr_search_state_;
-  std::vector<FBBRWindowControlDecision> fbbr_control_decisions_;
-  int64_t fbbr_next_analysis_output_bin_ = -1;
-  bool fbbr_baseline_transition_pending_ = false;
-  QuicTime fbbr_baseline_transition_start_ = QuicTime::Zero();
-  QuicTime fbbr_baseline_transition_end_ = QuicTime::Zero();
-  double fbbr_baseline_transition_from_bps_ = 0.0;
-  double fbbr_baseline_transition_to_bps_ = 0.0;
-  TimeDelta fbbr_opi_rtprop_anchor_ = TimeDelta::Zero();
-  double fbbr_opi_rtprop_confidence_ = 0.0;
-  std::string fbbr_opi_rtprop_source_ = "NONE";
-  bool fbbr_trusted_published_in_cruise_ = false;
-  bool fbbr_period_reselected_ = false;
-  uint32_t fbbr_period_scan_count_ = 0;
-  EventWindowState fbbr_event_window_state_ = EventWindowState::kIdleListen;
-  int64_t fbbr_next_trigger_cycle_ = -1;
-  int64_t fbbr_trigger_cycle_id_ = -1;
-  int64_t fbbr_capture_start_bin_ = -1;
-  int64_t fbbr_next_tracking_start_bin_ = -1;
-  int64_t fbbr_last_control_window_start_bin_ = -1;
-  int64_t fbbr_last_trusted_window_start_bin_ = -1;
-  uint64_t fbbr_next_event_window_id_ = 0;
-  uint32_t fbbr_bad_cycle_streak_ = 0;
-  uint32_t fbbr_no_trigger_streak_ = 0;
-  uint32_t fbbr_settling_cycles_remaining_ = 0;
-  uint32_t fbbr_pulser_lease_age_cycles_ = 0;
-  int fbbr_previous_sequential_direction_sign_ = 0;
-  FbbrOperatingPointClassification fbbr_previous_sequential_classification_ =
-      FbbrOperatingPointClassification::kInvalid;
-  double fbbr_previous_sequential_score_ = 0.0;
-  bool fbbr_have_previous_sequential_result_ = false;
-  FBBRTriggerCycleResult fbbr_latest_trigger_cycle_result_;
-  std::string fbbr_active_trigger_source_ = "NONE";
-  FBBRQueueServoStateData fbbr_queue_servo_state_;
-  FBBRQueueServoDecision fbbr_latest_queue_servo_decision_;
-  std::vector<double> fbbr_queue_servo_q_samples_s_;
-  std::vector<double> fbbr_queue_servo_delivery_samples_bps_;
-  std::deque<double> fbbr_queue_servo_q_median_history_s_;
-  uint64_t fbbr_queue_servo_acked_bytes_ = 0;
-  uint64_t fbbr_queue_servo_lost_bytes_ = 0;
-  uint64_t fbbr_queue_servo_ecn_bytes_ = 0;
-  bool fbbr_queue_servo_transition_pending_ = false;
-  double fbbr_latest_sustainable_direction_ = 0.0;
-  uint64_t fbbr_queue_servo_updates_ = 0;
-  uint64_t fbbr_queue_servo_drain_rtts_ = 0;
-  uint64_t fbbr_queue_servo_recovery_rtts_ = 0;
-  uint64_t fbbr_queue_servo_baseline_commits_ = 0;
-  uint64_t fbbr_dual_trigger_attempts_ = 0;
-  uint64_t fbbr_delivery_triggers_ = 0;
-  uint64_t fbbr_queue_triggers_ = 0;
-  uint64_t fbbr_both_triggers_ = 0;
-  uint64_t fbbr_hard_safety_events_ = 0;
 
   static constexpr size_t kMaxHistorySamples = 20000;
   static constexpr uint32_t kStableRounds = 3;

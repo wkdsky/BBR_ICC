@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULT_ROOT="${RESULT_ROOT:-${ROOT_DIR}/results/freqccv4_formal_matrix}"
+RESULT_ROOT="${RESULT_ROOT:-${ROOT_DIR}/results/fbbr_formal_matrix}"
 MATRIX_DIR="${RESULT_ROOT}/finite_flow_fct"
 REPORT_DIR="${RESULT_ROOT}/reports"
 FORMAL_MODE="${FORMAL_MODE:-smoke}"
@@ -43,26 +43,26 @@ fi
 
 GROUP_IDS=(
   "group_A_bbrv2"
-  "group_B_freqccv4_open"
-  "group_C_freqccv4_gated"
+  "group_B_fbbr_open"
+  "group_C_fbbr_gated"
 )
 
 declare -A GROUP_ALGO=(
-  ["group_A_bbrv2"]="bbrv2"
-  ["group_B_freqccv4_open"]="freqccv4"
-  ["group_C_freqccv4_gated"]="freqccv4"
+  ["group_A_bbrv2"]="BBRv2"
+  ["group_B_fbbr_open"]="FBBR"
+  ["group_C_fbbr_gated"]="FBBR"
 )
 
 declare -A GROUP_TRACE=(
   ["group_A_bbrv2"]="false"
-  ["group_B_freqccv4_open"]="false"
-  ["group_C_freqccv4_gated"]="true"
+  ["group_B_fbbr_open"]="false"
+  ["group_C_fbbr_gated"]="true"
 )
 
 declare -A GROUP_CONTROL=(
   ["group_A_bbrv2"]="false"
-  ["group_B_freqccv4_open"]="false"
-  ["group_C_freqccv4_gated"]="true"
+  ["group_B_fbbr_open"]="false"
+  ["group_C_fbbr_gated"]="true"
 )
 
 
@@ -84,7 +84,7 @@ cd "${ROOT_DIR}"
   echo "gateTraceModeDefault=${GATE_TRACE_MODE_DEFAULT}"
   echo "gateTraceModeE=${GATE_TRACE_MODE_E}"
   echo "gateTraceSampleIntervalUs=${GATE_TRACE_SAMPLE_INTERVAL_US}"
-  echo "flowStartGapMs=not_available_in_freqccv4_4flow_cc; staggered_start uses built-in 20/40/60ms offsets"
+  echo "flowStartGapMs=not_available_in_fbbr_4flow_cc; staggered_start uses built-in 20/40/60ms offsets"
 } > "${MATRIX_DIR}/scenario_config.txt"
 
 echo "[build] ./waf build"
@@ -97,7 +97,7 @@ else
 fi
 
 echo "[self-test] gateStateMachineSelfTest"
-if ./waf --run "scratch/freqccv4_4flow --gateStateMachineSelfTest=true" \
+if ./waf --run "scratch/fbbr_4flow --gateStateMachineSelfTest=true" \
     > "${REPORT_DIR}/gate_state_machine_self_test_fct.log" 2>&1; then
   echo "PASS" > "${REPORT_DIR}/gate_state_machine_self_test_fct_status.txt"
 else
@@ -123,11 +123,11 @@ for size_idx in "${!SIZE_LABEL_LIST[@]}"; do
 
         mkdir -p "${out_dir}"
         gate_mode="${GATE_TRACE_MODE_DEFAULT}"
-        if [[ "${group}" == "group_C_freqccv4_gated" ]]; then
+        if [[ "${group}" == "group_C_fbbr_gated" ]]; then
           gate_mode="${GATE_TRACE_MODE_E}"
         fi
 
-        run_arg="scratch/freqccv4_4flow --algo=${GROUP_ALGO[$group]} --sim_time=${SIM_TIME} --flowSizeBytes=${flow_size_bytes} --processIntervalUs=${PROCESS_INTERVAL_US} --flowStartMode=${start_mode} --runId=${seed} --seed=${seed} --outputDir=${out_dir}/ --enableConvergenceGateTrace=${GROUP_TRACE[$group]} --enableConvergenceGateControl=${GROUP_CONTROL[$group]} --dynamic_delay_enable=${DYNAMIC_DELAY_ENABLE} --enableHeavyTrace=${ENABLE_HEAVY_TRACE} --gateTraceMode=${gate_mode} --gateTraceSampleIntervalUs=${GATE_TRACE_SAMPLE_INTERVAL_US} --useEngineTimer=${USE_ENGINE_TIMER}"
+        run_arg="scratch/fbbr_4flow --algo=${GROUP_ALGO[$group]} --sim_time=${SIM_TIME} --flowSizeBytes=${flow_size_bytes} --processIntervalUs=${PROCESS_INTERVAL_US} --flowStartMode=${start_mode} --runId=${seed} --seed=${seed} --outputDir=${out_dir}/ --enableConvergenceGateTrace=${GROUP_TRACE[$group]} --enableConvergenceGateControl=${GROUP_CONTROL[$group]} --dynamic_delay_enable=${DYNAMIC_DELAY_ENABLE} --enableHeavyTrace=${ENABLE_HEAVY_TRACE} --gateTraceMode=${gate_mode} --gateTraceSampleIntervalUs=${GATE_TRACE_SAMPLE_INTERVAL_US} --useEngineTimer=${USE_ENGINE_TIMER}"
         printf '%s\n' "./waf --run \"${run_arg}\"" > "${out_dir}/command.txt"
         echo "[run] finite_flow_fct/${size_dir}/${start_mode}/${group}/seed_${seed}"
         rm -f "${done_marker}"
@@ -139,4 +139,4 @@ for size_idx in "${!SIZE_LABEL_LIST[@]}"; do
 done
 
 echo "[analyze] ${RESULT_ROOT}"
-python3 "${ROOT_DIR}/analyze_freqccv4_formal_matrix.py" --results-dir "${RESULT_ROOT}"
+python3 "${ROOT_DIR}/analyze_fbbr_formal_matrix.py" --results-dir "${RESULT_ROOT}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot and validate a two-state FreqCCv4 delivery-rate experiment."""
+"""Plot and validate a two-state FBBR delivery-rate experiment."""
 
 import argparse
 import csv
@@ -175,7 +175,7 @@ def shade_states(ax, underload: Tuple[float, float], loaded: Tuple[float, float]
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--fbbr-run-dir", dest="run_dir", required=True)
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--flow-id", type=int, default=1)
     parser.add_argument("--underload-window", type=float, nargs=2, required=True)
@@ -284,7 +284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     schedules = meta.get("per_flow_rate_schedules", [])
     target_schedule = schedules[args.flow_id - 1] if len(schedules) >= args.flow_id else []
-    cruise_baseline_caps = meta.get("freqccv4_cruise_baseline_caps_bps", [])
+    cruise_baseline_caps = meta.get("fbbr_cruise_baseline_caps_bps", [])
     target_cruise_baseline_cap_bps = (
         float(cruise_baseline_caps[args.flow_id - 1])
         if len(cruise_baseline_caps) >= args.flow_id
@@ -408,7 +408,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         fontsize=9,
         fontweight="bold",
     )
-    fig.suptitle("FreqCCv4 delivery response across two offered-load states")
+    fig.suptitle("FBBR delivery response across two offered-load states")
     fig.tight_layout()
     fig.savefig(
         output_dir / "delivery_two_state_overview.png",
@@ -460,7 +460,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     plt.close(fig)
 
     report_lines = [
-        "# FreqCCv4 two-state validation",
+        "# FBBR two-state validation",
         "",
         f"- Target flow: {args.flow_id}",
         f"- Bottleneck: {service_rate_bps / 1e6:.3f} Mbps",

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -19,21 +20,276 @@ namespace {
 constexpr const char* kTrustedBwSourceNone = "NONE";
 constexpr const char* kTrustedBwSourceNormal = "NORMAL_SPECTRAL";
 constexpr const char* kTrustedBwSourceMerged = "MERGED_SPECTRAL";
-constexpr const char* kTrustedBwSourceFBBRFrequencySearch =
-    "F_BBR_LOW_QUEUE_PLATEAU";
+constexpr const char* kTrustedBwSourceTimeWaveformBaseline =
+    "TIME_WAVEFORM_SRTT_SEARCH";
+constexpr const char* kTrustedBwSourceAdaptiveWindowMean =
+    "ADAPTIVE_WINDOW_MEAN";
+constexpr const char* kTrustedBwSourceFbbrWindowMean =
+    "FBBR_WINDOW_MEAN";
+constexpr const char* kWaveformDeltaSourceNone = "NONE";
+constexpr const char* kWaveformDeltaSourceRecentDrate =
+    "RECENT_DRATE_AMPLITUDE";
+constexpr const char* kWaveformDeltaSourceBaselineFallback =
+    "BASELINE_QUARTER_FALLBACK";
+constexpr const char* kWaveformDeltaSourceAdaptiveBracketBound =
+    "ADAPTIVE_WINDOW_EXTREME_GAP_BOUND";
+constexpr const char* kWaveformDeltaSourceAdaptiveWindowMinimum =
+    "ADAPTIVE_WINDOW_MINIMUM";
+constexpr const char* kWaveformDeltaSourceAdaptiveWindowMaximum =
+    "ADAPTIVE_WINDOW_MAXIMUM";
+constexpr const char* kWaveformDeltaSourceFbbrWindowMinimum =
+    "FBBR_WINDOW_MINIMUM";
+constexpr const char* kWaveformDeltaSourceFbbrWindowMaximum =
+    "FBBR_WINDOW_MAXIMUM";
+constexpr const char* kWaveformDeltaSourceFbbrTrustedBw =
+    "FBBR_TRUSTED_BW";
+constexpr double kAdaptiveMaxBwInheritanceTolerance = 0.25;
+constexpr uint64_t kDefaultMinimumPacingRateBps = 1000000;
+constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
+constexpr float kFBBRCruiseCwndGain = 1.25f;
 constexpr const char* kLimitingSpectralSignalDrate = "DRATE";
 constexpr const char* kLimitingSpectralSignalSrtt = "SRTT";
 constexpr const char* kLimitingSpectralSignalEqual = "EQUAL";
 
-uint64_t FbbrStableHash(uint64_t value) {
-  value += 0x9e3779b97f4a7c15ULL;
-  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
-  return value ^ (value >> 31);
-}
-
 double ClampValue(double value, double low, double high) {
   return std::max(low, std::min(high, value));
+}
+
+bool ShouldInheritAdaptiveBounds(double current_max_bw_bps,
+                                 double previous_max_bw_bps) {
+  if (!std::isfinite(current_max_bw_bps) || current_max_bw_bps <= 0.0 ||
+      !std::isfinite(previous_max_bw_bps) || previous_max_bw_bps <= 0.0) {
+    return false;
+  }
+  return std::abs(current_max_bw_bps - previous_max_bw_bps) /
+             previous_max_bw_bps <
+         kAdaptiveMaxBwInheritanceTolerance;
+}
+
+bool IsWaveformDecisionRule(const char* decision_rule) {
+  if (decision_rule == nullptr || decision_rule[0] != 'R' ||
+      decision_rule[1] == '\0') {
+    return false;
+  }
+  return decision_rule[1] >= '1' && decision_rule[1] <= '5' &&
+         (decision_rule[2] == '\0' || decision_rule[2] == '.');
+}
+
+double ComputeAdaptiveNextBaseline(
+    WaveformClassification classification,
+    bool baseline_low_valid,
+    double baseline_low_bps,
+    bool baseline_up_valid,
+    double baseline_up_bps,
+    double current_baseline_bps,
+    double window_min_bps,
+    double window_max_bps,
+    double minimum_rate_bps) {
+  double next_baseline_bps =
+      classification == WaveformClassification::kOverload
+          ? window_min_bps
+          : window_max_bps;
+  if (baseline_low_valid && baseline_up_valid &&
+      std::isfinite(baseline_low_bps) && std::isfinite(baseline_up_bps) &&
+      baseline_up_bps > baseline_low_bps) {
+    const double baseline_gap = baseline_up_bps - baseline_low_bps;
+    const double quarter_target_bps = baseline_low_bps + baseline_gap / 4.0;
+    const double half_target_bps = baseline_low_bps + baseline_gap / 2.0;
+    if (classification == WaveformClassification::kOverload) {
+      if (std::isfinite(current_baseline_bps) &&
+          current_baseline_bps > quarter_target_bps) {
+        next_baseline_bps = quarter_target_bps;
+      }
+    } else if (classification == WaveformClassification::kUnderload) {
+      if (std::isfinite(current_baseline_bps) &&
+          current_baseline_bps < half_target_bps) {
+        next_baseline_bps = half_target_bps;
+      }
+    }
+  }
+  if (!std::isfinite(next_baseline_bps)) {
+    next_baseline_bps = minimum_rate_bps;
+  }
+  return next_baseline_bps;
+}
+
+bool ShouldObserveAfterInconclusive(
+    bool adaptive_guard_enabled,
+    uint32_t extension_count,
+    uint32_t max_extensions,
+    double window_periods,
+    double max_window_periods) {
+  if (adaptive_guard_enabled) {
+    return true;
+  }
+  return extension_count < max_extensions &&
+         window_periods < max_window_periods;
+}
+
+double InconclusiveWindowStartAdvancePeriods(
+    bool adaptive_guard_enabled,
+    bool extended_window,
+    double window_periods) {
+  return adaptive_guard_enabled && extended_window &&
+                 window_periods >= 3.0
+             ? 1.0
+             : 0.0;
+}
+
+uint64_t AmplifiedWaveformProbeAmplitude(
+    uint64_t current_amplitude_bps,
+    uint64_t initial_amplitude_bps,
+    double amplification_factor,
+    double amplification_max_ratio) {
+  if (current_amplitude_bps == 0 || initial_amplitude_bps == 0 ||
+      !std::isfinite(amplification_factor) ||
+      !std::isfinite(amplification_max_ratio) ||
+      amplification_factor <= 1.0 || amplification_max_ratio <= 1.0) {
+    return current_amplitude_bps;
+  }
+  const double current = static_cast<double>(current_amplitude_bps);
+  const double initial = static_cast<double>(initial_amplitude_bps);
+  const double max_int64 =
+      static_cast<double>(std::numeric_limits<int64_t>::max());
+  const double cap =
+      std::min(max_int64, initial * amplification_max_ratio);
+  if (!std::isfinite(current) || !std::isfinite(initial) ||
+      !std::isfinite(cap) || cap <= current) {
+    return current_amplitude_bps;
+  }
+  const double amplified =
+      std::min(cap, std::ceil(current * amplification_factor));
+  if (!std::isfinite(amplified) || amplified <= current) {
+    return current_amplitude_bps;
+  }
+  return static_cast<uint64_t>(amplified);
+}
+
+bool HasOnlyHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    bool negative_half_active,
+    double* positive_span,
+    double* negative_span) {
+  if (response.size() != sender_residual.size() ||
+      response.size() != valid.size()) {
+    return false;
+  }
+  std::vector<double> positive_values;
+  std::vector<double> negative_values;
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (!valid[i] || !std::isfinite(response[i]) ||
+        !std::isfinite(sender_residual[i])) {
+      continue;
+    }
+    (sender_residual[i] >= 0.0 ? positive_values : negative_values)
+        .push_back(response[i]);
+  }
+  if (positive_values.size() < 4 || negative_values.size() < 4) {
+    return false;
+  }
+  auto robust_span = [](std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    const size_t low_index = static_cast<size_t>(
+        std::floor(0.10 * static_cast<double>(values.size() - 1)));
+    const size_t high_index = static_cast<size_t>(
+        std::ceil(0.90 * static_cast<double>(values.size() - 1)));
+    return std::max(0.0, values[high_index] - values[low_index]);
+  };
+  const double positive = robust_span(positive_values);
+  const double negative = robust_span(negative_values);
+  if (positive_span != nullptr) {
+    *positive_span = positive;
+  }
+  if (negative_span != nullptr) {
+    *negative_span = negative;
+  }
+  const double finite_noise =
+      std::isfinite(noise_sigma) ? std::max(0.0, noise_sigma) : 0.0;
+  const double active_span = negative_half_active ? negative : positive;
+  const double suppressed_span = negative_half_active ? positive : negative;
+  const bool active =
+      active_span > std::max(4.0 * finite_noise, 1e-9);
+  const bool opposite_suppressed =
+      suppressed_span <= std::max(2.0 * finite_noise, 0.25 * active_span);
+  return active && opposite_suppressed;
+}
+
+bool HasOnlyNegativeHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    double* positive_span,
+    double* negative_span) {
+  return HasOnlyHalfWaveform(
+      response, sender_residual, valid, noise_sigma, true,
+      positive_span, negative_span);
+}
+
+bool HasOnlyPositiveHalfWaveform(
+    const std::vector<double>& response,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double noise_sigma,
+    double* positive_span,
+    double* negative_span) {
+  return HasOnlyHalfWaveform(
+      response, sender_residual, valid, noise_sigma, false,
+      positive_span, negative_span);
+}
+
+int64_t AddPacingOffsetWithFloor(int64_t baseline_bps,
+                                 int64_t offset_bps,
+                                 uint64_t minimum_rate_bps) {
+  int64_t combined_bps = 0;
+  if (offset_bps > 0 &&
+      baseline_bps > std::numeric_limits<int64_t>::max() - offset_bps) {
+    combined_bps = std::numeric_limits<int64_t>::max();
+  } else if (offset_bps < 0 &&
+             baseline_bps < std::numeric_limits<int64_t>::min() - offset_bps) {
+    combined_bps = std::numeric_limits<int64_t>::min();
+  } else {
+    combined_bps = baseline_bps + offset_bps;
+  }
+  const int64_t floor_bps = static_cast<int64_t>(std::min<uint64_t>(
+      minimum_rate_bps,
+      static_cast<uint64_t>(std::numeric_limits<int64_t>::max())));
+  return std::max(floor_bps, combined_bps);
+}
+
+bool IsObviousClipPlateau(double duration_ratio,
+                          double minimum_duration_ratio,
+                          double half_overlap_ratio,
+                          double minimum_half_overlap_ratio,
+                          double absolute_slope,
+                          double maximum_absolute_slope,
+                          double level_span_ratio,
+                          double maximum_level_span_ratio,
+                          double extreme_distance_ratio,
+                          double maximum_extreme_distance_ratio,
+                          bool has_opposing_shoulders) {
+  return std::isfinite(duration_ratio) &&
+      std::isfinite(half_overlap_ratio) &&
+      std::isfinite(absolute_slope) &&
+      std::isfinite(maximum_absolute_slope) &&
+      std::isfinite(level_span_ratio) &&
+      std::isfinite(extreme_distance_ratio) &&
+      duration_ratio >= minimum_duration_ratio &&
+      half_overlap_ratio >= minimum_half_overlap_ratio &&
+      absolute_slope <= maximum_absolute_slope &&
+      level_span_ratio <= maximum_level_span_ratio &&
+      extreme_distance_ratio <= maximum_extreme_distance_ratio &&
+      has_opposing_shoulders;
+}
+
+float FBBRCwndGainForPhase(Bbr2ProbeBwMode::CyclePhase phase,
+                               float native_cwnd_gain) {
+  return phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE
+             ? kFBBRCruiseCwndGain
+             : native_cwnd_gain;
 }
 
 double MedianOfSorted(const std::vector<double>& sorted) {
@@ -53,17 +309,6 @@ double Median(std::vector<double> values) {
   }
   std::sort(values.begin(), values.end());
   return MedianOfSorted(values);
-}
-
-double Percentile(std::vector<double> values, double fraction) {
-  if (values.empty()) return 0.0;
-  std::sort(values.begin(), values.end());
-  const double position = ClampValue(fraction, 0.0, 1.0) *
-                          static_cast<double>(values.size() - 1);
-  const size_t low = static_cast<size_t>(std::floor(position));
-  const size_t high = static_cast<size_t>(std::ceil(position));
-  if (low == high) return values[low];
-  return values[low] + (values[high] - values[low]) * (position - low);
 }
 
 std::string AppendReason(const std::string& current, const char* reason) {
@@ -145,7 +390,6 @@ constexpr int FBBRSender::kBandShapeBins;
 constexpr int FBBRSender::kFftZeroPadMultiplier;
 
 FBBRSender::FBBRSender(
-    const ProtoClock* clock,
     QuicTime now,
     const RttStats* rtt_stats,
     const QuicUnackedPacketMap* unacked_packets,
@@ -153,7 +397,10 @@ FBBRSender::FBBRSender(
     QuicPacketCount max_cwnd_in_packets,
     Random* random,
     QuicConnectionStats* stats,
-    bool enable_ecn)
+    bool enable_ecn,
+    bool fbbr_window_baseline,
+    bool adaptive_guard,
+    CongestionControlType congestion_control_type)
     : Bbr2Sender(now,
                  rtt_stats,
                  unacked_packets,
@@ -163,12 +410,14 @@ FBBRSender::FBBRSender(
                  stats,
                  enable_ecn,
                  nullptr,
-                 kFBBR,
+                 congestion_control_type,
                  true),
-	      configured_modulation_freq_hz_(5.0),
-      clock_(clock),
+      fbbr_window_baseline_enabled_(fbbr_window_baseline),
+      adaptive_guard_enabled_(adaptive_guard),
+      configured_modulation_freq_hz_(5.0),
       amplitude_mode_(FBBRAmplitudeMode::kFixed),
       fixed_amplitude_bps_(0),
+      minimum_pacing_rate_bps_(kDefaultMinimumPacingRateBps),
       drain_completed_(false),
       in_cruise_(false),
 	      cruise_modulation_freq_hz_(5.0),
@@ -179,12 +428,115 @@ FBBRSender::FBBRSender(
       use_delivery_rate_latest_for_signal_history_(false),
       min_rtt_warning_logged_(false),
       cruise_id_(0),
+      cruise_detector_mode_(FBBRCruiseDetectorMode::kTimeWaveform),
+      waveform_cruise_state_(WaveformCruiseState::kDisabled),
+      initial_cruise_baseline_bw_(QuicBandwidth::Zero()),
+      current_injection_baseline_bw_(QuicBandwidth::Zero()),
+      current_probe_amplitude_bps_(0),
+      waveform_initial_probe_amplitude_bps_(0),
+      current_probe_bw_phase_gain_(1.0),
+      probe_epoch_start_time_(QuicTime::Zero()),
+      probe_epoch_rtt_(TimeDelta::Zero()),
+      waveform_settle_start_(QuicTime::Zero()),
+      waveform_settle_end_(QuicTime::Zero()),
+      waveform_window_start_(QuicTime::Zero()),
+      waveform_window_end_(QuicTime::Zero()),
+      waveform_window_periods_(0.0),
+      waveform_window_extended_(false),
+      underload_located_(false),
+      trusted_baseline_locked_(false),
+      has_last_similar_drate_amplitude_(false),
+      last_similar_drate_amplitude_bps_(0.0),
+      waveform_delta_reference_valid_(false),
+      waveform_delta_reference_bps_(0.0),
+      consecutive_overload_count_(0),
+      latest_waveform_overload_srtt_mean_valid_(false),
+      latest_waveform_overload_srtt_mean_ms_(0.0),
+      latest_waveform_underload_srtt_mean_valid_(false),
+      latest_waveform_underload_srtt_mean_ms_(0.0),
+      adaptive_baseline_low_valid_(false),
+      adaptive_baseline_low_(QuicBandwidth::Zero()),
+      adaptive_baseline_up_valid_(false),
+      adaptive_baseline_up_(QuicBandwidth::Zero()),
+      adaptive_previous_cruise_max_bw_valid_(false),
+      adaptive_previous_cruise_max_bw_(QuicBandwidth::Zero()),
+      adaptive_cruise_start_max_bw_(QuicBandwidth::Zero()),
+      adaptive_bounds_inherited_this_cruise_(false),
+      waveform_last_delta_source_(kWaveformDeltaSourceNone),
+      waveform_last_raw_delta_bw_bps_(0.0),
+      waveform_last_applied_delta_bw_bps_(0.0),
+      baseline_adjustment_count_(0),
+      inconclusive_extension_count_(0),
+      waveform_inconclusive_amplification_count_(0),
+      floor_clip_confirmation_count_(0),
+      waveform_last_clip_direction_(0),
+      waveform_decision_count_(0),
+      waveform_amplitude_reduction_count_(0),
+      trusted_bw_candidate_update_count_(0),
+      trusted_bw_candidate_(QuicBandwidth::Zero()),
+      trusted_bw_candidate_source_(kTrustedBwSourceNone),
+      fbbr_latest_trusted_bw_(QuicBandwidth::Zero()),
+      fbbr_smoothed_trusted_bw_(QuicBandwidth::Zero()),
+      fbbr_smoothed_trusted_bw_valid_(false),
+      waveform_last_action_("none"),
+      waveform_last_invalid_reason_("none"),
+      waveform_initial_settle_rtt_mult_(1.0),
+      waveform_post_adjust_settle_rtt_mult_(1.0),
+      waveform_negative_half_first_(true),
+      waveform_initial_window_periods_(2.0),
+      waveform_extended_window_periods_(3.0),
+      waveform_max_window_periods_(3.0),
+      waveform_period_tolerance_ratio_(0.15),
+      waveform_min_periodicity_correlation_(0.50),
+      waveform_min_cycle_coverage_ratio_(0.85),
+      waveform_masked_min_cycle_coverage_ratio_(0.50),
+      waveform_min_completeness_score_(0.60),
+      waveform_min_rising_duration_ratio_(0.15),
+      waveform_min_falling_duration_ratio_(0.15),
+      waveform_min_shape_ncc_(0.35),
+      waveform_min_slope_direction_agreement_(0.65),
+      waveform_min_drate_ncc_(0.50),
+      waveform_min_srtt_integral_ncc_(0.45),
+      waveform_min_srtt_derivative_ncc_(0.45),
+      waveform_min_response_snr_(2.0),
+      waveform_local_slope_window_period_ratio_(0.05),
+      waveform_min_local_slope_window_ms_(5.0),
+      waveform_clip_min_duration_ratio_(0.15),
+      waveform_clip_min_half_overlap_ratio_(0.75),
+      waveform_clip_max_slope_ratio_(0.10),
+      waveform_delta_drate_amplitude_ratio_(0.50),
+      waveform_delta_fallback_baseline_ratio_(0.25),
+      waveform_adaptive_delta_fallback_baseline_ratio_(0.10),
+      waveform_delta_ewma_alpha_(0.125),
+      waveform_delta_min_baseline_ratio_(0.02),
+      waveform_delta_max_baseline_ratio_(0.15),
+      waveform_overload_max_delta_multiplier_(6.0),
+      waveform_underload_max_delta_multiplier_(2.0),
+      waveform_overload_confirmations_(2),
+      waveform_queue_guard_enabled_(true),
+      waveform_queue_low_min_rtt_ratio_(0.10),
+      waveform_queue_target_min_rtt_ratio_(0.25),
+      waveform_queue_high_min_rtt_ratio_(0.75),
+      waveform_plateau_min_duration_ratio_(0.10),
+      waveform_plateau_max_slope_ratio_(0.20),
+      waveform_plateau_max_level_span_ratio_(0.15),
+      waveform_plateau_extreme_distance_ratio_(0.15),
+      waveform_baseline_step_ratio_(0.25),
+      waveform_amplitude_floor_ratio_(0.125),
+      waveform_clip_floor_confirmations_(2),
+      waveform_max_baseline_adjustments_(8),
+      waveform_max_inconclusive_extensions_(1),
+      waveform_inconclusive_signal_amplification_factor_(1.25),
+      waveform_inconclusive_signal_amplification_max_ratio_(2.0),
+      waveform_max_app_limited_sample_ratio_(0.25),
+      waveform_max_interpolation_gap_period_ratio_(0.10),
       min_cruise_cycles_per_window_(4.0),
       cruise_window_step_ratio_(0.25),
       freq_tolerance_ratio_(0.20),
       min_full_load_quality_for_reliable_window_(0.50),
       default_ecn_congestion_ratio_(0.02),
 	      fair_share_bandwidth_bps_(0),
+	      cruise_baseline_cap_bps_(0),
 	      cruise_freq_tool_active_(false),
 	      bbr_stable_(true),
 	      stable_cnt_(kStableRounds),
@@ -246,7 +598,7 @@ FBBRSender::FBBRSender(
 	      energy_slope_(20.0),
 	      width_r0_drate_(1.5),
 	      width_r0_srtt_(2.0),
-      width_sigma_(0.8),
+	      width_sigma_(0.8),
 	      merged_rescue_enabled_(true),
 	      merged_window_multiplier_(2.0),
 	      max_merged_passes_(1),
@@ -260,8 +612,6 @@ FBBRSender::FBBRSender(
                 << "; DefaultEcnCongestionRatio="
                 << default_ecn_congestion_ratio_;
 }
-
-FBBRSender::~FBBRSender() = default;
 
 void FBBRSender::SetOscillationFrequency(double freq_hz) {
   configured_modulation_freq_hz_ = freq_hz;
@@ -291,6 +641,10 @@ void FBBRSender::SetFairShareBandwidthBps(uint64_t fair_share_bps) {
   fair_share_bandwidth_bps_ = fair_share_bps;
 }
 
+void FBBRSender::SetCruiseBaselineCapBps(uint64_t cap_bps) {
+  cruise_baseline_cap_bps_ = cap_bps;
+}
+
 void FBBRSender::SetConvergenceGateTraceEnabled(bool enabled) {
   enable_convergence_gate_trace_ = enabled;
 }
@@ -300,7 +654,31 @@ void FBBRSender::SetConvergenceGateControlEnabled(bool enabled) {
 }
 
 void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
-  fbbr_frequency_search_config_ = config.frequency_search;
+  auto finite_or = [](double value,
+                      double fallback,
+                      const char* name) {
+    if (!std::isfinite(value)) {
+      std::cerr << "[FBBR config warning] invalid " << name << "="
+                << value << "; using " << fallback << std::endl;
+      return fallback;
+    }
+    return value;
+  };
+  auto range_or = [&finite_or](double value,
+                               double low,
+                               double high,
+                               double fallback,
+                               const char* name) {
+    value = finite_or(value, fallback, name);
+    if (value < low || value > high) {
+      std::cerr << "[FBBR config warning] out-of-range " << name << "="
+                << value << " (expected " << low << ".." << high
+                << "); using " << fallback << std::endl;
+      return fallback;
+    }
+    return value;
+  };
+
   stable_single_round_exit_threshold_ =
       std::max(0.0, config.stability_single_round_exit_threshold);
   stable_consecutive_exit_threshold_ =
@@ -311,6 +689,14 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   }
   stable_full_pipe_growth_threshold_ =
       std::max(1.0, config.stability_full_pipe_growth_threshold);
+
+  const double maximum_rate_mbps =
+      static_cast<double>(std::numeric_limits<int64_t>::max() / 1000000);
+  const double minimum_rate_mbps = range_or(
+      config.pacing_minimum_rate_mbps, 0.000001, maximum_rate_mbps, 1.0,
+      "pacing.minimum_rate_mbps");
+  minimum_pacing_rate_bps_ = std::max<uint64_t>(
+      1, static_cast<uint64_t>(std::llround(minimum_rate_mbps * 1000000.0)));
 
   drate_spectral_integrity_threshold_ =
       Clamp01(config.spectral_drate_integrity_threshold);
@@ -343,8 +729,271 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
       Clamp01(config.merged_rescue_confidence_discount);
 
   trusted_bw_clear_on_cruise_start_ = config.trusted_bw_clear_on_cruise_start;
-  fbbr_history_valid_ = false;
-  fbbr_history_bandwidth_bps_ = 0.0;
+
+  if (config.cruise_detector_mode == "legacy_spectral") {
+    cruise_detector_mode_ = FBBRCruiseDetectorMode::kLegacySpectral;
+  } else if (config.cruise_detector_mode == "time_waveform") {
+    cruise_detector_mode_ = FBBRCruiseDetectorMode::kTimeWaveform;
+  } else {
+    std::cerr << "[FBBR config warning] invalid cruise_detector.mode='"
+              << config.cruise_detector_mode
+              << "'; using time_waveform" << std::endl;
+    cruise_detector_mode_ = FBBRCruiseDetectorMode::kTimeWaveform;
+  }
+  const bool waveform_recv_mode_valid =
+      config.waveform_recv_signal_mode == "delivery_rate_latest" ||
+      config.waveform_recv_signal_mode == "bandwidth_latest";
+  if (!waveform_recv_mode_valid) {
+    std::cerr
+        << "[FBBR config warning] invalid waveform.recv_signal_mode='"
+        << config.waveform_recv_signal_mode
+        << "'; using delivery_rate_latest" << std::endl;
+  }
+  if (cruise_detector_mode_ ==
+      FBBRCruiseDetectorMode::kLegacySpectral) {
+    // This selector only controls the time-domain detector history.
+    use_delivery_rate_latest_for_signal_history_ = false;
+  } else if (!waveform_recv_mode_valid ||
+             config.waveform_recv_signal_mode == "delivery_rate_latest") {
+    use_delivery_rate_latest_for_signal_history_ = true;
+  } else {
+    use_delivery_rate_latest_for_signal_history_ = false;
+  }
+  waveform_initial_settle_rtt_mult_ = range_or(
+      config.waveform_initial_settle_rtt_mult, 0.0, 20.0, 1.0,
+      "waveform.initial_settle_rtt_mult");
+  waveform_post_adjust_settle_rtt_mult_ = range_or(
+      config.waveform_post_adjust_settle_rtt_mult, 0.0, 20.0, 1.0,
+      "waveform.post_adjust_settle_rtt_mult");
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform &&
+      (std::abs(waveform_initial_settle_rtt_mult_ - 1.0) > 1e-12 ||
+       std::abs(waveform_post_adjust_settle_rtt_mult_ - 1.0) > 1e-12)) {
+    std::cerr << "[FBBR config warning] time_waveform locks initial and "
+                 "post-adjust response delay to exactly 1 RTT"
+              << std::endl;
+    waveform_initial_settle_rtt_mult_ = 1.0;
+    waveform_post_adjust_settle_rtt_mult_ = 1.0;
+  }
+  waveform_negative_half_first_ = true;
+  if (!config.waveform_negative_half_first &&
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    std::cerr << "[FBBR config warning] waveform.negative_half_first=false "
+                 "is inactive; time_waveform always starts with the negative "
+                 "half-cycle"
+              << std::endl;
+  }
+  waveform_initial_window_periods_ = range_or(
+      config.waveform_initial_window_periods, 1.5, 2.0, 2.0,
+      "waveform.initial_window_periods");
+  const double extended_window_default = std::min(
+      4.0, waveform_initial_window_periods_ + 1.0);
+  waveform_extended_window_periods_ = range_or(
+      config.waveform_extended_window_periods,
+      extended_window_default, 4.0, extended_window_default,
+      "waveform.extended_window_periods");
+  const double max_window_default = waveform_extended_window_periods_;
+  waveform_max_window_periods_ = range_or(
+      config.waveform_max_window_periods,
+      waveform_extended_window_periods_, 4.0, max_window_default,
+      "waveform.max_window_periods");
+  waveform_period_tolerance_ratio_ = range_or(
+      config.waveform_period_tolerance_ratio, 0.01, 1.0, 0.15,
+      "waveform.period_tolerance_ratio");
+  waveform_min_periodicity_correlation_ = range_or(
+      config.waveform_min_periodicity_correlation, -1.0, 1.0, 0.50,
+      "waveform.min_periodicity_correlation");
+  waveform_min_cycle_coverage_ratio_ = range_or(
+      config.waveform_min_cycle_coverage_ratio, 0.0, 1.0, 0.85,
+      "waveform.min_cycle_coverage_ratio");
+  waveform_masked_min_cycle_coverage_ratio_ = range_or(
+      config.waveform_masked_min_cycle_coverage_ratio, 0.35,
+      waveform_min_cycle_coverage_ratio_, 0.50,
+      "waveform.masked_min_cycle_coverage_ratio");
+  waveform_min_completeness_score_ = range_or(
+      config.waveform_min_completeness_score, 0.0, 1.0, 0.60,
+      "waveform.min_completeness_score");
+  waveform_min_rising_duration_ratio_ = range_or(
+      config.waveform_min_rising_duration_ratio, 0.0, 0.5, 0.15,
+      "waveform.min_rising_duration_ratio");
+  waveform_min_falling_duration_ratio_ = range_or(
+      config.waveform_min_falling_duration_ratio, 0.0, 0.5, 0.15,
+      "waveform.min_falling_duration_ratio");
+  waveform_min_shape_ncc_ = range_or(
+      config.waveform_min_shape_ncc, -1.0, 1.0, 0.35,
+      "waveform.min_shape_ncc");
+  waveform_min_slope_direction_agreement_ = range_or(
+      config.waveform_min_slope_direction_agreement, 0.0, 1.0, 0.65,
+      "waveform.min_slope_direction_agreement");
+  waveform_min_drate_ncc_ = range_or(
+      config.waveform_min_drate_ncc, -1.0, 1.0, 0.50,
+      "waveform.min_drate_ncc");
+  waveform_min_srtt_integral_ncc_ = range_or(
+      config.waveform_min_srtt_integral_ncc, -1.0, 1.0, 0.45,
+      "waveform.min_srtt_integral_ncc");
+  waveform_min_srtt_derivative_ncc_ = range_or(
+      config.waveform_min_srtt_derivative_ncc, -1.0, 1.0, 0.45,
+      "waveform.min_srtt_derivative_ncc");
+  waveform_min_response_snr_ = range_or(
+      config.waveform_min_response_snr, 0.0, 1000.0, 2.0,
+      "waveform.min_response_snr");
+  waveform_local_slope_window_period_ratio_ = range_or(
+      config.waveform_local_slope_window_period_ratio, 0.001, 0.5, 0.05,
+      "waveform.local_slope_window_period_ratio");
+  waveform_min_local_slope_window_ms_ = range_or(
+      config.waveform_min_local_slope_window_ms, 0.1, 10000.0, 5.0,
+      "waveform.min_local_slope_window_ms");
+  waveform_clip_min_duration_ratio_ = range_or(
+      config.waveform_clip_min_duration_ratio, 0.01, 0.5, 0.15,
+      "waveform.clip_min_duration_ratio");
+  waveform_clip_min_half_overlap_ratio_ = range_or(
+      config.waveform_clip_min_half_overlap_ratio, 0.5, 1.0, 0.75,
+      "waveform.clip_min_half_overlap_ratio");
+  waveform_clip_max_slope_ratio_ = range_or(
+      config.waveform_clip_max_slope_ratio, 0.0, 1.0, 0.10,
+      "waveform.clip_max_slope_ratio");
+  waveform_delta_drate_amplitude_ratio_ = range_or(
+      config.waveform_delta_drate_amplitude_ratio, 0.0, 10.0, 0.50,
+      "waveform.delta_drate_amplitude_ratio");
+  waveform_delta_fallback_baseline_ratio_ = range_or(
+      config.waveform_delta_fallback_baseline_ratio, 0.0, 0.95, 0.25,
+      "waveform.delta_fallback_baseline_ratio");
+  waveform_adaptive_delta_fallback_baseline_ratio_ = range_or(
+      config.waveform_adaptive_delta_fallback_baseline_ratio,
+      0.0, 0.95, 0.10,
+      "waveform.adaptive_delta_fallback_baseline_ratio");
+  waveform_delta_ewma_alpha_ = range_or(
+      config.waveform_delta_ewma_alpha, 0.0, 1.0, 0.125,
+      "waveform.delta_ewma_alpha");
+  waveform_delta_min_baseline_ratio_ = range_or(
+      config.waveform_delta_min_baseline_ratio, 0.0, 0.50, 0.02,
+      "waveform.delta_min_baseline_ratio");
+  waveform_delta_max_baseline_ratio_ = range_or(
+      config.waveform_delta_max_baseline_ratio, 0.0, 0.95, 0.15,
+      "waveform.delta_max_baseline_ratio");
+  if (waveform_delta_max_baseline_ratio_ <
+      waveform_delta_min_baseline_ratio_) {
+    std::cerr << "[FBBR config warning] waveform.delta_max_baseline_ratio "
+                 "must be >= waveform.delta_min_baseline_ratio; using 0.15"
+              << std::endl;
+    waveform_delta_max_baseline_ratio_ = 0.15;
+  }
+  waveform_overload_max_delta_multiplier_ = range_or(
+      config.waveform_overload_max_delta_multiplier, 1.0, 10.0, 6.0,
+      "waveform.overload_max_delta_multiplier");
+  waveform_underload_max_delta_multiplier_ = range_or(
+      config.waveform_underload_max_delta_multiplier, 1.0, 10.0, 2.0,
+      "waveform.underload_max_delta_multiplier");
+  waveform_overload_confirmations_ =
+      std::max<uint32_t>(1, config.waveform_overload_confirmations);
+  waveform_queue_guard_enabled_ = config.waveform_queue_guard_enabled;
+  waveform_queue_low_min_rtt_ratio_ = range_or(
+      config.waveform_queue_low_min_rtt_ratio, 0.0, 10.0, 0.10,
+      "waveform.queue_low_min_rtt_ratio");
+  waveform_queue_target_min_rtt_ratio_ = range_or(
+      config.waveform_queue_target_min_rtt_ratio, 0.0, 10.0, 0.25,
+      "waveform.queue_target_min_rtt_ratio");
+  waveform_queue_high_min_rtt_ratio_ = range_or(
+      config.waveform_queue_high_min_rtt_ratio, 0.0, 10.0, 0.75,
+      "waveform.queue_high_min_rtt_ratio");
+  if (waveform_queue_target_min_rtt_ratio_ <
+          waveform_queue_low_min_rtt_ratio_ ||
+      waveform_queue_high_min_rtt_ratio_ <
+          waveform_queue_target_min_rtt_ratio_) {
+    std::cerr << "[FBBR config warning] waveform queue ratios must satisfy "
+                 "low <= target <= high; using 0.10/0.25/0.75"
+              << std::endl;
+    waveform_queue_low_min_rtt_ratio_ = 0.10;
+    waveform_queue_target_min_rtt_ratio_ = 0.25;
+    waveform_queue_high_min_rtt_ratio_ = 0.75;
+  }
+
+  waveform_plateau_min_duration_ratio_ = range_or(
+      config.waveform_plateau_min_duration_ratio, 0.01, 0.5, 0.10,
+      "waveform.plateau_min_duration_ratio");
+  waveform_plateau_max_slope_ratio_ = range_or(
+      config.waveform_plateau_max_slope_ratio, 0.0, 1.0, 0.20,
+      "waveform.plateau_max_slope_ratio");
+  waveform_plateau_max_level_span_ratio_ = range_or(
+      config.waveform_plateau_max_level_span_ratio, 0.0, 1.0, 0.15,
+      "waveform.plateau_max_level_span_ratio");
+  waveform_plateau_extreme_distance_ratio_ = range_or(
+      config.waveform_plateau_extreme_distance_ratio, 0.0, 1.0, 0.15,
+      "waveform.plateau_extreme_distance_ratio");
+  waveform_baseline_step_ratio_ = range_or(
+      config.waveform_baseline_step_ratio, 0.0, 0.95, 0.25,
+      "waveform.baseline_step_ratio");
+  waveform_amplitude_floor_ratio_ = range_or(
+      config.waveform_amplitude_floor_ratio, 0.0, 1.0, 0.125,
+      "waveform.amplitude_floor_ratio");
+  if (config.waveform_clip_floor_confirmations == 0) {
+    std::cerr << "[FBBR config warning] "
+                 "waveform.clip_floor_confirmations must be >= 1; using 2"
+              << std::endl;
+    waveform_clip_floor_confirmations_ = 2;
+  } else {
+    waveform_clip_floor_confirmations_ =
+        config.waveform_clip_floor_confirmations;
+  }
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    std::cerr << "[FBBR config] waveform.min_completeness_score, "
+                 "waveform.min_rising_duration_ratio, "
+                 "waveform.min_falling_duration_ratio, "
+                 "waveform.min_shape_ncc, "
+                 "waveform.min_slope_direction_agreement, "
+                 "waveform.min_response_snr, "
+                 "waveform.amplitude_floor_ratio, "
+                 "waveform.clip_floor_confirmations, "
+                 "waveform.baseline_step_ratio are deprecated/inactive in "
+                 "time_waveform mode"
+              << std::endl;
+  }
+  if (config.waveform_max_baseline_adjustments == 0) {
+    std::cerr << "[FBBR config warning] "
+                 "waveform.max_baseline_adjustments must be >= 1; using 8"
+              << std::endl;
+    waveform_max_baseline_adjustments_ = 8;
+  } else {
+    waveform_max_baseline_adjustments_ =
+        config.waveform_max_baseline_adjustments;
+  }
+  waveform_max_inconclusive_extensions_ = 1;
+  if (!UsesAdaptiveLoadJudgment() &&
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform &&
+      config.waveform_max_inconclusive_extensions != 1) {
+    std::cerr << "[FBBR config warning] non-Adaptive time_waveform "
+                 "observes exactly one extra period after an inconclusive "
+                 "decision"
+              << std::endl;
+  }
+  waveform_inconclusive_signal_amplification_factor_ = range_or(
+      config.waveform_inconclusive_signal_amplification_factor,
+      1.0, 4.0, 1.25,
+      "waveform.inconclusive_signal_amplification_factor");
+  waveform_inconclusive_signal_amplification_max_ratio_ = range_or(
+      config.waveform_inconclusive_signal_amplification_max_ratio,
+      1.0, 16.0, 2.0,
+      "waveform.inconclusive_signal_amplification_max_ratio");
+  waveform_max_app_limited_sample_ratio_ = range_or(
+      config.waveform_max_app_limited_sample_ratio, 0.0, 1.0, 0.25,
+      "waveform.max_app_limited_sample_ratio");
+  waveform_max_interpolation_gap_period_ratio_ = range_or(
+      config.waveform_max_interpolation_gap_period_ratio, 0.0, 1.0, 0.10,
+      "waveform.max_interpolation_gap_period_ratio");
+  fbbr_latest_trusted_bw_ = QuicBandwidth::Zero();
+  fbbr_smoothed_trusted_bw_ = QuicBandwidth::Zero();
+  fbbr_smoothed_trusted_bw_valid_ = false;
+  latest_waveform_overload_srtt_mean_valid_ = false;
+  latest_waveform_overload_srtt_mean_ms_ = 0.0;
+  latest_waveform_underload_srtt_mean_valid_ = false;
+  latest_waveform_underload_srtt_mean_ms_ = 0.0;
+  adaptive_baseline_low_valid_ = false;
+  adaptive_baseline_low_ = QuicBandwidth::Zero();
+  adaptive_baseline_up_valid_ = false;
+  adaptive_baseline_up_ = QuicBandwidth::Zero();
+  adaptive_previous_cruise_max_bw_valid_ = false;
+  adaptive_previous_cruise_max_bw_ = QuicBandwidth::Zero();
+  adaptive_cruise_start_max_bw_ = QuicBandwidth::Zero();
+  adaptive_bounds_inherited_this_cruise_ = false;
   ClearTrustedBw("configuration_changed");
 }
 
@@ -695,41 +1344,498 @@ bool FBBRSender::RunTrustedBwPacingSelfTest(std::ostream& os) {
   check_phase("REFILL", 100.0, 0.0, false, 1.0, 100.0);
   check_phase("UP", 100.0, 0.0, false, 1.25, 125.0);
   check_phase("DOWN", 100.0, 0.0, false, 0.9, 90.0);
-  const double cruise_native_pacing = 100.0;
-  const double amplitude_ratio = 0.05;
-  const double coded_sine = 0.8;
-  const double cruise_pacing =
-      cruise_native_pacing * (1.0 + amplitude_ratio * coded_sine);
-  require(std::abs(cruise_pacing - 104.0) < 1e-12,
-          "F-BBR CRUISE must multiply native pacing by probe waveform factor");
+  const double cruise_injection_baseline = 90.0;
+  const double cruise_triangle = 7.0;
+  require(std::abs(cruise_injection_baseline + cruise_triangle - 97.0) <
+              1e-12,
+          "time-waveform CRUISE must center modulation on its injection baseline");
+  const int64_t minimum_rate_bps = 1000000;
+  const int64_t low_triangle_rate_bps = AddPacingOffsetWithFloor(
+      4000000, -8000000, minimum_rate_bps);
+  require(low_triangle_rate_bps == minimum_rate_bps,
+          "negative modulation must be clamped to the configured pacing floor");
+  require(AddPacingOffsetWithFloor(4000000, 2000000, minimum_rate_bps) ==
+              6000000,
+          "pacing floor must not change an in-range modulation result");
   os << "\nRESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
 
-bool FBBRSender::RunFBBRFrequencySearchSelfTests(std::ostream& os) {
-  bool pass = FBBRFrequencySearch::RunSelfTests(os);
-  uint64_t previous_winner = 0;
-  bool election_pass = true;
-  for (uint32_t epoch_slot = 0; epoch_slot < 4; ++epoch_slot) {
-    uint64_t winner = 0;
-    uint32_t pulser_count = 0;
-    for (uint64_t flow = 1; flow <= 4; ++flow) {
-      if ((flow - 1) % 4 == epoch_slot) {
-        winner = flow;
-        ++pulser_count;
-      }
+bool FBBRSender::RunWaveformCruiseSelfTest(std::ostream& os) {
+  bool pass = true;
+  auto require = [&pass, &os](bool condition, const std::string& message) {
+    os << (condition ? "PASS: " : "FAIL: ") << message << "\n";
+    pass = pass && condition;
+  };
+  auto triangle = [](double phase) {
+    phase -= std::floor(phase);
+    if (phase < 0.25) {
+      return -4.0 * phase;
     }
-    election_pass = election_pass && pulser_count == 1 && winner != 0 &&
-                    winner != previous_winner;
-    previous_winner = winner;
+    if (phase < 0.75) {
+      return 4.0 * phase - 2.0;
+    }
+    return 4.0 - 4.0 * phase;
+  };
+  const size_t count = 201;
+  std::vector<double> sender(count, 0.0);
+  std::vector<bool> valid(count, true);
+  for (size_t i = 0; i < count; ++i) {
+    sender[i] = triangle(static_cast<double>(i) / (count - 1));
   }
-  if (!election_pass) {
-    os << "FAIL: four-flow time-slot pulser election rotation\n";
-  } else {
-    os << "PASS: four-flow time-slot pulser election rotation\n";
+
+  os << "# FBBR deterministic time-waveform CRUISE self-test\n";
+  const double native_max_bw = 20.0;
+  const double amplitude = 4.0;
+  const double initial_baseline = native_max_bw;
+  require(std::abs(initial_baseline - native_max_bw) < 1e-12 &&
+              std::abs(initial_baseline + amplitude * triangle(0.0) -
+                       native_max_bw) < 1e-12 &&
+              std::abs(triangle(0.25) + 1.0) < 1e-12 &&
+              triangle(0.125) < 0.0 && triangle(0.625) > 0.0,
+          "test 1: baseline starts at Native MaxBw and the negative half-cycle is first");
+
+  const double epoch_start_s = 10.0;
+  const double epoch_srtt_s = 0.08;
+  const double period_s = 0.20;
+  require(std::abs((epoch_start_s + epoch_srtt_s) - 10.08) < 1e-12 &&
+              std::abs((epoch_start_s + epoch_srtt_s + period_s) - 10.28) <
+                  1e-12,
+          "test 2: initial response collection starts one RTT after the epoch");
+  const double adjusted_collection_start_s = epoch_start_s + epoch_srtt_s;
+  const double adjusted_collection_end_s =
+      adjusted_collection_start_s +
+      kWaveformPostAdjustmentCollectionPeriods * period_s;
+  require(std::abs(adjusted_collection_start_s - 10.08) < 1e-12 &&
+              std::abs(adjusted_collection_end_s - 10.48) < 1e-12,
+          "test 2b: post-adjustment epochs analyze the complete 2T window");
+  require(std::abs(FBBRCwndGainForPhase(
+                       Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE, 2.0f) -
+                   1.25f) < 1e-6 &&
+              std::abs(FBBRCwndGainForPhase(
+                           Bbr2ProbeBwMode::CyclePhase::PROBE_UP, 2.0f) -
+                       2.0f) < 1e-6,
+          "test 2c: FBBR uses cwnd gain 1.25 only in CRUISE");
+
+  const size_t periodic_count = 401;
+  const size_t expected_period_samples = 200;
+  std::vector<double> sine_response(periodic_count, 0.0);
+  std::vector<double> triangle_response(periodic_count, 0.0);
+  std::vector<double> wrong_frequency_response(periodic_count, 0.0);
+  std::vector<bool> periodic_valid(periodic_count, true);
+  for (size_t i = 0; i < periodic_count; ++i) {
+    const double expected_phase =
+        static_cast<double>(i) / expected_period_samples;
+    sine_response[i] = std::sin(2.0 * M_PI * expected_phase);
+    triangle_response[i] = triangle(expected_phase);
+    wrong_frequency_response[i] =
+        std::sin(2.0 * M_PI * static_cast<double>(i) / 280.0);
   }
-  pass = pass && election_pass;
-  os << "OVERALL RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
+  size_t sine_pairs = 0;
+  size_t triangle_pairs = 0;
+  const double sine_periodicity = ComputeLaggedCorrelation(
+      sine_response, periodic_valid, expected_period_samples, &sine_pairs);
+  const double triangle_periodicity = ComputeLaggedCorrelation(
+      triangle_response, periodic_valid, expected_period_samples,
+      &triangle_pairs);
+  const double wrong_at_expected = ComputeLaggedCorrelation(
+      wrong_frequency_response, periodic_valid, expected_period_samples,
+      nullptr);
+  const double wrong_at_own_period = ComputeLaggedCorrelation(
+      wrong_frequency_response, periodic_valid, 280, nullptr);
+  require(sine_pairs >= expected_period_samples &&
+              triangle_pairs >= expected_period_samples &&
+              sine_periodicity > 0.99 && triangle_periodicity > 0.99,
+          "test 2d: same-frequency sine and triangle responses both pass periodicity");
+  require(wrong_at_expected < 0.50 && wrong_at_own_period > 0.99 &&
+              std::abs(280.0 / expected_period_samples - 1.0) > 0.25,
+          "test 2e: a strong response at the wrong period fails the frequency tolerance");
+
+  auto check_decision = [&require](WaveformDecisionInputs inputs,
+                                   WaveformClassification expected,
+                                   const char* expected_rule,
+                                   const std::string& message) {
+    const char* rule = "unset";
+    const WaveformClassification actual =
+        ClassifyWaveformState(inputs, &rule);
+    require(actual == expected && std::string(rule) == expected_rule,
+            message);
+  };
+  WaveformDecisionInputs decision;
+  decision.prechecks_valid = true;
+  decision.adaptive_guard_enabled = true;
+  decision.srtt_input_valid = true;
+  decision.drate_input_valid = true;
+  decision.srtt_similar = true;
+  decision.drate_similar = true;
+  check_decision(decision, WaveformClassification::kFullLoad, "R1",
+                 "test 3: similar unclipped SRTT is FULL_LOAD");
+  decision.srtt_positive_half_clipped = true;
+  decision.drate_positive_half_clipped = true;
+  decision.positive_half_clips_simultaneous = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.1",
+                 "test 4: simultaneous positive SRTT/Drate clips are OVERLOAD");
+  decision.drate_positive_half_clipped = false;
+  decision.positive_half_clips_simultaneous = false;
+  decision.drate_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.1",
+                 "test 4b: similar Drate with only its negative half remaining is OVERLOAD");
+  decision.drate_only_negative_half = false;
+  check_decision(decision, WaveformClassification::kFullLoad, "R2.2",
+                 "test 5: positive SRTT clip with similar Drate is FULL_LOAD");
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kFullLoad, "R2.2",
+                 "test 5b: SRTT with only its negative half follows R2");
+  decision.drate_only_negative_half = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.1",
+                 "test 5c: matching Drate only-negative-half evidence makes R2.1 OVERLOAD");
+  decision.drate_only_negative_half = false;
+  decision.srtt_only_negative_half = false;
+  decision.srtt_positive_half_clipped = true;
+  decision.drate_similar = false;
+  check_decision(decision, WaveformClassification::kOverload, "R2.3",
+                 "test 6: positive SRTT clip with dissimilar Drate is OVERLOAD");
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_negative_half_clipped = true;
+  decision.drate_similar = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 7: negative SRTT clip with similar Drate is UNDERLOAD");
+  decision.srtt_negative_half_clipped = false;
+  decision.srtt_only_positive_half = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 7b: SRTT with only its positive half follows R3");
+  decision.srtt_only_positive_half = false;
+  decision.srtt_negative_half_clipped = true;
+  decision.drate_similar = false;
+  decision.drate_has_waveform = true;
+  decision.drate_middle_any_plateau = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R3.2",
+                 "test 8: negative SRTT clip plus a middle Drate plateau is UNDERLOAD");
+  decision.drate_has_waveform = false;
+  decision.drate_middle_any_plateau = false;
+  check_decision(decision, WaveformClassification::kInconclusive, "R3.3",
+                 "test 8b: negative SRTT clip without Drate evidence is INCONCLUSIVE");
+  decision.srtt_positive_half_clipped = true;
+  decision.drate_has_waveform = true;
+  decision.drate_middle_any_plateau = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R4.2",
+                 "test 8c: both SRTT halves clipped plus a middle Drate plateau is UNDERLOAD");
+  decision.drate_has_waveform = false;
+  decision.drate_middle_any_plateau = false;
+  check_decision(decision, WaveformClassification::kInconclusive, "R4.3",
+                 "test 8d: both SRTT halves clipped without Drate evidence is INCONCLUSIVE");
+  decision.srtt_negative_half_clipped = false;
+  decision.drate_input_valid = false;
+  check_decision(decision, WaveformClassification::kInconclusive, "R2.4",
+                 "test 8e: positive SRTT clip with invalid Drate is INCONCLUSIVE");
+  decision.drate_input_valid = true;
+
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kOverload,
+                       true, 80.0, true, 100.0,
+                       100.0, 40.0, 60.0, 1.0) -
+                   85.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kOverload,
+                           true, 80.0, true, 100.0,
+                           84.0, 40.0, 60.0, 1.0) -
+                       40.0) < 1e-12,
+          "test 9: overload uses low+quarter-gap only above that target");
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kUnderload,
+                       true, 80.0, true, 100.0,
+                       80.0, 60.0, 120.0, 1.0) -
+                   90.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kUnderload,
+                           true, 80.0, true, 100.0,
+                           95.0, 60.0, 120.0, 1.0) -
+                       120.0) < 1e-12,
+          "test 10: underload uses low+half-gap only below that target");
+  require(std::abs(ComputeAdaptiveNextBaseline(
+                       WaveformClassification::kOverload,
+                       false, 0.0, true, 100.0,
+                       100.0, 72.0, 90.0, 1.0) -
+                   72.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kUnderload,
+                           true, 80.0, false, 0.0,
+                           80.0, 70.0, 118.0, 1.0) -
+                       118.0) < 1e-12 &&
+              std::abs(ComputeAdaptiveNextBaseline(
+                           WaveformClassification::kOverload,
+                           false, 0.0, true, 100.0,
+                           100.0, 0.5, 90.0, 1.0) -
+                       0.5) < 1e-12,
+          "test 11: missing opposite bounds use exact window min/max Drate");
+  require(ShouldInheritAdaptiveBounds(124.9, 100.0) &&
+              !ShouldInheritAdaptiveBounds(125.0, 100.0) &&
+              ShouldInheritAdaptiveBounds(80.0, 100.0),
+          "test 12: inheritance uses a strict 25 percent MaxBw threshold");
+  require(IsWaveformDecisionRule("R1") &&
+              IsWaveformDecisionRule("R5.2") &&
+              !IsWaveformDecisionRule("R6.1"),
+          "test 13: only R1-R5 decisions update Adaptive bounds");
+  require(ShouldObserveAfterInconclusive(
+              true, 100, 1, 3.0, 3.0) &&
+              InconclusiveWindowStartAdvancePeriods(
+                  true, false, 2.0) == 0.0 &&
+              InconclusiveWindowStartAdvancePeriods(
+                  true, true, 3.0) == 1.0 &&
+              !ShouldObserveAfterInconclusive(
+                  false, 1, 1, 3.0, 3.0),
+          "test 13b: inconclusive extension policy allows Adaptive rolling fallback");
+  require(AmplifiedWaveformProbeAmplitude(100, 100, 1.25, 2.0) == 125 &&
+              AmplifiedWaveformProbeAmplitude(190, 100, 1.25, 2.0) == 200 &&
+              AmplifiedWaveformProbeAmplitude(200, 100, 1.25, 2.0) == 200 &&
+              AmplifiedWaveformProbeAmplitude(100, 100, 1.0, 2.0) == 100,
+          "test 13c: inconclusive signal amplification is bounded");
+
+  const std::vector<double> half_sender = {
+      1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+      -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+  const std::vector<double> only_negative_response = {
+      0.00, 0.01, 0.00, -0.01, 0.00, 0.01, 0.00, -0.01,
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0};
+  const std::vector<double> only_positive_response = {
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0,
+      0.00, 0.01, 0.00, -0.01, 0.00, 0.01, 0.00, -0.01};
+  const std::vector<double> both_halves_response = {
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0,
+      -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0};
+  const std::vector<bool> half_valid(half_sender.size(), true);
+  double positive_span = 0.0;
+  double negative_span = 0.0;
+  require(HasOnlyNegativeHalfWaveform(
+              only_negative_response, half_sender, half_valid, 0.05,
+              &positive_span, &negative_span) &&
+              negative_span > 4.0 * positive_span,
+          "test 14a: only-negative-half extraction detects a suppressed positive half");
+  require(HasOnlyPositiveHalfWaveform(
+              only_positive_response, half_sender, half_valid, 0.05,
+              &positive_span, &negative_span) &&
+              positive_span > 4.0 * negative_span,
+          "test 14b: only-positive-half extraction detects a suppressed negative half");
+  require(!HasOnlyNegativeHalfWaveform(
+              both_halves_response, half_sender, half_valid, 0.05,
+              nullptr, nullptr) &&
+              !HasOnlyPositiveHalfWaveform(
+                  both_halves_response, half_sender, half_valid, 0.05,
+                  nullptr, nullptr),
+          "test 14c: half-only extraction rejects two active halves");
+
+  std::vector<double> small_periodic_response(periodic_count, 0.0);
+  for (size_t i = 0; i < periodic_count; ++i) {
+    small_periodic_response[i] = 0.002 * sine_response[i];
+  }
+  const double small_periodicity = ComputeLaggedCorrelation(
+      small_periodic_response, periodic_valid, expected_period_samples,
+      nullptr);
+  require(small_periodicity > 0.99,
+          "test 16: periodicity is independent of response amplitude");
+  std::vector<bool> masked_periodic_valid = periodic_valid;
+  for (size_t cycle = 0; cycle < 2; ++cycle) {
+    const size_t begin = cycle * expected_period_samples + 70;
+    const size_t end = std::min(masked_periodic_valid.size(), begin + 35);
+    for (size_t i = begin; i < end; ++i) {
+      masked_periodic_valid[i] = false;
+    }
+  }
+  size_t masked_pairs = 0;
+  const double masked_periodicity = ComputeLaggedCorrelation(
+      sine_response, masked_periodic_valid, expected_period_samples,
+      &masked_pairs);
+  require(masked_pairs >= 100 && masked_periodicity > 0.99,
+          "test 16b: masking sequential middle plateaus preserves the original time-axis period");
+
+  std::vector<double> deterministic_noise(periodic_count, 0.0);
+  uint32_t noise_state = 1;
+  for (size_t i = 0; i < periodic_count; ++i) {
+    noise_state = 1664525u * noise_state + 1013904223u;
+    deterministic_noise[i] =
+        static_cast<double>(noise_state) /
+            static_cast<double>(std::numeric_limits<uint32_t>::max()) -
+        0.5;
+  }
+  const double noise_periodicity = ComputeLaggedCorrelation(
+      deterministic_noise, periodic_valid, expected_period_samples,
+      nullptr);
+  require(noise_periodicity < 0.50,
+          "test 17: non-periodic noise fails the periodicity threshold");
+
+  decision.srtt_positive_half_clipped = true;
+  decision.srtt_negative_half_clipped = true;
+  decision.drate_has_waveform = false;
+  decision.drate_middle_any_plateau = false;
+  decision.drate_similar = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R4.1",
+                 "test 18: both SRTT half-cycles clipped with similar Drate is UNDERLOAD");
+  decision.srtt_similar = false;
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_negative_half_clipped = false;
+  decision.drate_similar = false;
+  decision.drate_similar_without_middle = true;
+  check_decision(decision, WaveformClassification::kUnderload, "R5.1",
+                 "test 18b: dissimilar SRTT with masked-similar Drate is UNDERLOAD");
+  decision.drate_similar_without_middle = false;
+  check_decision(decision, WaveformClassification::kOverload, "R5.2",
+                 "test 18c: both signals dissimilar is OVERLOAD");
+  decision.srtt_similar_without_middle = true;
+  check_decision(decision, WaveformClassification::kFullLoad, "R1",
+                 "test 18d: masked-similar SRTT is FULL_LOAD");
+  decision.srtt_positive_half_clipped = true;
+  check_decision(decision, WaveformClassification::kOverload, "R2.3",
+                 "test 18d2: masked-similar SRTT still honors a positive shoulder clip");
+  decision.srtt_positive_half_clipped = false;
+  decision.srtt_similar_without_middle = false;
+  decision.drate_input_valid = false;
+  check_decision(decision, WaveformClassification::kOverload, "R5.2",
+                 "test 18d3: missing Drate similarity under dissimilar SRTT is OVERLOAD");
+  decision.drate_input_valid = true;
+  decision.prechecks_valid = false;
+  check_decision(decision, WaveformClassification::kInconclusive, "R6.3",
+                 "test 18e: invalid prechecks remain INCONCLUSIVE");
+  decision.srtt_window_stats_valid = true;
+  decision.srtt_mean_ms = 119.0;
+  decision.srtt_min_ms = 118.0;
+  decision.srtt_max_ms = 121.0;
+  decision.latest_waveform_overload_srtt_mean_valid = true;
+  decision.latest_waveform_overload_srtt_mean_ms = 120.0;
+  check_decision(decision, WaveformClassification::kOverload, "R6.1",
+                 "test 18f: Adaptive R6 overloads above srtt_up");
+  decision.srtt_mean_ms = 99.0;
+  decision.srtt_min_ms = 98.0;
+  decision.srtt_max_ms = 120.0;
+  decision.latest_waveform_underload_srtt_mean_valid = true;
+  decision.latest_waveform_underload_srtt_mean_ms = 100.0;
+  check_decision(decision, WaveformClassification::kUnderload, "R6.2",
+                 "test 18g: Adaptive R6 underloads below srtt_low");
+  decision.srtt_mean_ms = 110.0;
+  decision.srtt_min_ms = 100.0;
+  check_decision(decision, WaveformClassification::kInconclusive, "R6.3",
+                 "test 18h: Adaptive R6 is inconclusive between thresholds");
+
+  const std::vector<FBBRRttSample> srtt_stat_samples = {
+      {QuicTime::Zero(), 80.0},
+      {QuicTime::Zero(), 120.0},
+      {QuicTime::Zero(), -1.0},
+      {QuicTime::Zero(), std::numeric_limits<double>::quiet_NaN()},
+  };
+  const SrttWindowStats srtt_stats =
+      ComputeSrttWindowStats(srtt_stat_samples);
+  require(srtt_stats.valid && srtt_stats.sample_count == 2 &&
+              std::abs(srtt_stats.mean_ms - 100.0) < 1e-12 &&
+              std::abs(srtt_stats.min_ms - 80.0) < 1e-12 &&
+              std::abs(srtt_stats.max_ms - 120.0) < 1e-12,
+          "test 18i: R6 SRTT statistics use finite positive window samples");
+
+  require(HasMacroOpposingShoulders(5.0, -4.0, 0.02, 1.0, 0.05) &&
+              HasMacroOpposingShoulders(-5.0, 4.0, 0.02, 1.0, 0.05),
+          "opposite macro-scale shoulders qualify as clipping");
+  require(!HasMacroOpposingShoulders(5.0, 4.0, 0.02, 1.0, 0.05) &&
+              !HasMacroOpposingShoulders(-5.0, -4.0, 0.02, 1.0, 0.05),
+          "same-direction shoulders are sequential middle flattening, not an upper/lower clip");
+  require(!HasMacroOpposingShoulders(0.5, -0.5, 0.02, 1.0, 0.05),
+          "micro-scale opposing perturbations do not qualify as clipping");
+  require(HasDualMacroOpposingShoulders(
+              5.0, -4.0, 1.0, 0.05,
+              8.0, -6.0, 1.0, 0.05, 0.02),
+          "upper/lower clipping requires strong opposing shoulders in both SRTT and Drate");
+  require(HasMacroSameDirectionShoulders(5.0, 4.0) &&
+              !HasDualMacroOpposingShoulders(
+                  5.0, -4.0, 1.0, 0.05,
+                  8.0, 6.0, 1.0, 0.05, 0.02),
+          "same-direction shoulders in either signal identify sequential middle flattening");
+  require(IsObviousClipPlateau(0.20, 0.15, 0.90, 0.75,
+                               0.05, 0.10, 0.05, 0.15,
+                               0.05, 0.15, true),
+          "a sustained flat extreme with clear shoulders is obvious clipping");
+  require(!IsObviousClipPlateau(0.08, 0.15, 0.90, 0.75,
+                                0.05, 0.10, 0.05, 0.15,
+                                0.05, 0.15, true) &&
+              !IsObviousClipPlateau(0.20, 0.15, 0.90, 0.75,
+                                    0.05, 0.10, 0.05, 0.15,
+                                    0.30, 0.15, true),
+          "short or non-extreme flattening is not obvious clipping");
+
+  std::vector<bool> gap_valid = valid;
+  for (size_t i = 70; i <= 100; ++i) {
+    gap_valid[i] = false;
+  }
+  const double gap_period_ratio = 31.0 / 200.0;
+  require(gap_period_ratio > 0.10 &&
+              std::count(gap_valid.begin(), gap_valid.end(), false) == 31,
+          "gaps above 0.10T remain invalid instead of being interpolated");
+
+  const size_t lag_samples = 35;
+  std::vector<double> delayed(count, 0.0);
+  std::vector<bool> delayed_valid(count, false);
+  for (size_t i = lag_samples; i < count; ++i) {
+    delayed[i] = sender[i - lag_samples];
+    delayed_valid[i] = true;
+  }
+  size_t best_lag = 0;
+  double best_lag_ncc = -2.0;
+  for (size_t lag = 0; lag <= 60; ++lag) {
+    std::vector<double> aligned_sender(count, 0.0);
+    std::vector<bool> joint(count, false);
+    for (size_t i = lag; i < count; ++i) {
+      aligned_sender[i] = sender[i - lag];
+      joint[i] = delayed_valid[i];
+    }
+    const double ncc = ComputeNormalizedCrossCorrelation(
+        aligned_sender, delayed, joint);
+    if (ncc > best_lag_ncc) {
+      best_lag_ncc = ncc;
+      best_lag = lag;
+    }
+  }
+  require(best_lag == lag_samples && best_lag_ncc > 0.99,
+          "feedback lag search recovers the deterministic receiver delay");
+
+  const bool post_cruise_phase_allowed[] =
+      {true, true, true, true};
+  const bool new_cruise_clears_fresh = true;
+  const bool native_state_untouched = true;
+  require(std::all_of(std::begin(post_cruise_phase_allowed),
+                      std::end(post_cruise_phase_allowed),
+                      [](bool value) { return value; }) &&
+              new_cruise_clears_fresh && native_state_untouched,
+          "test 19: lifecycle confines TrustedBw to post-CRUISE pacing only");
+
+  os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
+  return pass;
+}
+
+bool FBBRSender::RunFbbrBaselineSelfTest(std::ostream& os) {
+  bool pass = true;
+  auto require = [&pass, &os](bool condition, const char* message) {
+    os << (condition ? "PASS: " : "FAIL: ") << message << "\n";
+    pass = pass && condition;
+  };
+  const QuicTime sample_time = QuicTime::Zero();
+  const std::vector<FBBRRateSample> samples = {
+      {sample_time, QuicBandwidth::FromBitsPerSecond(8000000), true},
+      {sample_time, QuicBandwidth::FromBitsPerSecond(12000000), true},
+      {sample_time, QuicBandwidth::FromBitsPerSecond(10000000), true},
+      {sample_time, QuicBandwidth::FromBitsPerSecond(50000000), false}};
+  const DeliveryRateWindowStats stats =
+      ComputeDeliveryRateWindowStats(samples);
+  require(stats.valid && stats.sample_count == 3,
+          "invalid delivery-rate samples are excluded");
+  require(std::abs(stats.min_bps - 8000000.0) < 1e-6,
+          "OVERLOAD baseline uses the window minimum");
+  require(std::abs(stats.max_bps - 12000000.0) < 1e-6,
+          "UNDERLOAD baseline uses the window maximum");
+  require(std::abs(stats.mean_bps - 10000000.0) < 1e-6,
+          "FULL_LOAD trustedbw uses the arithmetic window mean");
+  const QuicBandwidth first_trusted_bw = BandwidthFromBps(stats.mean_bps);
+  const QuicBandwidth next_trusted_bw = BandwidthFromBps(18000000.0);
+  require(first_trusted_bw.ToBitsPerSecond() == 10000000 &&
+              next_trusted_bw.ToBitsPerSecond() == 18000000,
+          "FBBR trustedbw publishes each arithmetic window mean without smoothing");
+  os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
 Bbr2ProbeBwMode::CyclePhase FBBRSender::GetCurrentProbeBwPhase() const {
@@ -740,19 +1846,27 @@ Bbr2ProbeBwMode::CyclePhase FBBRSender::GetCurrentProbeBwPhase() const {
   return Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED;
 }
 
+float FBBRSender::GetProbeBwCwndGain(
+    Bbr2ProbeBwMode::CyclePhase phase,
+    float cwnd_gain) const {
+  return FBBRCwndGainForPhase(phase, cwnd_gain);
+}
+
 bool FBBRSender::BaseShouldOscillate() const {
-  if (fbbr_frequency_search_config_.frequency_search_enabled) {
-    return fbbr_probe_active_ && in_cruise_ &&
-           fbbr_queue_servo_state_.state !=
-               FBBRQueueServoState::kEmergencyDrain &&
-           mode_ == Bbr2Mode::PROBE_BW &&
-           GetCurrentProbeBwPhase() ==
-               Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
-  }
-  if (!fbbr_frequency_search_config_.legacy_spectral_path_enabled) {
+  if (in_cruise_ &&
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform &&
+      (current_injection_baseline_bw_.IsZero() ||
+       probe_epoch_start_time_ == QuicTime::Zero() ||
+       waveform_cruise_state_ == WaveformCruiseState::kDisabled)) {
     return false;
   }
-  if (GetCurrentAmplitudeBps() == 0 || configured_modulation_freq_hz_ <= 0.0) {
+  const uint64_t amplitude_bps =
+      in_cruise_ &&
+              cruise_detector_mode_ ==
+                  FBBRCruiseDetectorMode::kTimeWaveform
+          ? current_probe_amplitude_bps_
+          : GetCurrentAmplitudeBps();
+  if (amplitude_bps == 0 || configured_modulation_freq_hz_ <= 0.0) {
     return false;
   }
   if (!drain_completed_ || mode_ != Bbr2Mode::PROBE_BW) {
@@ -807,14 +1921,30 @@ double FBBRSender::TriangleWave(QuicTime now) const {
       cruise_start_time_ == QuicTime::Zero()) {
     return 0.0;
   }
+  const QuicTime epoch_start =
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
+          ? probe_epoch_start_time_
+          : cruise_start_time_;
+  if (epoch_start == QuicTime::Zero() || now < epoch_start) {
+    return 0.0;
+  }
   const double elapsed_s =
-      static_cast<double>((now - cruise_start_time_).ToMicroseconds()) /
+      static_cast<double>((now - epoch_start).ToMicroseconds()) /
       1000000.0;
   const double period_s = 1.0 / cruise_modulation_freq_hz_;
   if (period_s <= 0.0) {
     return 0.0;
   }
   const double q = std::fmod(std::max(0.0, elapsed_s), period_s) / period_s;
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    if (q < 0.25) {
+      return -4.0 * q;
+    }
+    if (q < 0.75) {
+      return 4.0 * q - 2.0;
+    }
+    return 4.0 - 4.0 * q;
+  }
   if (q < 0.25) {
     return 4.0 * q;
   }
@@ -822,2338 +1952,6 @@ double FBBRSender::TriangleWave(QuicTime now) const {
     return 2.0 - 4.0 * q;
   }
   return 4.0 * q - 4.0;
-}
-
-void FBBRSender::FBBRFrequencySearchInitializeCruise(QuicTime now) {
-  const FBBRSearchControllerState previous_search_state =
-      fbbr_search_state_;
-  bool dynamic_reacquire_at_entry = false;
-  fbbr_probe_active_ = false;
-  fbbr_block_invalidated_ = false;
-  fbbr_probe_disabled_reason_ = "none";
-  fbbr_rtprop_frozen_ = model_.MinRtt();
-  if (fbbr_rtprop_frozen_.IsZero() && rtt_stats_ != nullptr) {
-    fbbr_rtprop_frozen_ = rtt_stats_->MinOrInitialRtt();
-  }
-  fbbr_phase_bin_accumulators_.clear();
-  fbbr_phase_bins_.clear();
-  fbbr_block_results_.clear();
-  fbbr_next_block_id_ = 0;
-  fbbr_next_shadow_window_id_ = 0;
-  fbbr_previous_block_delay_s_ = std::numeric_limits<double>::quiet_NaN();
-  fbbr_control_decisions_.clear();
-  fbbr_next_analysis_output_bin_ = -1;
-  fbbr_baseline_transition_pending_ = false;
-  fbbr_baseline_transition_start_ = QuicTime::Zero();
-  fbbr_baseline_transition_end_ = QuicTime::Zero();
-  fbbr_trusted_published_in_cruise_ = false;
-  fbbr_period_reselected_ = false;
-  fbbr_period_scan_count_ = 0;
-  fbbr_event_window_state_ = EventWindowState::kIdleListen;
-  fbbr_next_trigger_cycle_ = -1;
-  fbbr_trigger_cycle_id_ = -1;
-  fbbr_capture_start_bin_ = -1;
-  fbbr_next_tracking_start_bin_ = -1;
-  fbbr_last_control_window_start_bin_ = -1;
-  fbbr_last_trusted_window_start_bin_ = -1;
-  fbbr_next_event_window_id_ = 0;
-  fbbr_bad_cycle_streak_ = 0;
-  fbbr_no_trigger_streak_ = 0;
-  fbbr_settling_cycles_remaining_ = 0;
-  fbbr_pulser_lease_age_cycles_ = 0;
-  fbbr_previous_sequential_direction_sign_ = 0;
-  fbbr_previous_sequential_classification_ =
-      FbbrOperatingPointClassification::kInvalid;
-  fbbr_previous_sequential_score_ = 0.0;
-  fbbr_have_previous_sequential_result_ = false;
-  fbbr_latest_trigger_cycle_result_ = FBBRTriggerCycleResult();
-  fbbr_active_trigger_source_ = "NONE";
-  fbbr_queue_servo_state_ = FBBRQueueServoStateData();
-  fbbr_latest_queue_servo_decision_ = FBBRQueueServoDecision();
-  fbbr_queue_servo_q_samples_s_.clear();
-  fbbr_queue_servo_delivery_samples_bps_.clear();
-  fbbr_queue_servo_q_median_history_s_.clear();
-  fbbr_queue_servo_acked_bytes_ = 0;
-  fbbr_queue_servo_lost_bytes_ = 0;
-  fbbr_queue_servo_ecn_bytes_ = 0;
-  fbbr_queue_servo_transition_pending_ = false;
-  fbbr_latest_sustainable_direction_ = 0.0;
-  fbbr_queue_servo_updates_ = 0;
-  fbbr_queue_servo_drain_rtts_ = 0;
-  fbbr_queue_servo_recovery_rtts_ = 0;
-  fbbr_queue_servo_baseline_commits_ = 0;
-  fbbr_dual_trigger_attempts_ = 0;
-  fbbr_delivery_triggers_ = 0;
-  fbbr_queue_triggers_ = 0;
-  fbbr_both_triggers_ = 0;
-  fbbr_hard_safety_events_ = 0;
-  fbbr_last_ecn_bytes_in_round_ = GetBytesEcnInRounds();
-  fbbr_native_bw_at_cruise_start_bps_ =
-      static_cast<double>(BandwidthEstimate().ToBitsPerSecond());
-  fbbr_probe_signature_ = FbbrProbeSignature();
-  fbbr_probe_signature_.flow_identity = static_cast<uint64_t>(trace_flow_id_);
-  fbbr_probe_signature_.cruise_id =
-      static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
-
-  if (!fbbr_frequency_search_config_.frequency_search_enabled) {
-    fbbr_probe_disabled_reason_ = "frequency_search_disabled";
-    return;
-  }
-  if (fbbr_rtprop_frozen_.IsZero()) {
-    fbbr_probe_disabled_reason_ = "rtprop_unavailable";
-    return;
-  }
-  if (fbbr_frequency_search_config_.probe_period_rtt_slots.empty() ||
-      fbbr_frequency_search_config_.probe_code_length_cycles != 4 ||
-      fbbr_frequency_search_config_.analysis_cycles_per_window == 0 ||
-      fbbr_frequency_search_config_.phase_bins_per_cycle == 0 ||
-      fbbr_frequency_search_config_.min_valid_analysis_cycles >
-          fbbr_frequency_search_config_.analysis_cycles_per_window) {
-    fbbr_probe_disabled_reason_ = "probe_config_invalid";
-    return;
-  }
-  if (InRecovery()) {
-    fbbr_probe_disabled_reason_ = "recovery";
-    return;
-  }
-  const DebugState state = ExportDebugState();
-  fbbr_last_sample_app_limited_ = state.last_sample_is_app_limited;
-  if (state.last_sample_is_app_limited) {
-    fbbr_probe_disabled_reason_ = "app_limited_at_start";
-    return;
-  }
-  // Stability and prior congestion select a safe initial mode/baseline; they
-  // do not terminate persistent identification in an eligible CRUISE.
-
-  auto mix = [](uint64_t value) {
-    value += 0x9e3779b97f4a7c15ULL;
-    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
-    return value ^ (value >> 31);
-  };
-  const uint64_t flow_identity = fbbr_probe_signature_.flow_identity;
-  const uint64_t cruise_identity = fbbr_probe_signature_.cruise_id;
-  const uint64_t signature_hash =
-      mix(flow_identity ^ mix(cruise_identity + 0x46424252ULL));
-  uint32_t slot = static_cast<uint32_t>(
-      fbbr_frequency_search_config_.probe_period_rtt_slots.size() / 2);
-  for (uint32_t index = 0;
-       index < fbbr_frequency_search_config_.probe_period_rtt_slots.size(); ++index) {
-    if (fbbr_frequency_search_config_.probe_period_rtt_slots[index] == 8) {
-      slot = index;
-      break;
-    }
-  }
-  const uint32_t period_rtts_slot =
-      fbbr_frequency_search_config_.probe_period_rtt_slots[slot];
-  const double rtprop_s =
-      static_cast<double>(fbbr_rtprop_frozen_.ToMicroseconds()) / 1e6;
-  const double amplitude_budget =
-      M_PI * fbbr_frequency_search_config_.probe_queue_budget_bdp /
-      static_cast<double>(period_rtts_slot);
-  const double amplitude_ratio = std::min(
-      fbbr_frequency_search_config_.probe_max_amplitude_ratio,
-      std::min(fbbr_frequency_search_config_.probe_target_amplitude_ratio,
-               amplitude_budget));
-  if (amplitude_ratio < fbbr_frequency_search_config_.probe_min_amplitude_ratio) {
-    fbbr_probe_disabled_reason_ = "queue_budget_amplitude_low";
-    return;
-  }
-  const QuicBandwidth native_pacing = BandwidthEstimate();
-  const double native_bps =
-      static_cast<double>(native_pacing.ToBitsPerSecond());
-  if (native_bps <= 0.0) {
-    fbbr_probe_disabled_reason_ = "native_pacing_zero";
-    return;
-  }
-  const double rtt_period_s = period_rtts_slot * rtprop_s;
-  // B is bits/s, hence the factor 8 when translating the positive-half
-  // packetization budget into bytes.
-  const double packet_period_s =
-      8.0 * fbbr_frequency_search_config_.min_extra_probe_mss * M_PI *
-      static_cast<double>(kDefaultTCPMSS) /
-      std::max(amplitude_ratio * native_bps, 1.0);
-  const double period_s = ClampValue(
-      std::max(rtt_period_s, packet_period_s),
-      fbbr_frequency_search_config_.carrier_period_min_s,
-      fbbr_frequency_search_config_.carrier_period_max_s);
-  const int64_t period_us = static_cast<int64_t>(std::llround(period_s * 1e6));
-  if (period_us <= 0) {
-    fbbr_probe_disabled_reason_ = "carrier_period_invalid";
-    return;
-  }
-  // If the full positive-byte target cannot fit below period_max, keep the
-  // maximum safe period and let actual-input SNR drive later amplitude/period
-  // adaptation.  Packetization mismatch is not a search termination reason.
-  fbbr_period_ = TimeDelta::FromMicroseconds(period_us);
-  const uint32_t period_rtts = static_cast<uint32_t>(std::max<int64_t>(
-      1, static_cast<int64_t>(std::llround(period_s / rtprop_s))));
-
-  fbbr_probe_signature_.flow_identity = flow_identity;
-  fbbr_probe_signature_.cruise_id = cruise_identity;
-  fbbr_probe_signature_.period_slot = slot;
-  fbbr_probe_signature_.period_rtts = period_rtts;
-  fbbr_probe_signature_.code_id = static_cast<uint32_t>(
-      mix(signature_hash ^ 0x434f4445ULL) % 3ULL);
-  // Walsh chips change only at carrier boundaries.  Hash between the two
-  // zero-crossing phases (0 and pi), preserving a stable per-flow phase while
-  // guaranteeing that a chip flip cannot create a pacing discontinuity.
-  fbbr_probe_signature_.initial_phase_rad =
-      (mix(signature_hash ^ 0x5048415345ULL) & 1ULL) ? M_PI : 0.0;
-  fbbr_probe_signature_.rtprop_s = rtprop_s;
-  fbbr_probe_signature_.period_s = period_s;
-  fbbr_probe_signature_.frequency_hz = 1.0 / period_s;
-  fbbr_probe_signature_.amplitude_ratio = amplitude_ratio;
-  fbbr_probe_signature_.waveform = fbbr_frequency_search_config_.probe_waveform;
-  if (fbbr_opi_rtprop_anchor_.IsZero() ||
-      fbbr_rtprop_frozen_ < fbbr_opi_rtprop_anchor_) {
-    fbbr_opi_rtprop_anchor_ = fbbr_rtprop_frozen_;
-    fbbr_opi_rtprop_confidence_ = 0.50;
-    fbbr_opi_rtprop_source_ = "NATIVE_MIN_RTT";
-  }
-  fbbr_probe_signature_.rtprop_s = static_cast<double>(
-      fbbr_opi_rtprop_anchor_.ToMicroseconds()) / 1e6;
-  fbbr_search_state_ = FBBRSearchController::Initialize(
-      native_bps, amplitude_ratio, period_s);
-  fbbr_search_state_.carrier_scan_index = slot;
-  const double rotation_interval_s = std::max(
-      0.25,
-      std::max<uint32_t>(fbbr_frequency_search_config_.min_pulser_lease_cycles,
-                         fbbr_frequency_search_config_.max_pulser_lease_cycles) *
-          period_s);
-  const double global_time_s = static_cast<double>(
-      (now - QuicTime::Zero()).ToMicroseconds()) / 1e6;
-  const uint32_t rotation_slots = std::max<uint32_t>(
-      1, fbbr_frequency_search_config_.pulser_backoff_max_cycles);
-  const uint32_t epoch_slot = static_cast<uint32_t>(
-      std::floor(global_time_s / rotation_interval_s)) % rotation_slots;
-  const uint64_t flow_identity_zero_based = flow_identity > 0
-      ? flow_identity - 1
-      : 0;
-  fbbr_search_state_.is_pulser =
-      flow_identity_zero_based % rotation_slots == epoch_slot;
-  fbbr_search_state_.pulser_lease_count =
-      fbbr_search_state_.is_pulser ? 1 : 0;
-  fbbr_search_state_.carrier_detected = false;
-  fbbr_search_state_.carrier_detection_streak = 0;
-  fbbr_search_state_.last_carrier_sense_bin = -1;
-  fbbr_search_state_.election_start_cycle = 0;
-  fbbr_search_state_.election_backoff_cycles =
-      FBBRSearchElectionBackoff(fbbr_search_state_.search_generation);
-  fbbr_search_state_.watcher_cooldown_cycles =
-      fbbr_frequency_search_config_.pulser_lease_decisions;
-  ++fbbr_search_state_.eligible_cruises;
-  if (fbbr_frequency_search_config_.persistent_across_cruises &&
-      previous_search_state.search_active) {
-    fbbr_search_state_.eligible_cruises =
-        previous_search_state.eligible_cruises + 1;
-    fbbr_search_state_.search_attempts =
-        previous_search_state.search_attempts + 1;
-    fbbr_search_state_.unresolved_cruises =
-        previous_search_state.unresolved_cruises;
-    fbbr_search_state_.unresolved_decisions =
-        previous_search_state.unresolved_decisions;
-    fbbr_search_state_.valid_direction_decisions =
-        previous_search_state.valid_direction_decisions;
-    fbbr_search_state_.search_generation =
-        previous_search_state.search_generation;
-    fbbr_search_state_.last_failure_reason =
-        previous_search_state.last_failure_reason;
-    const double native_change = previous_search_state.cruise_entry_native_bps > 0.0
-        ? std::abs(native_bps - previous_search_state.cruise_entry_native_bps) /
-              previous_search_state.cruise_entry_native_bps
-        : 0.0;
-    dynamic_reacquire_at_entry =
-        native_change > fbbr_frequency_search_config_.dynamic_native_change_threshold;
-    if (dynamic_reacquire_at_entry) {
-      fbbr_search_state_.state = FBBRSearchState::kDynamicReacquire;
-      const double retained_search_bps =
-          previous_search_state.current_search_bps > 0.0
-              ? previous_search_state.current_search_bps
-              : native_bps;
-      fbbr_search_state_.current_search_bps = ClampValue(
-          retained_search_bps,
-          fbbr_frequency_search_config_.min_search_scale * native_bps,
-          fbbr_frequency_search_config_.max_search_scale * native_bps);
-      fbbr_search_state_.pending_search_bps =
-          fbbr_search_state_.current_search_bps;
-      fbbr_search_state_.underload_bound_valid = false;
-      fbbr_search_state_.overload_bound_valid = false;
-      fbbr_search_state_.provisional_validation_pending = false;
-      fbbr_search_state_.provisional_age_cruises = 0;
-      fbbr_search_state_.search_generation =
-          previous_search_state.search_generation + 1;
-      fbbr_search_state_.last_failure_reason =
-          "native_change_dynamic_reacquire";
-      ClearTrustedBw("dynamic_native_change");
-    }
-    const double anchor_s = static_cast<double>(
-        fbbr_opi_rtprop_anchor_.ToMicroseconds()) / 1e6;
-    const double rtprop_change =
-        previous_search_state.rtprop_s_when_bracket_created > 0.0
-            ? std::abs(anchor_s -
-                       previous_search_state.rtprop_s_when_bracket_created) /
-                  previous_search_state.rtprop_s_when_bracket_created
-            : 0.0;
-    const bool bracket_fresh = !dynamic_reacquire_at_entry &&
-        previous_search_state.provisional_age_cruises <
-            fbbr_frequency_search_config_.bracket_ttl_cruises &&
-        native_change <= fbbr_frequency_search_config_.provisional_native_change_max &&
-        rtprop_change <= fbbr_frequency_search_config_.provisional_rtprop_change_max;
-    if (bracket_fresh && (previous_search_state.underload_bound_valid ||
-                          previous_search_state.overload_bound_valid)) {
-      fbbr_search_state_.underload_bound_valid =
-          previous_search_state.underload_bound_valid;
-      fbbr_search_state_.underload_bound_bps =
-          previous_search_state.underload_bound_bps;
-      fbbr_search_state_.overload_bound_valid =
-          previous_search_state.overload_bound_valid;
-      fbbr_search_state_.overload_bound_bps =
-          previous_search_state.overload_bound_bps;
-      fbbr_search_state_.bracket_generation =
-          previous_search_state.bracket_generation;
-      fbbr_search_state_.bracket_age_windows =
-          previous_search_state.bracket_age_windows;
-      fbbr_search_state_.native_bps_when_bracket_created =
-          previous_search_state.native_bps_when_bracket_created;
-      fbbr_search_state_.rtprop_s_when_bracket_created =
-          previous_search_state.rtprop_s_when_bracket_created;
-      fbbr_search_state_.provisional_validation_pending =
-          previous_search_state.underload_bound_valid &&
-          previous_search_state.overload_bound_valid;
-      fbbr_search_state_.provisional_age_cruises =
-          previous_search_state.provisional_age_cruises + 1;
-    }
-    if (!dynamic_reacquire_at_entry &&
-        previous_search_state.unresolved_cruises > 0) {
-      fbbr_search_state_.state = FBBRSearchState::kPersistentUnresolved;
-      fbbr_search_state_.current_amplitude_ratio = ClampValue(
-          previous_search_state.current_amplitude_ratio,
-          fbbr_frequency_search_config_.probe_min_amplitude_ratio,
-          fbbr_frequency_search_config_.probe_max_amplitude_ratio);
-      fbbr_probe_signature_.amplitude_ratio =
-          fbbr_search_state_.current_amplitude_ratio;
-      if (!fbbr_search_state_.provisional_validation_pending &&
-          previous_search_state.current_search_bps > 0.0) {
-        fbbr_search_state_.current_search_bps = ClampValue(
-            previous_search_state.current_search_bps,
-            fbbr_frequency_search_config_.min_search_scale * native_bps,
-            fbbr_frequency_search_config_.max_search_scale * native_bps);
-        fbbr_search_state_.pending_search_bps =
-            fbbr_search_state_.current_search_bps;
-      }
-    }
-  }
-  fbbr_baseline_transition_from_bps_ = fbbr_search_state_.current_search_bps;
-  fbbr_baseline_transition_to_bps_ = fbbr_search_state_.current_search_bps;
-  const int64_t nominal_feedback_bins = static_cast<int64_t>(std::llround(
-      fbbr_probe_signature_.rtprop_s /
-      std::max(period_s /
-                   static_cast<double>(fbbr_frequency_search_config_.phase_bins_per_cycle),
-               1e-9)));
-  fbbr_next_analysis_output_bin_ =
-      static_cast<int64_t>(fbbr_frequency_search_config_.settling_cycles_per_window) *
-          fbbr_frequency_search_config_.phase_bins_per_cycle +
-      nominal_feedback_bins;
-  fbbr_next_trigger_cycle_ = std::max<int64_t>(
-      fbbr_frequency_search_config_.carrier_sensing_cycles,
-      (fbbr_next_analysis_output_bin_ +
-       static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle) - 1) /
-          static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle));
-  cruise_modulation_freq_hz_ = fbbr_probe_signature_.frequency_hz;
-  fbbr_probe_active_ = true;
-  if (fbbr_search_state_.unresolved_cruises == 0 &&
-      !dynamic_reacquire_at_entry) {
-    fbbr_search_state_.state = fbbr_search_state_.is_pulser
-        ? FBBRSearchState::kAcquireInput
-        : FBBRSearchState::kWatcher;
-  }
-  fbbr_search_state_.election_backoff_cycles =
-      FBBRSearchElectionBackoff(fbbr_search_state_.search_generation);
-  fbbr_search_state_.pulser_lease_remaining =
-      fbbr_frequency_search_config_.persistent_across_cruises &&
-              previous_search_state.search_active &&
-              previous_search_state.pulser_lease_remaining > 0
-          ? previous_search_state.pulser_lease_remaining
-          : fbbr_frequency_search_config_.max_pulser_lease_cycles;
-  fbbr_probe_disabled_reason_ = "none";
-  freq_tool_on_ = true;
-  cruise_freq_tool_active_ = true;
-  FBBRFrequencySearchEnsureBinsThrough(now);
-  QUIC_DVLOG(1) << "F-BBR Frequency Search probe initialized cruise_id=" << cruise_id_
-                << " flow_identity=" << flow_identity
-                << " period_rtts=" << period_rtts
-                << " frequency_hz=" << fbbr_probe_signature_.frequency_hz
-                << " code_id=" << fbbr_probe_signature_.code_id
-                << " amplitude_ratio=" << amplitude_ratio;
-}
-
-int64_t FBBRSender::FBBRFrequencySearchBinIndex(QuicTime now) const {
-  if (cruise_start_time_ == QuicTime::Zero() || now < cruise_start_time_ ||
-      fbbr_period_.IsZero() ||
-      fbbr_frequency_search_config_.phase_bins_per_cycle == 0) {
-    return -1;
-  }
-  const int64_t elapsed_us = (now - cruise_start_time_).ToMicroseconds();
-  return elapsed_us *
-         static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle) /
-         fbbr_period_.ToMicroseconds();
-}
-
-void FBBRSender::FBBRFrequencySearchEnsureBinsThrough(QuicTime now) {
-  const int64_t target = FBBRFrequencySearchBinIndex(now);
-  if (target < 0) return;
-  const int64_t bins_per_cycle =
-      static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle);
-  const int64_t period_us = fbbr_period_.ToMicroseconds();
-  while (static_cast<int64_t>(fbbr_phase_bin_accumulators_.size()) <= target) {
-    FbbrPhaseBinAccumulator accumulator;
-    accumulator.bin_index =
-        static_cast<int64_t>(fbbr_phase_bin_accumulators_.size());
-    const int64_t start_us =
-        period_us * accumulator.bin_index / bins_per_cycle;
-    const int64_t end_us =
-        period_us * (accumulator.bin_index + 1) / bins_per_cycle;
-    accumulator.time_start_s =
-        static_cast<double>((cruise_start_time_ - QuicTime::Zero())
-                                .ToMicroseconds() + start_us) /
-        1e6;
-    accumulator.time_end_s =
-        static_cast<double>((cruise_start_time_ - QuicTime::Zero())
-                                .ToMicroseconds() + end_us) /
-        1e6;
-    fbbr_phase_bin_accumulators_.push_back(accumulator);
-  }
-}
-
-double FBBRSender::FBBRFrequencySearchCodedSineValue(QuicTime now) const {
-  if (!fbbr_probe_active_ || cruise_start_time_ == QuicTime::Zero() ||
-      now < cruise_start_time_) {
-    return 0.0;
-  }
-  const double elapsed_s =
-      static_cast<double>((now - cruise_start_time_).ToMicroseconds()) / 1e6;
-  const double waveform =
-      FBBRFrequencySearch::ProbeWaveform(fbbr_probe_signature_, elapsed_s);
-  const int64_t cycle = static_cast<int64_t>(std::floor(
-      elapsed_s / std::max(fbbr_probe_signature_.period_s, 1e-9)));
-  if (cycle < static_cast<int64_t>(
-                  fbbr_frequency_search_config_.carrier_sensing_cycles)) {
-    return 0.0;
-  }
-  if (fbbr_search_state_.is_pulser) {
-    return waveform;
-  }
-  return waveform * fbbr_frequency_search_config_.watcher_probe_amplitude /
-      std::max(fbbr_probe_signature_.amplitude_ratio, 1e-9);
-}
-
-uint32_t FBBRSender::FBBRSearchElectionBackoff(
-    uint64_t generation) const {
-  const uint32_t maximum = std::max<uint32_t>(
-      1, fbbr_frequency_search_config_.pulser_backoff_max_cycles);
-  const uint64_t identity = fbbr_probe_signature_.flow_identity ^
-      FbbrStableHash(fbbr_probe_signature_.cruise_id ^ generation);
-  return 1 + static_cast<uint32_t>(FbbrStableHash(identity) % maximum);
-}
-
-void FBBRSender::FBBRSearchUpdateCarrierSense() {
-  if (fbbr_search_state_.is_pulser || fbbr_phase_bins_.size() < 16 ||
-      fbbr_probe_signature_.period_s <= 0.0) {
-    return;
-  }
-  std::vector<const FbbrPhaseBinSample*> samples;
-  const size_t maximum_samples = static_cast<size_t>(
-      std::max<uint32_t>(2, fbbr_frequency_search_config_.carrier_sensing_cycles) *
-      fbbr_frequency_search_config_.phase_bins_per_cycle);
-  for (auto it = fbbr_phase_bins_.rbegin(); it != fbbr_phase_bins_.rend() &&
-       samples.size() < maximum_samples; ++it) {
-    if (it->rtt_valid && it->valid) samples.push_back(&*it);
-  }
-  if (samples.size() < 12) return;
-  const int64_t newest_bin = samples.back()->bin_index;
-  if (newest_bin == fbbr_search_state_.last_carrier_sense_bin) return;
-  fbbr_search_state_.last_carrier_sense_bin = newest_bin;
-  std::reverse(samples.begin(), samples.end());
-  double rtt_mean = 0.0;
-  double delivery_mean = 0.0;
-  for (const auto* sample : samples) {
-    rtt_mean += sample->latest_rtt_s;
-    delivery_mean += sample->delivery_rate_bps;
-  }
-  rtt_mean /= samples.size();
-  delivery_mean /= samples.size();
-  auto amplitude = [&samples](double frequency,
-                              const std::function<double(
-                                  const FbbrPhaseBinSample&)>& value) {
-    double sin_sum = 0.0;
-    double cos_sum = 0.0;
-    for (const auto* sample : samples) {
-      const double time = 0.5 * (sample->time_start_s + sample->time_end_s);
-      const double centered = value(*sample);
-      sin_sum += centered * std::sin(2.0 * M_PI * frequency * time);
-      cos_sum += centered * std::cos(2.0 * M_PI * frequency * time);
-    }
-    return 2.0 * std::hypot(sin_sum, cos_sum) / samples.size();
-  };
-  double best_snr = 0.0;
-  double best_carrier = 0.0;
-  for (uint32_t period_rtts : fbbr_frequency_search_config_.probe_period_rtt_slots) {
-    const double period = ClampValue(
-        period_rtts * std::max(fbbr_probe_signature_.rtprop_s, 1e-9),
-        fbbr_frequency_search_config_.carrier_period_min_s,
-        fbbr_frequency_search_config_.carrier_period_max_s);
-    const double frequency = 1.0 / std::max(period, 1e-9);
-    const auto rtt_value = [rtt_mean](const FbbrPhaseBinSample& sample) {
-      return sample.latest_rtt_s - rtt_mean;
-    };
-    const auto delivery_value = [delivery_mean](const FbbrPhaseBinSample& sample) {
-      return (sample.delivery_rate_bps - delivery_mean) /
-             std::max(delivery_mean, 1.0);
-    };
-    const double carrier = std::max(
-        amplitude(frequency, rtt_value) /
-            std::max(fbbr_probe_signature_.rtprop_s, 1e-9),
-        amplitude(frequency, delivery_value));
-    const double noise = std::max(
-        std::max(amplitude(0.75 * frequency, rtt_value) /
-                     std::max(fbbr_probe_signature_.rtprop_s, 1e-9),
-                 amplitude(1.25 * frequency, rtt_value) /
-                     std::max(fbbr_probe_signature_.rtprop_s, 1e-9)),
-        std::max(amplitude(0.75 * frequency, delivery_value),
-                 amplitude(1.25 * frequency, delivery_value)));
-    best_snr = std::max(best_snr, carrier / std::max(noise, 1e-4));
-    best_carrier = std::max(best_carrier, carrier);
-  }
-  fbbr_search_state_.carrier_sense_snr = best_snr;
-  fbbr_search_state_.carrier_sense_amplitude = best_carrier;
-  const bool evidence =
-      best_snr >= fbbr_frequency_search_config_.carrier_detection_snr_min;
-  if (evidence) {
-    fbbr_search_state_.carrier_detection_streak = std::min<uint32_t>(
-        3, fbbr_search_state_.carrier_detection_streak + 1);
-  } else if (fbbr_search_state_.carrier_detection_streak > 0) {
-    --fbbr_search_state_.carrier_detection_streak;
-  }
-  fbbr_search_state_.carrier_detected =
-      fbbr_search_state_.carrier_detection_streak >= 2;
-  if (fbbr_search_state_.carrier_detected) {
-    fbbr_search_state_.state = FBBRSearchState::kWatcher;
-  }
-}
-
-double FBBRSender::FBBRSearchSearchBaselineBps(QuicTime now) const {
-  if (!fbbr_frequency_search_config_.search_controller_enabled ||
-      fbbr_baseline_transition_to_bps_ <= 0.0) {
-    return static_cast<double>(BandwidthEstimate().ToBitsPerSecond());
-  }
-  if (!fbbr_baseline_transition_pending_ ||
-      fbbr_baseline_transition_start_ == QuicTime::Zero()) {
-    return fbbr_baseline_transition_to_bps_;
-  }
-  if (now <= fbbr_baseline_transition_start_) {
-    return fbbr_baseline_transition_from_bps_;
-  }
-  if (now >= fbbr_baseline_transition_end_) {
-    return fbbr_baseline_transition_to_bps_;
-  }
-  const double elapsed = static_cast<double>(
-      (now - fbbr_baseline_transition_start_).ToMicroseconds());
-  const double duration = static_cast<double>(
-      (fbbr_baseline_transition_end_ -
-       fbbr_baseline_transition_start_).ToMicroseconds());
-  return FBBRSearchController::RaisedCosineLogRamp(
-      fbbr_baseline_transition_from_bps_,
-      fbbr_baseline_transition_to_bps_, elapsed / std::max(duration, 1.0));
-}
-
-void FBBRSender::FBBRSearchStartBaselineTransition(
-    QuicTime now,
-    double next_baseline_bps) {
-  if (fbbr_period_.IsZero() || cruise_start_time_ == QuicTime::Zero() ||
-      next_baseline_bps <= 0.0) {
-    return;
-  }
-  const double from_bps = FBBRSearchSearchBaselineBps(now);
-  const int64_t elapsed_us = std::max<int64_t>(
-      0, (now - cruise_start_time_).ToMicroseconds());
-  const int64_t period_us = fbbr_period_.ToMicroseconds();
-  const int64_t start_cycle = (elapsed_us + period_us - 1) / period_us;
-  fbbr_baseline_transition_start_ =
-      cruise_start_time_ + TimeDelta::FromMicroseconds(start_cycle * period_us);
-  fbbr_baseline_transition_end_ =
-      fbbr_baseline_transition_start_ + fbbr_period_;
-  fbbr_baseline_transition_from_bps_ = from_bps;
-  fbbr_baseline_transition_to_bps_ = next_baseline_bps;
-  fbbr_baseline_transition_pending_ = true;
-
-  const int64_t bins_per_cycle =
-      static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle);
-  const int64_t nominal_feedback_bins = static_cast<int64_t>(std::llround(
-      fbbr_probe_signature_.rtprop_s /
-      std::max(fbbr_probe_signature_.period_s / bins_per_cycle, 1e-9)));
-  const int64_t analysis_input_cycle =
-      start_cycle +
-      static_cast<int64_t>(fbbr_frequency_search_config_.settling_cycles_per_window);
-  fbbr_next_analysis_output_bin_ =
-      analysis_input_cycle * bins_per_cycle + nominal_feedback_bins;
-}
-
-void FBBRSender::FBBRFrequencySearchAccumulateSend(
-    QuicTime sent_time,
-    QuicByteCount bytes_in_flight,
-    QuicByteCount bytes,
-    bool retransmittable) {
-  if (!fbbr_probe_active_ || !retransmittable) return;
-  FBBRFrequencySearchEnsureBinsThrough(sent_time);
-  const int64_t index = FBBRFrequencySearchBinIndex(sent_time);
-  if (index < 0 ||
-      index >= static_cast<int64_t>(fbbr_phase_bin_accumulators_.size())) {
-    return;
-  }
-  FbbrPhaseBinAccumulator& bin =
-      fbbr_phase_bin_accumulators_[static_cast<size_t>(index)];
-  const double search_baseline_bps = FBBRSearchSearchBaselineBps(sent_time);
-  const double servo_factor = ClampValue(
-      fbbr_queue_servo_state_.factor, 0.10, 1.02);
-  const double native_bps = search_baseline_bps * servo_factor;
-  const double commanded_bps = native_bps *
-      (1.0 + fbbr_probe_signature_.amplitude_ratio *
-                 FBBRFrequencySearchCodedSineValue(sent_time));
-  bin.sent_bytes += bytes;
-  bin.native_pacing_bps_bytes += native_bps * bytes;
-  bin.commanded_pacing_bps_bytes += commanded_bps * bytes;
-  bin.bytes_in_flight_bytes += static_cast<double>(bytes_in_flight) * bytes;
-  bin.queue_servo_factor_bytes += servo_factor * bytes;
-  ++bin.send_events;
-  if (fbbr_last_sample_app_limited_) {
-    bin.app_limited_sent_bytes += bytes;
-  }
-  if (bytes_in_flight >= GetCongestionWindow()) {
-    bin.cwnd_limited_sent_bytes += bytes;
-  }
-  if (InRecovery()) {
-    bin.recovery_sent_bytes += bytes;
-  }
-  if (enable_convergence_gate_control_ && bbr_stable_) {
-    bin.phase_transition = true;
-    fbbr_block_invalidated_ = true;
-  }
-  if (fbbr_queue_servo_transition_pending_) {
-    bin.queue_servo_transition = true;
-    fbbr_queue_servo_transition_pending_ = false;
-  }
-}
-
-void FBBRSender::FBBRFrequencySearchAccumulateAck(
-    const Bbr2CongestionEvent& congestion_event) {
-  if (!fbbr_probe_active_) return;
-  FBBRFrequencySearchEnsureBinsThrough(congestion_event.event_time);
-  const int64_t index = FBBRFrequencySearchBinIndex(congestion_event.event_time);
-  if (index < 0 ||
-      index >= static_cast<int64_t>(fbbr_phase_bin_accumulators_.size())) {
-    return;
-  }
-  FbbrPhaseBinAccumulator& bin =
-      fbbr_phase_bin_accumulators_[static_cast<size_t>(index)];
-  bin.acked_bytes += congestion_event.bytes_acked;
-  bin.lost_bytes += congestion_event.bytes_lost;
-  ++bin.ack_events;
-  const bool app_limited = congestion_event.sample_is_app_limited ||
-      congestion_event.last_sample_is_app_limited ||
-      (congestion_event.last_packet_send_state.is_valid &&
-       congestion_event.last_packet_send_state.is_app_limited);
-  fbbr_last_sample_app_limited_ = app_limited;
-  if (app_limited) {
-    bin.app_limited_acked_bytes += congestion_event.bytes_acked;
-  }
-  if (InRecovery()) {
-    bin.recovery_acked_bytes += congestion_event.bytes_acked;
-  }
-  if (rtt_stats_ != nullptr && !rtt_stats_->latest_rtt().IsZero()) {
-    const double latest_rtt_s =
-        static_cast<double>(rtt_stats_->latest_rtt().ToMicroseconds()) / 1e6;
-    bin.latest_rtt_samples_s.push_back(latest_rtt_s);
-    const double anchor_s = fbbr_opi_rtprop_anchor_.IsZero()
-        ? fbbr_probe_signature_.rtprop_s
-        : static_cast<double>(fbbr_opi_rtprop_anchor_.ToMicroseconds()) / 1e6;
-    fbbr_queue_servo_q_samples_s_.push_back(
-        std::max(0.0, latest_rtt_s - anchor_s));
-  }
-  const uint64_t ecn_in_round = GetBytesEcnInRounds();
-  const uint64_t ecn_delta = ecn_in_round >= fbbr_last_ecn_bytes_in_round_
-      ? ecn_in_round - fbbr_last_ecn_bytes_in_round_
-      : ecn_in_round;
-  bin.ecn_marked_bytes += ecn_delta;
-  fbbr_queue_servo_acked_bytes_ += congestion_event.bytes_acked;
-  fbbr_queue_servo_lost_bytes_ += congestion_event.bytes_lost;
-  fbbr_queue_servo_ecn_bytes_ += ecn_delta;
-  if (congestion_event.sample_valid &&
-      !congestion_event.sample_max_bandwidth.IsZero()) {
-    fbbr_queue_servo_delivery_samples_bps_.push_back(
-        static_cast<double>(
-            congestion_event.sample_max_bandwidth.ToBitsPerSecond()));
-  }
-  fbbr_last_ecn_bytes_in_round_ = ecn_in_round;
-  if (fbbr_frequency_search_config_.search_controller_enabled &&
-      fbbr_search_state_.state != FBBRSearchState::kEmergencyDrain) {
-    const double event_loss_ratio =
-        congestion_event.bytes_acked + congestion_event.bytes_lost > 0
-            ? static_cast<double>(congestion_event.bytes_lost) /
-                  static_cast<double>(congestion_event.bytes_acked +
-                                      congestion_event.bytes_lost)
-            : 0.0;
-    const double event_ecn_ratio = congestion_event.bytes_acked > 0
-        ? static_cast<double>(ecn_delta) / congestion_event.bytes_acked
-        : 0.0;
-    if (event_loss_ratio >= fbbr_frequency_search_config_.hard_loss_threshold ||
-        event_ecn_ratio >= fbbr_frequency_search_config_.hard_ecn_threshold) {
-      FbbrOperatingPointBlockResult abort;
-      abort.cruise_id = fbbr_probe_signature_.cruise_id;
-      abort.block_id = fbbr_next_block_id_++;
-      abort.start_time_s = static_cast<double>(
-          (congestion_event.event_time - QuicTime::Zero()).ToMicroseconds()) /
-          1e6;
-      abort.end_time_s = abort.start_time_s;
-      abort.loss_ratio = event_loss_ratio;
-      abort.ecn_ratio = event_ecn_ratio;
-      abort.classification =
-          FbbrOperatingPointClassification::kBufferSaturated;
-      abort.invalid_reason = "hard_congestion_window_abort";
-      abort.independent_for_control = false;
-      abort.independent_for_trusted = false;
-      abort.trigger_cycle_excluded_from_score = true;
-      fbbr_block_results_.push_back(abort);
-      fbbr_next_analysis_output_bin_ = -1;
-      FBBRSearchApplyWindowDecision(congestion_event.event_time, abort, -1);
-      FBBRFrequencySearchEmitBlockTrace(abort);
-    }
-  }
-  if (GetCurrentProbeBwPhase() !=
-      Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
-    bin.phase_transition = true;
-  }
-  if (congestion_event.end_of_round_trip) {
-    FBBRQueueServoUpdate(congestion_event);
-  }
-}
-
-void FBBRSender::FBBRQueueServoUpdate(
-    const Bbr2CongestionEvent& congestion_event) {
-  if (!fbbr_frequency_search_config_.queue_servo_enabled) {
-    fbbr_queue_servo_state_ = FBBRQueueServoStateData();
-    fbbr_queue_servo_q_samples_s_.clear();
-    fbbr_queue_servo_delivery_samples_bps_.clear();
-    fbbr_queue_servo_acked_bytes_ = 0;
-    fbbr_queue_servo_lost_bytes_ = 0;
-    fbbr_queue_servo_ecn_bytes_ = 0;
-    return;
-  }
-  QueueServoFastStats stats;
-  stats.samples_sufficient = fbbr_queue_servo_q_samples_s_.size() >= 3;
-  if (!fbbr_queue_servo_q_samples_s_.empty()) {
-    stats.q_floor_s = Percentile(fbbr_queue_servo_q_samples_s_, 0.20);
-    stats.q_median_s = Median(fbbr_queue_servo_q_samples_s_);
-    stats.q_peak_s = Percentile(fbbr_queue_servo_q_samples_s_, 0.90);
-    if (!fbbr_queue_servo_q_median_history_s_.empty()) {
-      stats.queue_trend_s_per_s =
-          (stats.q_median_s - fbbr_queue_servo_q_median_history_s_.back()) /
-          std::max(fbbr_probe_signature_.rtprop_s, 1e-9);
-    }
-    fbbr_queue_servo_q_median_history_s_.push_back(stats.q_median_s);
-    while (fbbr_queue_servo_q_median_history_s_.size() > 2) {
-      fbbr_queue_servo_q_median_history_s_.pop_front();
-    }
-  }
-  stats.delivery_median_bps = Median(
-      fbbr_queue_servo_delivery_samples_bps_);
-  const uint64_t congestion_bytes = fbbr_queue_servo_acked_bytes_ +
-                                    fbbr_queue_servo_lost_bytes_;
-  stats.loss_ratio = congestion_bytes > 0
-      ? static_cast<double>(fbbr_queue_servo_lost_bytes_) / congestion_bytes
-      : 0.0;
-  stats.ecn_ratio = fbbr_queue_servo_acked_bytes_ > 0
-      ? static_cast<double>(fbbr_queue_servo_ecn_bytes_) /
-            fbbr_queue_servo_acked_bytes_
-      : 0.0;
-
-  FBBRQueueServoInput input;
-  input.search_baseline_bps = FBBRSearchSearchBaselineBps(
-      congestion_event.event_time);
-  input.rtprop_s = fbbr_probe_signature_.rtprop_s;
-  input.q_floor_s = stats.q_floor_s;
-  input.q_median_s = stats.q_median_s;
-  input.q_peak_s = stats.q_peak_s;
-  input.queue_trend_s_per_s = stats.queue_trend_s_per_s;
-  input.delivery_median_bps = stats.delivery_median_bps;
-  input.loss_ratio = stats.loss_ratio;
-  input.ecn_ratio = stats.ecn_ratio;
-  input.sustainable_direction = fbbr_latest_sustainable_direction_;
-  input.samples_sufficient = stats.samples_sufficient;
-  input.in_recovery = InRecovery();
-  input.flow_backlogged = !fbbr_last_sample_app_limited_;
-  input.underload_evidence = fbbr_latest_sustainable_direction_ > 0.20 ||
-      (stats.delivery_median_bps > 0.0 && input.search_baseline_bps > 0.0 &&
-       stats.delivery_median_bps < 0.95 * input.search_baseline_bps);
-
-  const double old_factor = fbbr_queue_servo_state_.factor;
-  FBBRQueueServoDecision decision = FBBRQueueReserveServo::Update(
-      fbbr_frequency_search_config_, input, &fbbr_queue_servo_state_);
-  ++fbbr_queue_servo_updates_;
-  if (decision.state == FBBRQueueServoState::kDrain ||
-      decision.state == FBBRQueueServoState::kEmergencyDrain) {
-    ++fbbr_queue_servo_drain_rtts_;
-  } else if (decision.state == FBBRQueueServoState::kReserveRecovery ||
-             decision.state == FBBRQueueServoState::kTargetBand) {
-    ++fbbr_queue_servo_recovery_rtts_;
-  }
-  if (std::abs(decision.factor - old_factor) > 0.02 + 1e-9) {
-    fbbr_queue_servo_transition_pending_ = true;
-  }
-
-  bool commit_applied = false;
-  double commit_bps = 0.0;
-  if (decision.baseline_commit_eligible &&
-      decision.baseline_commit_bps > 0.0 &&
-      decision.baseline_commit_bps < input.search_baseline_bps &&
-      !fbbr_baseline_transition_pending_) {
-    commit_bps = decision.baseline_commit_bps;
-    FBBRSearchStartBaselineTransition(congestion_event.event_time, commit_bps);
-    fbbr_search_state_.current_search_bps = commit_bps;
-    fbbr_search_state_.pending_search_bps = commit_bps;
-    fbbr_queue_servo_state_.factor = ClampValue(
-        decision.factor * input.search_baseline_bps /
-            std::max(commit_bps, 1.0),
-        fbbr_frequency_search_config_.queue_servo_emergency_factor, 1.02);
-    decision.factor = fbbr_queue_servo_state_.factor;
-    decision.final_nonprobe_baseline_bps = commit_bps * decision.factor;
-    decision.reason += "|QUEUE_SAFETY_BASELINE_COMMIT";
-    commit_applied = true;
-    ++fbbr_queue_servo_baseline_commits_;
-  }
-  fbbr_latest_queue_servo_decision_ = decision;
-  FBBREmitQueueServoTrace(congestion_event.event_time, stats, decision,
-                          commit_applied, commit_bps);
-
-  fbbr_queue_servo_q_samples_s_.clear();
-  fbbr_queue_servo_delivery_samples_bps_.clear();
-  fbbr_queue_servo_acked_bytes_ = 0;
-  fbbr_queue_servo_lost_bytes_ = 0;
-  fbbr_queue_servo_ecn_bytes_ = 0;
-}
-
-void FBBRSender::FBBREmitQueueServoTrace(
-    QuicTime now,
-    const QueueServoFastStats& stats,
-    const FBBRQueueServoDecision& decision,
-    bool baseline_commit_applied,
-    double baseline_commit_bps) const {
-  if (!cruise_load_trace_cb_) return;
-  const double time_s = static_cast<double>(
-      (now - QuicTime::Zero()).ToMicroseconds()) / 1e6;
-  std::ostringstream row;
-  row << "fbbr,none,F-BBR," << time_s << "," << trace_flow_id_ << ","
-      << cruise_id_ << "," << FBBRQueueServoStateName(decision.state) << ","
-      << FBBRSearchSearchBaselineBps(now) << "," << decision.factor << ","
-      << decision.final_nonprobe_baseline_bps << ","
-      << stats.q_floor_s * 1e6 << "," << stats.q_median_s * 1e6 << ","
-      << stats.q_peak_s * 1e6 << "," << decision.q_low_s * 1e6 << ","
-      << decision.q_high_s * 1e6 << "," << decision.q_peak_cap_s * 1e6 << ","
-      << stats.queue_trend_s_per_s << "," << stats.delivery_median_bps << ","
-      << stats.loss_ratio << "," << stats.ecn_ratio << ","
-      << decision.down_correction << "," << decision.up_correction << ","
-      << decision.consecutive_drain_rtts << ","
-      << (decision.baseline_commit_eligible ? 1 : 0) << ","
-      << (baseline_commit_applied ? 1 : 0) << "," << baseline_commit_bps << ","
-      << decision.reason;
-  cruise_load_trace_cb_(time_s, time_s, 0.0, 0.0, 0.0, 0.0,
-                        "FBBR_QUEUE_SERVO", false, row.str());
-}
-
-FbbrPhaseBinSample FBBRSender::FBBRFrequencySearchFinalizePhaseBin(
-    const FbbrPhaseBinAccumulator& accumulator) const {
-  FbbrPhaseBinSample sample;
-  sample.bin_index = accumulator.bin_index;
-  const int64_t bins_per_cycle =
-      static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle);
-  sample.cycle_index = accumulator.bin_index / bins_per_cycle;
-  sample.phase_bin_index = static_cast<uint32_t>(
-      accumulator.bin_index % bins_per_cycle);
-  sample.time_start_s = accumulator.time_start_s;
-  sample.time_end_s = accumulator.time_end_s;
-  const double duration_s = sample.time_end_s - sample.time_start_s;
-  const double cruise_start_s =
-      static_cast<double>((cruise_start_time_ - QuicTime::Zero())
-                              .ToMicroseconds()) /
-      1e6;
-  const double relative_center_s =
-      0.5 * (sample.time_start_s + sample.time_end_s) - cruise_start_s;
-  sample.phase_rad = fbbr_probe_signature_.initial_phase_rad +
-      2.0 * M_PI * relative_center_s /
-          std::max(fbbr_probe_signature_.period_s, 1e-9);
-  sample.code_sign = fbbr_probe_signature_.waveform == "sine"
-      ? FBBRFrequencySearch::WalshSign(
-            fbbr_probe_signature_.code_id, sample.cycle_index)
-      : 1;
-  sample.coded_excitation = FBBRFrequencySearch::ProbeWaveform(
-      fbbr_probe_signature_, relative_center_s);
-  sample.sent_bytes = accumulator.sent_bytes;
-  sample.acked_bytes = accumulator.acked_bytes;
-  sample.lost_bytes = accumulator.lost_bytes;
-  sample.ecn_marked_bytes = accumulator.ecn_marked_bytes;
-  if (accumulator.sent_bytes > 0) {
-    sample.native_pacing_bps =
-        accumulator.native_pacing_bps_bytes / accumulator.sent_bytes;
-    sample.commanded_pacing_bps =
-        accumulator.commanded_pacing_bps_bytes / accumulator.sent_bytes;
-    sample.bytes_in_flight =
-        accumulator.bytes_in_flight_bytes / accumulator.sent_bytes;
-    sample.queue_servo_factor =
-        accumulator.queue_servo_factor_bytes / accumulator.sent_bytes;
-  }
-  if (duration_s > 0.0) {
-    sample.actual_send_bps = 8.0 * accumulator.sent_bytes / duration_s;
-    sample.delivery_rate_bps = 8.0 * accumulator.acked_bytes / duration_s;
-  }
-  if (!accumulator.latest_rtt_samples_s.empty()) {
-    sample.latest_rtt_s = Median(accumulator.latest_rtt_samples_s);
-    sample.qdelay_s = std::max(
-        0.0, sample.latest_rtt_s - fbbr_probe_signature_.rtprop_s);
-    sample.rtt_valid = true;
-  }
-  const double congestion_bytes = static_cast<double>(
-      accumulator.acked_bytes + accumulator.lost_bytes);
-  sample.loss_ratio = congestion_bytes > 0.0
-      ? accumulator.lost_bytes / congestion_bytes
-      : 0.0;
-  sample.ecn_ratio = accumulator.acked_bytes > 0
-      ? static_cast<double>(accumulator.ecn_marked_bytes) /
-            accumulator.acked_bytes
-      : (accumulator.ecn_marked_bytes > 0 ? 1.0 : 0.0);
-  const double activity_bytes = static_cast<double>(
-      accumulator.sent_bytes + accumulator.acked_bytes);
-  sample.app_limited_fraction = activity_bytes > 0.0
-      ? (accumulator.app_limited_sent_bytes +
-         accumulator.app_limited_acked_bytes) /
-            activity_bytes
-      : 1.0;
-  sample.cwnd_limited_fraction = accumulator.sent_bytes > 0
-      ? static_cast<double>(accumulator.cwnd_limited_sent_bytes) /
-            accumulator.sent_bytes
-      : 1.0;
-  sample.recovery_fraction = activity_bytes > 0.0
-      ? static_cast<double>(accumulator.recovery_sent_bytes +
-                            accumulator.recovery_acked_bytes) /
-            activity_bytes
-      : 0.0;
-  // Coverage expresses whether the sender actually realized this fixed time
-  // bin.  A bin with no ACK remains a legitimate zero-delivery observation;
-  // missing RTT is separately represented by rtt_valid and never zero-filled.
-  sample.coverage = accumulator.send_events > 0 ? 1.0 : 0.0;
-  sample.valid = duration_s > 0.0 && sample.native_pacing_bps > 0.0 &&
-                 accumulator.send_events > 0;
-  sample.phase_transition = accumulator.phase_transition;
-  sample.queue_servo_transition = accumulator.queue_servo_transition;
-  return sample;
-}
-
-void FBBRSender::FBBRFrequencySearchFinalizeReadyBlocks(QuicTime now,
-                                                   bool include_tail) {
-  if (!fbbr_probe_active_ || fbbr_period_.IsZero()) return;
-  FBBRFrequencySearchEnsureBinsThrough(now);
-  fbbr_phase_bins_.clear();
-  fbbr_phase_bins_.reserve(fbbr_phase_bin_accumulators_.size());
-  for (const auto& accumulator : fbbr_phase_bin_accumulators_) {
-    fbbr_phase_bins_.push_back(FBBRFrequencySearchFinalizePhaseBin(accumulator));
-  }
-  FBBRSearchUpdateCarrierSense();
-  const int64_t bins_per_cycle =
-      static_cast<int64_t>(fbbr_frequency_search_config_.phase_bins_per_cycle);
-  const double now_s = static_cast<double>(
-      (now - QuicTime::Zero()).ToMicroseconds()) / 1e6;
-
-  if (fbbr_frequency_search_config_.search_controller_enabled) {
-    if (fbbr_frequency_search_config_.event_triggered_windows_enabled) {
-      int64_t last_completed_bin = -1;
-      for (const auto& bin : fbbr_phase_bins_) {
-        if (bin.time_end_s <= now_s) {
-          last_completed_bin = std::max(last_completed_bin, bin.bin_index);
-        }
-      }
-      const int64_t completed_cycle =
-          (last_completed_bin + 1) / bins_per_cycle - 1;
-      auto analyze_window = [this, now, bins_per_cycle](
-          int64_t first_bin, int64_t window_cycles,
-          EventWindowState state, double stride_cycles,
-          const std::string& stop_reason, bool force_uncertain) {
-        FBBRFrequencySearchConfig window_config =
-            fbbr_frequency_search_config_;
-        window_config.analysis_cycles = static_cast<uint32_t>(window_cycles);
-        window_config.min_valid_cycles = static_cast<uint32_t>(std::max<int64_t>(
-            1, std::min<int64_t>(window_cycles,
-                fbbr_frequency_search_config_.min_direction_cycles)));
-        window_config.min_valid_analysis_cycles =
-            window_config.min_valid_cycles;
-        FbbrOperatingPointBlockResult result = FBBRFrequencySearch::AnalyzeBlock(
-            window_config, fbbr_probe_signature_, fbbr_phase_bins_, first_bin,
-            window_cycles * bins_per_cycle, fbbr_next_block_id_,
-            fbbr_previous_block_delay_s_);
-        result.event_window_id = fbbr_next_event_window_id_++;
-        result.trigger_cycle_id = fbbr_trigger_cycle_id_;
-        result.capture_start_s = result.start_time_s;
-        result.capture_end_s = result.end_time_s;
-        result.window_length_cycles = static_cast<double>(window_cycles);
-        result.window_stride_cycles = stride_cycles;
-        result.sequential_stop_reason = stop_reason;
-        result.event_window_state = state;
-        result.trigger_source = fbbr_active_trigger_source_;
-        result.trigger_cycle_excluded_from_score =
-            first_bin >= (fbbr_trigger_cycle_id_ + 1) * bins_per_cycle;
-        result.overlap_fraction = state == EventWindowState::kContinuousTrack
-            ? std::max(0.0, 1.0 - stride_cycles /
-                  std::max(result.window_length_cycles, 1.0))
-            : 0.0;
-        result.independent_for_control =
-            fbbr_last_control_window_start_bin_ < 0 ||
-            first_bin - fbbr_last_control_window_start_bin_ >=
-                static_cast<int64_t>(std::ceil(
-                    fbbr_frequency_search_config_.control_decision_stride_cycles *
-                    bins_per_cycle));
-        result.independent_for_trusted =
-            fbbr_last_trusted_window_start_bin_ < 0 ||
-            first_bin - fbbr_last_trusted_window_start_bin_ >=
-                std::max<int64_t>(
-                    window_cycles * bins_per_cycle / 2,
-                    static_cast<int64_t>(
-                        fbbr_frequency_search_config_.
-                            trusted_independent_stride_cycles) *
-                        bins_per_cycle);
-        result.lockable_score = result.lockable_score &&
-            window_cycles >= static_cast<int64_t>(
-                fbbr_frequency_search_config_.min_score_cycles);
-        if (!result.independent_for_trusted || !result.lockable_score) {
-          result.candidate.valid = false;
-          result.candidate.invalid_reason = !result.lockable_score
-              ? "score_cycles_insufficient"
-              : "overlap_not_independent_for_trusted";
-        }
-        if (force_uncertain) {
-          result.classification = FbbrOperatingPointClassification::kInvalid;
-          result.candidate.valid = false;
-          result.candidate.invalid_reason = "sequential_uncertain";
-          result.invalid_reason = AppendReason(result.invalid_reason,
-                                               "sequential_uncertain");
-        }
-        if (!fbbr_search_state_.is_pulser) {
-          result.classification = FbbrOperatingPointClassification::kInvalid;
-          result.candidate.valid = false;
-          result.candidate.invalid_reason = "watcher_observation";
-          result.invalid_reason = AppendReason(result.invalid_reason,
-                                               "watcher_observation");
-        }
-        if (fbbr_block_invalidated_) {
-          result.classification = FbbrOperatingPointClassification::kInvalid;
-          result.measurement_confidence = 0.0;
-          result.candidate.valid = false;
-          result.candidate.invalid_reason = "block_state_changed";
-          result.invalid_reason = AppendReason(result.invalid_reason,
-                                               "block_state_changed");
-          fbbr_block_invalidated_ = false;
-        }
-        fbbr_previous_block_delay_s_ = result.selected_delay_s;
-        fbbr_block_results_.push_back(result);
-        if (fbbr_frequency_search_config_.trace_verbosity >= 2) {
-          const int64_t last_bin = first_bin + window_cycles * bins_per_cycle;
-          for (int64_t index = first_bin; index < last_bin; ++index) {
-            FBBRFrequencySearchEmitBinTrace(
-                fbbr_phase_bins_[static_cast<size_t>(index)],
-                fbbr_next_block_id_);
-          }
-        }
-        FBBRSearchUpdateRtpropAnchor(
-            result, first_bin, window_cycles * bins_per_cycle);
-        ++fbbr_next_block_id_;
-        FBBRSearchApplyWindowDecision(now, result, first_bin);
-        if (result.independent_for_control) {
-          fbbr_last_control_window_start_bin_ = first_bin;
-        }
-        if (!fbbr_control_decisions_.empty() &&
-            fbbr_control_decisions_.back().window_candidate_valid &&
-            result.independent_for_trusted) {
-          fbbr_last_trusted_window_start_bin_ = first_bin;
-        }
-        FBBRFrequencySearchEmitBlockTrace(result);
-        return !fbbr_control_decisions_.empty() &&
-            (std::abs(fbbr_control_decisions_.back().applied_next_baseline_bps -
-                      fbbr_control_decisions_.back().baseline_before_bps) /
-                 std::max(fbbr_control_decisions_.back().baseline_before_bps,
-                          1.0) > 1e-6 ||
-             fbbr_control_decisions_.back().hard_loss_abort);
-      };
-
-      while (fbbr_next_trigger_cycle_ >= 0 &&
-             fbbr_next_trigger_cycle_ <= completed_cycle) {
-        const int64_t cycle = fbbr_next_trigger_cycle_;
-        FBBRTriggerCycleResult trigger =
-            FBBRFrequencySearch::AnalyzeTriggerCycle(
-                fbbr_frequency_search_config_, fbbr_probe_signature_,
-                fbbr_phase_bins_, cycle, fbbr_event_window_state_,
-                fbbr_search_state_.is_pulser);
-        fbbr_latest_trigger_cycle_result_ = trigger;
-        ++fbbr_dual_trigger_attempts_;
-        if (trigger.combined_trigger_source == "DELIVERY_ONLY") {
-          ++fbbr_delivery_triggers_;
-        } else if (trigger.combined_trigger_source == "QUEUE_ONLY") {
-          ++fbbr_queue_triggers_;
-        } else if (trigger.combined_trigger_source == "BOTH") {
-          ++fbbr_both_triggers_;
-        } else if (trigger.combined_trigger_source == "HARD_SAFETY_ONLY") {
-          ++fbbr_hard_safety_events_;
-        }
-        bool restart_carrier = false;
-
-        if (fbbr_event_window_state_ ==
-            EventWindowState::kPostBaselineSettling) {
-          if (fbbr_settling_cycles_remaining_ > 0) {
-            --fbbr_settling_cycles_remaining_;
-          }
-          trigger.trigger_pass = false;
-          trigger.continue_pass = false;
-          trigger.trigger_reason = "post_baseline_settling";
-          if (fbbr_settling_cycles_remaining_ == 0) {
-            fbbr_event_window_state_ = EventWindowState::kIdleListen;
-          }
-        } else if (fbbr_event_window_state_ == EventWindowState::kIdleListen ||
-                   fbbr_event_window_state_ == EventWindowState::kPaused) {
-          if (trigger.trigger_pass) {
-            fbbr_trigger_cycle_id_ = cycle;
-            fbbr_active_trigger_source_ = trigger.combined_trigger_source;
-            fbbr_capture_start_bin_ = (cycle + 1) * bins_per_cycle;
-            fbbr_event_window_state_ = EventWindowState::kCapture;
-            fbbr_bad_cycle_streak_ = 0;
-            fbbr_no_trigger_streak_ = 0;
-            fbbr_have_previous_sequential_result_ = false;
-            trigger.window_state = EventWindowState::kTriggerArmed;
-          } else {
-            ++fbbr_no_trigger_streak_;
-            if (fbbr_event_window_state_ == EventWindowState::kPaused) {
-              trigger.pause_reason = "periodic_response_absent";
-            }
-          }
-        } else if (fbbr_event_window_state_ == EventWindowState::kCapture) {
-          fbbr_bad_cycle_streak_ = trigger.continue_pass
-              ? 0 : fbbr_bad_cycle_streak_ + 1;
-          const int64_t capture_start_cycle =
-              fbbr_capture_start_bin_ / bins_per_cycle;
-          const int64_t capture_cycles = cycle - capture_start_cycle + 1;
-          if (capture_cycles >= 3) {
-            FBBRFrequencySearchConfig sequential_config =
-                fbbr_frequency_search_config_;
-            sequential_config.min_valid_analysis_cycles =
-                static_cast<uint32_t>(capture_cycles);
-            FbbrOperatingPointBlockResult sequential =
-                FBBRFrequencySearch::AnalyzeBlock(
-                    sequential_config, fbbr_probe_signature_, fbbr_phase_bins_,
-                    fbbr_capture_start_bin_, capture_cycles * bins_per_cycle,
-                    fbbr_next_block_id_, fbbr_previous_block_delay_s_);
-            const int sign = sequential.direction_score > 0.0 ? 1 :
-                             sequential.direction_score < 0.0 ? -1 : 0;
-            const bool direction_stable = fbbr_have_previous_sequential_result_ &&
-                sign != 0 && sign == fbbr_previous_sequential_direction_sign_;
-            const bool direction_evidence =
-                sequential.gradient_ci90_low > 0.0 ||
-                sequential.gradient_ci90_high < 0.0 ||
-                sequential.underload_evidence >=
-                    fbbr_frequency_search_config_.direction_evidence_min ||
-                sequential.overload_evidence >=
-                    fbbr_frequency_search_config_.direction_evidence_min;
-            const bool direction_ready = capture_cycles >=
-                    static_cast<int64_t>(
-                        fbbr_frequency_search_config_.min_direction_cycles) &&
-                direction_stable && direction_evidence;
-            const bool score_stable = fbbr_have_previous_sequential_result_ &&
-                sequential.classification ==
-                    fbbr_previous_sequential_classification_ &&
-                std::abs(sequential.target_score -
-                         fbbr_previous_sequential_score_) <=
-                    fbbr_frequency_search_config_.sequential_score_delta_max;
-            const bool score_ready = capture_cycles >=
-                    static_cast<int64_t>(
-                        fbbr_frequency_search_config_.min_score_cycles) &&
-                score_stable && sequential.measurement_confidence >=
-                    fbbr_frequency_search_config_.measurement_confidence_update_min;
-            const bool reached_max = capture_cycles >=
-                static_cast<int64_t>(
-                    fbbr_frequency_search_config_.max_window_cycles);
-            fbbr_previous_sequential_direction_sign_ = sign;
-            fbbr_previous_sequential_classification_ = sequential.classification;
-            fbbr_previous_sequential_score_ = sequential.target_score;
-            fbbr_have_previous_sequential_result_ = true;
-            if (direction_ready || score_ready || reached_max) {
-              const bool changed = analyze_window(
-                  fbbr_capture_start_bin_, capture_cycles,
-                  EventWindowState::kCapture, 0.0,
-                  direction_ready ? "DIRECTION_CI_STABLE" :
-                  score_ready ? "SCORE_AND_CLASS_STABLE" :
-                                "MAX_CYCLES_UNCERTAIN",
-                  reached_max && !direction_ready && !score_ready);
-              if (changed) {
-                fbbr_event_window_state_ =
-                    EventWindowState::kPostBaselineSettling;
-                fbbr_settling_cycles_remaining_ =
-                    fbbr_frequency_search_config_.post_update_settling_cycles;
-                fbbr_capture_start_bin_ = -1;
-                fbbr_next_tracking_start_bin_ = -1;
-              } else if (trigger.continue_pass) {
-                fbbr_event_window_state_ = EventWindowState::kContinuousTrack;
-                const int64_t stride_bins = std::max<int64_t>(
-                    1, static_cast<int64_t>(std::llround(
-                        fbbr_frequency_search_config_.tracking_stride_cycles *
-                        bins_per_cycle)));
-                fbbr_next_tracking_start_bin_ =
-                    fbbr_capture_start_bin_ + stride_bins;
-              } else {
-                fbbr_event_window_state_ = EventWindowState::kPaused;
-              }
-            }
-          }
-        } else if (fbbr_event_window_state_ ==
-                   EventWindowState::kContinuousTrack) {
-          fbbr_bad_cycle_streak_ = trigger.continue_pass
-              ? 0 : fbbr_bad_cycle_streak_ + 1;
-          if (fbbr_bad_cycle_streak_ >=
-              fbbr_frequency_search_config_.bad_cycles_to_pause) {
-            fbbr_event_window_state_ = EventWindowState::kPaused;
-            trigger.pause_reason = "two_bad_cycles";
-            fbbr_next_tracking_start_bin_ = -1;
-          } else {
-            const int64_t tracking_cycles =
-                fbbr_frequency_search_config_.tracking_window_cycles;
-            const int64_t tracking_bins = tracking_cycles * bins_per_cycle;
-            const int64_t completed_bins = (completed_cycle + 1) * bins_per_cycle;
-            const int64_t stride_bins = std::max<int64_t>(
-                1, static_cast<int64_t>(std::llround(
-                    fbbr_frequency_search_config_.tracking_stride_cycles *
-                    bins_per_cycle)));
-            while (fbbr_next_tracking_start_bin_ >= 0 &&
-                   fbbr_next_tracking_start_bin_ + tracking_bins <=
-                       completed_bins) {
-              const bool changed = analyze_window(
-                  fbbr_next_tracking_start_bin_, tracking_cycles,
-                  EventWindowState::kContinuousTrack,
-                  fbbr_frequency_search_config_.tracking_stride_cycles,
-                  "CONTINUOUS_TRACK", false);
-              if (changed) {
-                fbbr_event_window_state_ =
-                    EventWindowState::kPostBaselineSettling;
-                fbbr_settling_cycles_remaining_ =
-                    fbbr_frequency_search_config_.post_update_settling_cycles;
-                fbbr_next_tracking_start_bin_ = -1;
-                break;
-              }
-              fbbr_next_tracking_start_bin_ += stride_bins;
-            }
-          }
-        }
-
-        if (fbbr_search_state_.is_pulser) {
-          ++fbbr_pulser_lease_age_cycles_;
-          if (fbbr_search_state_.pulser_lease_remaining > 0) {
-            --fbbr_search_state_.pulser_lease_remaining;
-          }
-          if (fbbr_pulser_lease_age_cycles_ >=
-                  fbbr_frequency_search_config_.max_pulser_lease_cycles &&
-              fbbr_event_window_state_ != EventWindowState::kCapture &&
-              fbbr_event_window_state_ != EventWindowState::kContinuousTrack) {
-            fbbr_search_state_.is_pulser = false;
-            fbbr_search_state_.state = FBBRSearchState::kWatcher;
-          }
-        }
-
-        if ((fbbr_event_window_state_ == EventWindowState::kIdleListen ||
-             fbbr_event_window_state_ == EventWindowState::kPaused) &&
-            fbbr_search_state_.is_pulser &&
-            fbbr_no_trigger_streak_ >=
-                fbbr_frequency_search_config_.min_direction_cycles &&
-            (trigger.weak_periodic_response ||
-             trigger.trigger_reason == "actual_input_unmeasurable")) {
-          const double old_period = fbbr_probe_signature_.period_s;
-          const double new_period = ClampValue(
-              old_period * fbbr_frequency_search_config_.period_increase_factor,
-              fbbr_frequency_search_config_.carrier_period_min_s,
-              fbbr_frequency_search_config_.carrier_period_max_s);
-          if (new_period > old_period + 1e-9) {
-            fbbr_period_ = TimeDelta::FromMicroseconds(
-                static_cast<int64_t>(std::llround(new_period * 1e6)));
-            fbbr_probe_signature_.period_s = new_period;
-            fbbr_probe_signature_.frequency_hz = 1.0 / new_period;
-            fbbr_probe_signature_.period_rtts = static_cast<uint32_t>(
-                std::max<int64_t>(1, static_cast<int64_t>(std::llround(
-                    new_period /
-                    std::max(fbbr_probe_signature_.rtprop_s, 1e-9)))));
-            fbbr_search_state_.carrier_period_s = new_period;
-            fbbr_period_reselected_ = true;
-            ++fbbr_period_scan_count_;
-            restart_carrier = true;
-          } else {
-            const double maximum_factor = 1.0 +
-                fbbr_frequency_search_config_.max_amplitude_change_per_update;
-            const double factor = std::min(
-                fbbr_frequency_search_config_.amplitude_increase_factor,
-                maximum_factor);
-            const double queue_budget_limit = 2.0 * M_PI *
-                fbbr_frequency_search_config_.acquire_probe_budget_bdp /
-                std::max<uint32_t>(1, fbbr_probe_signature_.period_rtts);
-            const double new_amplitude = ClampValue(
-                factor * fbbr_probe_signature_.amplitude_ratio,
-                fbbr_frequency_search_config_.probe_min_amplitude_ratio,
-                std::min(fbbr_frequency_search_config_.probe_max_amplitude_ratio,
-                         queue_budget_limit));
-            if (new_amplitude > fbbr_probe_signature_.amplitude_ratio + 1e-9) {
-              fbbr_probe_signature_.amplitude_ratio = new_amplitude;
-              fbbr_search_state_.current_amplitude_ratio = new_amplitude;
-              restart_carrier = true;
-            }
-          }
-        }
-
-        trigger.window_state = fbbr_event_window_state_;
-        FBBREmitTriggerCycleTrace(trigger);
-        ++fbbr_next_trigger_cycle_;
-        if (restart_carrier) {
-          cruise_start_time_ = now;
-          fbbr_phase_bin_accumulators_.clear();
-          fbbr_phase_bins_.clear();
-          fbbr_previous_block_delay_s_ =
-              std::numeric_limits<double>::quiet_NaN();
-          fbbr_event_window_state_ = EventWindowState::kPostBaselineSettling;
-          fbbr_settling_cycles_remaining_ =
-              fbbr_frequency_search_config_.post_update_settling_cycles;
-          fbbr_no_trigger_streak_ = 0;
-          fbbr_bad_cycle_streak_ = 0;
-            fbbr_trigger_cycle_id_ = -1;
-            fbbr_active_trigger_source_ = "NONE";
-          fbbr_capture_start_bin_ = -1;
-          fbbr_next_tracking_start_bin_ = -1;
-          fbbr_next_trigger_cycle_ = std::max<int64_t>(
-              fbbr_frequency_search_config_.carrier_sensing_cycles,
-              fbbr_frequency_search_config_.post_update_settling_cycles);
-          FBBRFrequencySearchEnsureBinsThrough(now);
-          return;
-        }
-      }
-      (void)include_tail;
-      return;
-    }
-
-    const int64_t block_bins = static_cast<int64_t>(
-        fbbr_frequency_search_config_.analysis_cycles_per_window) * bins_per_cycle;
-    while (fbbr_next_analysis_output_bin_ >= 0 && block_bins > 0) {
-      const int64_t first_bin = fbbr_next_analysis_output_bin_;
-      const int64_t last_bin = first_bin + block_bins - 1;
-      const FbbrPhaseBinSample* last =
-          last_bin >= 0 &&
-                  static_cast<size_t>(last_bin) < fbbr_phase_bins_.size()
-              ? &fbbr_phase_bins_[static_cast<size_t>(last_bin)]
-              : nullptr;
-      if (last == nullptr || last->time_end_s > now_s) break;
-      FBBRFrequencySearchConfig window_config = fbbr_frequency_search_config_;
-      window_config.analysis_cycles =
-          window_config.analysis_cycles_per_window;
-      window_config.min_valid_cycles =
-          window_config.min_valid_analysis_cycles;
-      FbbrOperatingPointBlockResult result = FBBRFrequencySearch::AnalyzeBlock(
-          window_config, fbbr_probe_signature_, fbbr_phase_bins_, first_bin,
-          block_bins, fbbr_next_block_id_, fbbr_previous_block_delay_s_);
-      if (!fbbr_search_state_.is_pulser) {
-        result.classification = FbbrOperatingPointClassification::kInvalid;
-        result.candidate.valid = false;
-        result.candidate.invalid_reason = "watcher_observation";
-        result.invalid_reason = AppendReason(result.invalid_reason,
-                                             "watcher_observation");
-      }
-      if (fbbr_block_invalidated_) {
-        result.classification = FbbrOperatingPointClassification::kInvalid;
-        result.measurement_confidence = 0.0;
-        result.candidate.valid = false;
-        result.candidate.invalid_reason = "block_state_changed";
-        result.invalid_reason = AppendReason(result.invalid_reason,
-                                             "block_state_changed");
-        fbbr_block_invalidated_ = false;
-      }
-      fbbr_previous_block_delay_s_ = result.selected_delay_s;
-      fbbr_block_results_.push_back(result);
-      if (fbbr_frequency_search_config_.trace_verbosity >= 2) {
-        for (int64_t index = first_bin; index <= last_bin; ++index) {
-          FBBRFrequencySearchEmitBinTrace(
-              fbbr_phase_bins_[static_cast<size_t>(index)],
-              fbbr_next_block_id_);
-        }
-      }
-      FBBRSearchUpdateRtpropAnchor(result, first_bin, block_bins);
-      ++fbbr_next_block_id_;
-      fbbr_next_analysis_output_bin_ = -1;
-      FBBRSearchApplyWindowDecision(now, result, first_bin);
-      FBBRFrequencySearchEmitBlockTrace(result);
-      // ApplyWindowDecision schedules exactly one later control window.  It
-      // cannot already be complete at this ACK event, so avoid reusing bins
-      // from a different fixed-baseline interval.
-      break;
-    }
-    (void)include_tail;
-    return;
-  }
-  const int64_t warmup_bins =
-      fbbr_frequency_search_config_.warmup_cycles * bins_per_cycle;
-  const int64_t nominal_feedback_bins = static_cast<int64_t>(std::llround(
-      fbbr_probe_signature_.rtprop_s /
-      std::max(fbbr_probe_signature_.period_s / bins_per_cycle, 1e-9)));
-  const int64_t first_analysis_bin = warmup_bins + nominal_feedback_bins;
-  const int64_t block_bins =
-      fbbr_frequency_search_config_.analysis_cycles * bins_per_cycle;
-  while (true) {
-    const int64_t first_bin =
-        first_analysis_bin +
-        static_cast<int64_t>(fbbr_next_block_id_) * block_bins;
-    const int64_t last_bin = first_bin + block_bins - 1;
-    const FbbrPhaseBinSample* last =
-        last_bin >= 0 && static_cast<size_t>(last_bin) < fbbr_phase_bins_.size()
-            ? &fbbr_phase_bins_[static_cast<size_t>(last_bin)]
-            : nullptr;
-    // The output block already starts one nominal RTprop after the aligned
-    // input code block.  Once its final phase bin is closed no future sample is
-    // needed: delay refinement only looks backward into send-side bins.
-    if (last == nullptr || last->time_end_s > now_s) {
-      break;
-    }
-    FbbrOperatingPointBlockResult result = FBBRFrequencySearch::AnalyzeBlock(
-        fbbr_frequency_search_config_, fbbr_probe_signature_, fbbr_phase_bins_,
-        first_bin, block_bins, fbbr_next_block_id_,
-        fbbr_previous_block_delay_s_);
-    if (fbbr_block_invalidated_) {
-      result.classification = FbbrOperatingPointClassification::kInvalid;
-      result.measurement_confidence = 0.0;
-      result.candidate.valid = false;
-      result.candidate.invalid_reason = "block_state_changed";
-      result.invalid_reason = AppendReason(result.invalid_reason,
-                                           "block_state_changed");
-      fbbr_block_invalidated_ = false;
-    }
-    fbbr_previous_block_delay_s_ = result.selected_delay_s;
-    fbbr_block_results_.push_back(result);
-    if (fbbr_frequency_search_config_.trace_verbosity >= 2) {
-      for (int64_t index = first_bin; index <= last_bin; ++index) {
-        FBBRFrequencySearchEmitBinTrace(
-            fbbr_phase_bins_[static_cast<size_t>(index)],
-            fbbr_next_block_id_);
-      }
-    }
-    FBBRFrequencySearchEmitBlockTrace(result);
-    ++fbbr_next_block_id_;
-  }
-
-  // Shadow windows are deliberately kept out of fbbr_block_results_.  They
-  // use a private config copy and are emitted only as diagnostics, so enabling
-  // this path cannot affect consensus, history, pacing, or CRUISE lifetime.
-  if (fbbr_frequency_search_config_.validation_shadow_windows &&
-      fbbr_frequency_search_config_.validation_shadow_analysis_cycles > 0 &&
-      fbbr_frequency_search_config_.validation_shadow_stride_cycles > 0) {
-    const int64_t shadow_bins = static_cast<int64_t>(
-        fbbr_frequency_search_config_.validation_shadow_analysis_cycles) * bins_per_cycle;
-    const int64_t shadow_stride_bins = static_cast<int64_t>(
-        fbbr_frequency_search_config_.validation_shadow_stride_cycles) * bins_per_cycle;
-    while (true) {
-      const int64_t first_bin = first_analysis_bin +
-          static_cast<int64_t>(fbbr_next_shadow_window_id_) * shadow_stride_bins;
-      const int64_t last_bin = first_bin + shadow_bins - 1;
-      const FbbrPhaseBinSample* last =
-          last_bin >= 0 && static_cast<size_t>(last_bin) < fbbr_phase_bins_.size()
-              ? &fbbr_phase_bins_[static_cast<size_t>(last_bin)]
-              : nullptr;
-      if (last == nullptr || last->time_end_s > now_s) break;
-      FBBRFrequencySearchConfig shadow_config = fbbr_frequency_search_config_;
-      shadow_config.analysis_cycles =
-          shadow_config.validation_shadow_analysis_cycles;
-      shadow_config.min_valid_cycles =
-          shadow_config.validation_shadow_min_valid_cycles;
-      FbbrOperatingPointBlockResult result = FBBRFrequencySearch::AnalyzeBlock(
-          shadow_config, fbbr_probe_signature_, fbbr_phase_bins_, first_bin,
-          shadow_bins, fbbr_next_shadow_window_id_,
-          std::numeric_limits<double>::quiet_NaN());
-      result.candidate.valid = false;
-      result.candidate.bandwidth_bps = 0.0;
-      result.candidate.invalid_reason = "validation_shadow_window";
-      FBBRFrequencySearchEmitShadowWindowTrace(result);
-      ++fbbr_next_shadow_window_id_;
-    }
-  }
-
-  if (!include_tail) return;
-  const int64_t tail_first =
-      first_analysis_bin +
-      static_cast<int64_t>(fbbr_next_block_id_) * block_bins;
-  int64_t completed_tail_bins = 0;
-  for (int64_t index = tail_first;
-       index < static_cast<int64_t>(fbbr_phase_bins_.size()); ++index) {
-    if (fbbr_phase_bins_[static_cast<size_t>(index)].time_end_s <= now_s) {
-      ++completed_tail_bins;
-    }
-  }
-  if (completed_tail_bins > 0) {
-    FbbrOperatingPointBlockResult tail;
-    tail.cruise_id = fbbr_probe_signature_.cruise_id;
-    tail.block_id = fbbr_next_block_id_;
-    tail.frequency_hz = fbbr_probe_signature_.frequency_hz;
-    tail.period_rtts = fbbr_probe_signature_.period_rtts;
-    tail.code_id = fbbr_probe_signature_.code_id;
-    tail.target_amplitude_ratio = fbbr_probe_signature_.amplitude_ratio;
-    tail.rtprop_frozen_s = fbbr_probe_signature_.rtprop_s;
-    tail.valid_cycles = static_cast<uint32_t>(
-        completed_tail_bins / bins_per_cycle);
-    tail.classification = FbbrOperatingPointClassification::kInvalid;
-    tail.invalid_reason = "incomplete_tail";
-    if (tail_first < static_cast<int64_t>(fbbr_phase_bins_.size())) {
-      tail.start_time_s = fbbr_phase_bins_[tail_first].time_start_s;
-      tail.end_time_s = fbbr_phase_bins_[tail_first + completed_tail_bins - 1]
-                            .time_end_s;
-    }
-    FBBRFrequencySearchEmitBlockTrace(tail);
-  }
-}
-
-void FBBRSender::FBBRSearchUpdateRtpropAnchor(
-    const FbbrOperatingPointBlockResult& result,
-    int64_t first_output_bin,
-    int64_t output_bin_count) {
-  if (result.classification == FbbrOperatingPointClassification::kInvalid ||
-      result.classification == FbbrOperatingPointClassification::kDynamic ||
-      result.loss_ratio > 0.0) {
-    return;
-  }
-  std::vector<double> negative_rtt_s;
-  const int64_t end = std::min<int64_t>(
-      first_output_bin + output_bin_count,
-      static_cast<int64_t>(fbbr_phase_bins_.size()));
-  for (int64_t index = std::max<int64_t>(0, first_output_bin);
-       index < end; ++index) {
-    const FbbrPhaseBinSample& bin =
-        fbbr_phase_bins_[static_cast<size_t>(index)];
-    if (bin.rtt_valid && bin.coded_excitation < 0.0 &&
-        bin.actual_send_bps <= 1.01 * bin.native_pacing_bps &&
-        bin.app_limited_fraction <= 0.0) {
-      negative_rtt_s.push_back(bin.latest_rtt_s);
-    }
-  }
-  if (negative_rtt_s.size() < 4) return;
-  std::sort(negative_rtt_s.begin(), negative_rtt_s.end());
-  const size_t p05_index = static_cast<size_t>(std::floor(
-      0.05 * static_cast<double>(negative_rtt_s.size() - 1)));
-  const TimeDelta candidate = TimeDelta::FromMicroseconds(
-      static_cast<int64_t>(std::llround(negative_rtt_s[p05_index] * 1e6)));
-  if (!candidate.IsZero()) {
-    const bool lower = fbbr_opi_rtprop_anchor_.IsZero() ||
-                       candidate < fbbr_opi_rtprop_anchor_;
-    const bool confirms_anchor = !fbbr_opi_rtprop_anchor_.IsZero() &&
-        candidate.ToMicroseconds() <=
-            static_cast<int64_t>(std::llround(
-                1.02 * fbbr_opi_rtprop_anchor_.ToMicroseconds()));
-    if (lower) {
-      fbbr_opi_rtprop_anchor_ = candidate;
-      fbbr_opi_rtprop_source_ = "NEGATIVE_HALF_P05";
-      fbbr_probe_signature_.rtprop_s = static_cast<double>(
-          candidate.ToMicroseconds()) / 1e6;
-    } else if (confirms_anchor) {
-      fbbr_opi_rtprop_source_ = "NEGATIVE_HALF_CONFIRMED";
-    }
-    if (lower || confirms_anchor) {
-      fbbr_opi_rtprop_confidence_ = std::min(
-          1.0, fbbr_opi_rtprop_confidence_ + 0.20);
-    }
-  }
-}
-
-void FBBRSender::FBBRSearchApplyWindowDecision(
-    QuicTime now,
-    const FbbrOperatingPointBlockResult& result,
-    int64_t first_output_bin) {
-  FbbrOperatingPointBlockResult control_result = result;
-  control_result.rtprop_confidence = fbbr_opi_rtprop_confidence_;
-  if (!fbbr_search_state_.is_pulser) {
-    control_result.collision_suspected = false;
-  }
-  FBBRWindowControlDecision decision = FBBRSearchController::Decide(
-      fbbr_frequency_search_config_, control_result,
-      static_cast<double>(BandwidthEstimate().ToBitsPerSecond()),
-      static_cast<double>(fbbr_opi_rtprop_anchor_.ToMicroseconds()) / 1e6,
-      &fbbr_search_state_);
-  if (control_result.classification !=
-          FbbrOperatingPointClassification::kInvalid &&
-      control_result.classification !=
-          FbbrOperatingPointClassification::kDynamic) {
-    fbbr_latest_sustainable_direction_ = control_result.frequency_direction;
-  }
-  fbbr_control_decisions_.push_back(decision);
-
-  const bool pulser_collision =
-      fbbr_search_state_.is_pulser && result.collision_suspected;
-  fbbr_search_state_.collision_suspected = pulser_collision;
-  if (pulser_collision) {
-    ++fbbr_search_state_.collision_count;
-    ++fbbr_search_state_.search_generation;
-    fbbr_search_state_.is_pulser = false;
-    fbbr_search_state_.carrier_detected = false;
-    fbbr_search_state_.carrier_detection_streak = 0;
-    fbbr_search_state_.state = FBBRSearchState::kPulserElection;
-    const double elapsed_s = static_cast<double>(
-        (now - cruise_start_time_).ToMicroseconds()) / 1e6;
-    fbbr_search_state_.election_start_cycle = static_cast<int64_t>(std::floor(
-        elapsed_s / std::max(fbbr_probe_signature_.period_s, 1e-9)));
-    fbbr_search_state_.election_backoff_cycles =
-        FBBRSearchElectionBackoff(fbbr_search_state_.search_generation);
-  }
-
-  const bool input_snr_low =
-      result.invalid_reason.find("input_snr_low") != std::string::npos;
-  if (!fbbr_frequency_search_config_.event_triggered_windows_enabled &&
-      input_snr_low &&
-      fbbr_frequency_search_config_.analysis_cycles_per_window < 16) {
-    fbbr_frequency_search_config_.analysis_cycles_per_window = std::min<uint32_t>(
-        16, fbbr_frequency_search_config_.analysis_cycles_per_window + 4);
-    decision.update_reason += "|MEMORY_INCREASE";
-    fbbr_control_decisions_.back() = decision;
-  }
-
-  if (!fbbr_frequency_search_config_.event_triggered_windows_enabled &&
-      fbbr_search_state_.is_pulser &&
-      fbbr_search_state_.pulser_lease_remaining > 0) {
-    --fbbr_search_state_.pulser_lease_remaining;
-    if (fbbr_search_state_.pulser_lease_remaining == 0) {
-      fbbr_search_state_.is_pulser = false;
-      fbbr_search_state_.carrier_detected = false;
-      fbbr_search_state_.carrier_detection_streak = 0;
-      ++fbbr_search_state_.search_generation;
-      fbbr_search_state_.state = FBBRSearchState::kPulserElection;
-      const double elapsed_s = static_cast<double>(
-          (now - cruise_start_time_).ToMicroseconds()) / 1e6;
-      fbbr_search_state_.election_start_cycle = static_cast<int64_t>(std::floor(
-          elapsed_s / std::max(fbbr_probe_signature_.period_s, 1e-9)));
-      fbbr_search_state_.election_backoff_cycles =
-          FBBRSearchElectionBackoff(fbbr_search_state_.search_generation);
-      fbbr_search_state_.pulser_lease_remaining =
-          fbbr_frequency_search_config_.pulser_lease_decisions;
-      fbbr_search_state_.watcher_cooldown_cycles =
-          fbbr_frequency_search_config_.pulser_lease_decisions;
-    }
-  } else if (!fbbr_frequency_search_config_.event_triggered_windows_enabled &&
-             !fbbr_search_state_.is_pulser) {
-    if (fbbr_search_state_.watcher_cooldown_cycles > 0) {
-      --fbbr_search_state_.watcher_cooldown_cycles;
-    } else {
-      fbbr_search_state_.carrier_detected = false;
-      fbbr_search_state_.carrier_detection_streak = 0;
-      ++fbbr_search_state_.search_generation;
-      const double elapsed_s = static_cast<double>(
-          (now - cruise_start_time_).ToMicroseconds()) / 1e6;
-      fbbr_search_state_.election_start_cycle = static_cast<int64_t>(std::floor(
-          elapsed_s / std::max(fbbr_probe_signature_.period_s, 1e-9)));
-      fbbr_search_state_.election_backoff_cycles =
-          FBBRSearchElectionBackoff(fbbr_search_state_.search_generation);
-      fbbr_search_state_.watcher_cooldown_cycles =
-          fbbr_frequency_search_config_.pulser_lease_decisions;
-      fbbr_search_state_.state = FBBRSearchState::kPulserElection;
-    }
-  }
-
-  if (!fbbr_frequency_search_config_.event_triggered_windows_enabled &&
-      decision.request_period_increase && fbbr_period_scan_count_ < 3 &&
-      !fbbr_frequency_search_config_.probe_period_rtt_slots.empty()) {
-    const double old_period_s = fbbr_probe_signature_.period_s;
-    fbbr_search_state_.carrier_scan_index =
-        (fbbr_search_state_.carrier_scan_index + 1) %
-        fbbr_frequency_search_config_.probe_period_rtt_slots.size();
-    const double candidate_period_s =
-        fbbr_frequency_search_config_.probe_period_rtt_slots[
-            fbbr_search_state_.carrier_scan_index] *
-        std::max(fbbr_probe_signature_.rtprop_s, 1e-9);
-    const double new_period_s = ClampValue(
-        candidate_period_s,
-        fbbr_frequency_search_config_.carrier_period_min_s,
-        fbbr_frequency_search_config_.carrier_period_max_s);
-    if (std::abs(new_period_s - old_period_s) > 1e-9) {
-      fbbr_period_reselected_ = true;
-      ++fbbr_period_scan_count_;
-      fbbr_period_ = TimeDelta::FromMicroseconds(
-          static_cast<int64_t>(std::llround(new_period_s * 1e6)));
-      fbbr_probe_signature_.period_s = new_period_s;
-      fbbr_probe_signature_.frequency_hz = 1.0 / new_period_s;
-      fbbr_probe_signature_.period_rtts = static_cast<uint32_t>(
-          std::max<int64_t>(1, static_cast<int64_t>(std::llround(
-              new_period_s /
-              std::max(fbbr_probe_signature_.rtprop_s, 1e-9)))));
-      fbbr_search_state_.carrier_period_s = new_period_s;
-      fbbr_search_state_.control_window_index = 0;
-      fbbr_search_state_.consecutive_invalid = 0;
-      fbbr_search_state_.input_unrealized_streak = 0;
-      fbbr_search_state_.state = FBBRSearchState::kAcquireInput;
-      cruise_start_time_ = now;
-      fbbr_phase_bin_accumulators_.clear();
-      fbbr_phase_bins_.clear();
-      fbbr_previous_block_delay_s_ =
-          std::numeric_limits<double>::quiet_NaN();
-      fbbr_baseline_transition_pending_ = false;
-      fbbr_baseline_transition_start_ = QuicTime::Zero();
-      fbbr_baseline_transition_end_ = QuicTime::Zero();
-      fbbr_baseline_transition_from_bps_ =
-          decision.applied_next_baseline_bps;
-      fbbr_baseline_transition_to_bps_ =
-          decision.applied_next_baseline_bps;
-      const int64_t bins_per_cycle =
-          fbbr_frequency_search_config_.phase_bins_per_cycle;
-      const int64_t feedback_bins = static_cast<int64_t>(std::llround(
-          fbbr_probe_signature_.rtprop_s /
-          std::max(new_period_s / bins_per_cycle, 1e-9)));
-      fbbr_next_analysis_output_bin_ =
-          fbbr_frequency_search_config_.settling_cycles_per_window * bins_per_cycle +
-          feedback_bins;
-      FBBRFrequencySearchEnsureBinsThrough(now);
-      return;
-    }
-  }
-
-  double target_actual_amplitude =
-      fbbr_frequency_search_config_.actual_amplitude_target_acquire;
-  double queue_budget_bdp =
-      fbbr_frequency_search_config_.acquire_probe_budget_bdp;
-  switch (decision.state_after) {
-    case FBBRSearchState::kSeek:
-      target_actual_amplitude =
-          fbbr_frequency_search_config_.actual_amplitude_target_seek;
-      break;
-    case FBBRSearchState::kTrack:
-    case FBBRSearchState::kLockCandidate:
-      target_actual_amplitude =
-          fbbr_frequency_search_config_.actual_amplitude_target_track;
-      queue_budget_bdp = fbbr_frequency_search_config_.track_probe_budget_bdp;
-      break;
-    case FBBRSearchState::kLocked:
-      target_actual_amplitude =
-          fbbr_frequency_search_config_.actual_amplitude_target_locked;
-      queue_budget_bdp = fbbr_frequency_search_config_.locked_probe_budget_bdp;
-      break;
-    case FBBRSearchState::kDrain:
-    case FBBRSearchState::kEmergencyDrain:
-      target_actual_amplitude =
-          fbbr_frequency_search_config_.actual_amplitude_target_drain;
-      queue_budget_bdp = 0.0;
-      break;
-    default:
-      break;
-  }
-  if (fbbr_search_state_.is_pulser && result.independent_for_control) {
-    const double step = ClampValue(
-        std::min(fbbr_frequency_search_config_.amplitude_step_max,
-                 fbbr_frequency_search_config_.max_amplitude_change_per_update),
-        0.0, 0.50);
-    double factor = 1.0;
-    if (decision.request_amplitude_decrease || decision.hard_loss_abort ||
-        result.loss_ratio >= fbbr_frequency_search_config_.soft_loss_threshold ||
-        result.ecn_ratio >= fbbr_frequency_search_config_.soft_ecn_threshold) {
-      factor = 1.0 - step;
-    } else if (result.actual_input_amplitude_ratio > 0.0 &&
-               result.input_cycle_coherence >= 0.50 &&
-               !result.collision_suspected) {
-      factor = std::pow(
-          target_actual_amplitude /
-              std::max(result.actual_input_amplitude_ratio, 1e-6),
-          ClampValue(fbbr_frequency_search_config_.amplitude_adaptation_mu, 0.0, 1.0));
-      factor = ClampValue(factor, 1.0 - step, 1.0 + step);
-    } else if (decision.request_amplitude_increase &&
-               !result.collision_suspected) {
-      factor = 1.0 + step;
-    }
-    const double waveform_integral_factor =
-        fbbr_probe_signature_.waveform == "sine" ? M_PI : 2.0 * M_PI;
-    const double queue_budget_limit = waveform_integral_factor *
-        queue_budget_bdp /
-        std::max<uint32_t>(1, fbbr_probe_signature_.period_rtts);
-    const double amplitude_max = queue_budget_bdp > 0.0
-        ? std::min(fbbr_frequency_search_config_.probe_max_amplitude_ratio,
-                   queue_budget_limit)
-        : fbbr_frequency_search_config_.probe_min_amplitude_ratio;
-    fbbr_search_state_.current_amplitude_ratio = ClampValue(
-        factor * fbbr_search_state_.current_amplitude_ratio,
-        fbbr_frequency_search_config_.probe_min_amplitude_ratio,
-        amplitude_max);
-  }
-  fbbr_probe_signature_.amplitude_ratio =
-      fbbr_search_state_.current_amplitude_ratio;
-
-  if (decision.trusted_bw_published &&
-      !fbbr_trusted_published_in_cruise_) {
-    trusted_bw_ = BandwidthFromBps(decision.trusted_bw_bps);
-    trusted_bw_valid_ = !trusted_bw_.IsZero();
-    trusted_bw_conf_ = decision.trusted_confidence;
-    trusted_bw_source_ = "F_BBR_LOCK_CONSENSUS";
-    trusted_bw_cruise_id_ = fbbr_probe_signature_.cruise_id;
-    trusted_bw_age_cruises_ = 0;
-    trusted_bw_fresh_ = trusted_bw_valid_;
-    trusted_bw_application_valid_ = trusted_bw_valid_;
-    trusted_bw_ready_for_post_cruise_ = trusted_bw_valid_;
-    trusted_bw_application_phase_ = "POST_CRUISE_READY";
-    trusted_bw_invalid_reason_ = "none";
-    fbbr_trusted_published_in_cruise_ = trusted_bw_valid_;
-  }
-
-  if (fbbr_search_state_.control_window_index >=
-      fbbr_frequency_search_config_.max_control_windows) {
-    // The BBR phase machine may leave CRUISE at its normal boundary.  Keep
-    // search_active/probe state intact so this is not observable as a search
-    // termination and the next eligible CRUISE resumes acquisition.
-    fbbr_probe_disabled_reason_ = "cruise_decision_budget_reached";
-    return;
-  }
-  const double relative_change = decision.baseline_before_bps > 0.0
-      ? std::abs(decision.applied_next_baseline_bps -
-                 decision.baseline_before_bps) /
-            decision.baseline_before_bps
-      : 0.0;
-  if (relative_change > 1e-6 || first_output_bin < 0) {
-    FBBRSearchStartBaselineTransition(
-        now, decision.applied_next_baseline_bps);
-  } else if (!fbbr_frequency_search_config_.event_triggered_windows_enabled) {
-    const int64_t stride_bins = static_cast<int64_t>(std::max<uint32_t>(
-        1, fbbr_frequency_search_config_.decision_stride_cycles)) *
-        fbbr_frequency_search_config_.phase_bins_per_cycle;
-    fbbr_next_analysis_output_bin_ = first_output_bin + stride_bins;
-  }
-}
-
-void FBBRSender::FBBRSearchEmitControlTrace(
-    const FbbrOperatingPointBlockResult& /*result*/,
-    const FBBRWindowControlDecision& /*decision*/) const {
-  // Control fields are appended atomically to the production block row in
-  // FBBRFrequencySearchEmitBlockTrace(), keeping one row per fixed-baseline window.
-}
-
-bool FBBRSender::FBBRFrequencySearchHasNativeChangeEvidence(
-    double candidate_bps) const {
-  if (!fbbr_history_valid_ || fbbr_history_bandwidth_bps_ <= 0.0 ||
-      fbbr_native_bw_at_cruise_start_bps_ <= 0.0) {
-    return false;
-  }
-  const double native_end =
-      static_cast<double>(BandwidthEstimate().ToBitsPerSecond());
-  const double native_change =
-      (native_end - fbbr_native_bw_at_cruise_start_bps_) /
-      fbbr_native_bw_at_cruise_start_bps_;
-  const double native_vs_history_change =
-      (fbbr_native_bw_at_cruise_start_bps_ - fbbr_history_bandwidth_bps_) /
-      fbbr_history_bandwidth_bps_;
-  const double candidate_change =
-      (candidate_bps - fbbr_history_bandwidth_bps_) /
-      fbbr_history_bandwidth_bps_;
-  return (std::abs(native_change) >= 0.20 &&
-          native_change * candidate_change > 0.0) ||
-         (std::abs(native_vs_history_change) >= 0.20 &&
-          native_vs_history_change * candidate_change > 0.0);
-}
-
-void FBBRSender::FBBRFrequencySearchPublishConsensus(
-    const FbbrCruiseConsensusResult& consensus) {
-  const FbbrHistoryUpdateResult update = FBBRFrequencySearch::StabilizeHistory(
-      fbbr_frequency_search_config_, consensus, fbbr_history_valid_,
-      fbbr_history_bandwidth_bps_,
-      FBBRFrequencySearchHasNativeChangeEvidence(consensus.raw_candidate_bps));
-  if (!update.valid) {
-    ClearTrustedBw(update.invalid_reason.c_str());
-    fbbr_history_update_action_ = update.action;
-    return;
-  }
-  fbbr_history_valid_ = true;
-  fbbr_history_bandwidth_bps_ = update.published_bps;
-  fbbr_history_update_action_ = update.action;
-  fbbr_trusted_bw_raw_candidate_bps_ = update.raw_candidate_bps;
-  fbbr_trusted_bw_smoothed_bps_ = update.published_bps;
-  fbbr_trusted_bw_robust_cv_ = consensus.robust_cv;
-  fbbr_trusted_bw_relative_ci_width_ = consensus.relative_ci_width;
-  fbbr_trusted_bw_cycle_count_ = consensus.cycle_count;
-  fbbr_trusted_bw_block_id_ = consensus.source_block_id;
-  trusted_bw_ = BandwidthFromBps(update.published_bps);
-  trusted_bw_valid_ = !trusted_bw_.IsZero();
-  trusted_bw_conf_ = consensus.confidence;
-  trusted_bw_source_ = kTrustedBwSourceFBBRFrequencySearch;
-  trusted_bw_cruise_id_ = fbbr_probe_signature_.cruise_id;
-  trusted_bw_fresh_ = trusted_bw_valid_;
-  trusted_bw_application_valid_ = trusted_bw_valid_;
-  trusted_bw_ready_for_post_cruise_ = trusted_bw_valid_;
-  trusted_bw_application_phase_ = "POST_CRUISE_READY";
-  trusted_bw_invalid_reason_ = "none";
-  selection_native_bw_ = BandwidthEstimate();
-  dual_signal_spectral_gate_pass_ = false;
-  drate_spectral_gate_pass_ = false;
-  srtt_spectral_gate_pass_ = false;
-}
-
-void FBBRSender::FBBRFrequencySearchFinalizeCruise(QuicTime now) {
-  FBBRFrequencySearchFinalizeReadyBlocks(now, true);
-  FbbrCruiseConsensusResult consensus;
-  FbbrHistoryUpdateResult update;
-  if (fbbr_frequency_search_config_.search_controller_enabled) {
-    consensus.valid = fbbr_trusted_published_in_cruise_ && trusted_bw_valid_;
-    consensus.raw_candidate_bps =
-        consensus.valid ? trusted_bw_.ToBitsPerSecond() : 0.0;
-    consensus.confidence = consensus.valid ? trusted_bw_conf_ : 0.0;
-    consensus.block_count = static_cast<uint32_t>(
-        fbbr_search_state_.trusted_candidates_bps.size());
-    consensus.invalid_reason = consensus.valid ? "none" :
-        "adaptive_search_not_locked";
-    update.valid = consensus.valid;
-    update.raw_candidate_bps = consensus.raw_candidate_bps;
-    update.published_bps = consensus.raw_candidate_bps;
-    update.confidence = consensus.confidence;
-    update.action = consensus.valid ? "F_BBR_LOCK_PUBLISH" : "REJECT";
-    update.invalid_reason = consensus.invalid_reason;
-    if (!consensus.valid) {
-      ++fbbr_search_state_.unresolved_cruises;
-      fbbr_search_state_.search_active = true;
-      fbbr_search_state_.state = FBBRSearchState::kPersistentUnresolved;
-      fbbr_search_state_.last_failure_reason = consensus.invalid_reason;
-      if (trusted_bw_valid_ &&
-          trusted_bw_age_cruises_ <= fbbr_frequency_search_config_.trusted_ttl_cruises) {
-        trusted_bw_application_valid_ = true;
-        trusted_bw_ready_for_post_cruise_ = true;
-        trusted_bw_fresh_ = true;
-        trusted_bw_cruise_id_ = fbbr_probe_signature_.cruise_id;
-        trusted_bw_application_phase_ = "POST_CRUISE_TTL_REUSE";
-        trusted_bw_invalid_reason_ = "search_unresolved_reuse_trusted";
-      } else {
-        ClearTrustedBw("adaptive_search_not_locked");
-      }
-    } else {
-      fbbr_search_state_.unresolved_cruises = 0;
-    }
-    FBBRFrequencySearchEmitCruiseSummary(now, consensus, update);
-    return;
-  }
-  if (!fbbr_probe_active_) {
-    consensus.invalid_reason = fbbr_probe_disabled_reason_;
-    update.action = "REJECT";
-    update.invalid_reason = fbbr_probe_disabled_reason_;
-    ClearTrustedBw(fbbr_probe_disabled_reason_.c_str());
-  } else {
-    consensus = FBBRFrequencySearch::BuildCruiseConsensus(
-        fbbr_frequency_search_config_, fbbr_block_results_);
-    update = FBBRFrequencySearch::StabilizeHistory(
-        fbbr_frequency_search_config_, consensus, fbbr_history_valid_,
-        fbbr_history_bandwidth_bps_,
-        FBBRFrequencySearchHasNativeChangeEvidence(consensus.raw_candidate_bps));
-    if (update.valid) {
-      fbbr_history_valid_ = true;
-      fbbr_history_bandwidth_bps_ = update.published_bps;
-      fbbr_history_update_action_ = update.action;
-      fbbr_trusted_bw_raw_candidate_bps_ = update.raw_candidate_bps;
-      fbbr_trusted_bw_smoothed_bps_ = update.published_bps;
-      fbbr_trusted_bw_robust_cv_ = consensus.robust_cv;
-      fbbr_trusted_bw_relative_ci_width_ = consensus.relative_ci_width;
-      fbbr_trusted_bw_cycle_count_ = consensus.cycle_count;
-      fbbr_trusted_bw_block_id_ = consensus.source_block_id;
-      trusted_bw_ = BandwidthFromBps(update.published_bps);
-      trusted_bw_valid_ = !trusted_bw_.IsZero();
-      trusted_bw_conf_ = consensus.confidence;
-      trusted_bw_source_ = kTrustedBwSourceFBBRFrequencySearch;
-      trusted_bw_cruise_id_ = fbbr_probe_signature_.cruise_id;
-      trusted_bw_age_cruises_ = 0;
-      trusted_bw_fresh_ = trusted_bw_valid_;
-      trusted_bw_application_valid_ = trusted_bw_valid_;
-      trusted_bw_ready_for_post_cruise_ = trusted_bw_valid_;
-      trusted_bw_application_phase_ = "POST_CRUISE_READY";
-      trusted_bw_invalid_reason_ = "none";
-      selection_native_bw_ = BandwidthEstimate();
-      dual_signal_spectral_gate_pass_ = false;
-    } else {
-      fbbr_history_update_action_ = update.action;
-      ClearTrustedBw(update.invalid_reason.c_str());
-    }
-  }
-  FBBRFrequencySearchEmitCruiseSummary(now, consensus, update);
-}
-
-void FBBRSender::FBBRFrequencySearchEmitBinTrace(
-    const FbbrPhaseBinSample& sample,
-    uint64_t block_id) const {
-  if (!cruise_load_trace_cb_) return;
-  std::ostringstream row;
-  row << "FBBR_BIN,FBBR_BIN,F-BBR," << trace_flow_id_ << ","
-      << fbbr_probe_signature_.cruise_id << "," << block_id << ","
-      << sample.cycle_index << "," << sample.phase_bin_index << ","
-      << sample.time_start_s << "," << sample.time_end_s << ","
-      << fbbr_probe_signature_.frequency_hz << ","
-      << fbbr_probe_signature_.period_rtts << ","
-      << fbbr_probe_signature_.code_id << "," << sample.code_sign << ","
-      << sample.phase_rad << "," << sample.coded_excitation << ","
-      << sample.native_pacing_bps << "," << sample.commanded_pacing_bps << ","
-      << sample.actual_send_bps << "," << sample.sent_bytes << ","
-      << sample.acked_bytes << "," << sample.delivery_rate_bps << ","
-      << sample.latest_rtt_s * 1e6 << "," << sample.qdelay_s * 1e6 << ","
-      << sample.loss_ratio << "," << sample.ecn_ratio << ","
-      << sample.app_limited_fraction << ","
-      << sample.cwnd_limited_fraction << "," << sample.coverage << ","
-      << (sample.rtt_valid ? "true" : "false") << ","
-      << (sample.valid ? "true" : "false") << ","
-      << sample.recovery_fraction << "," << fbbr_probe_signature_.waveform
-      << "," << sample.queue_servo_factor << ","
-      << (sample.queue_servo_transition ? "true" : "false");
-  cruise_load_trace_cb_(sample.time_start_s, sample.time_end_s, 0, 0, 0, 0,
-                        "FBBR_BIN", !sample.valid, row.str());
-}
-
-void FBBRSender::FBBREmitTriggerCycleTrace(
-    const FBBRTriggerCycleResult& r) const {
-  if (!cruise_load_trace_cb_) return;
-  std::ostringstream row;
-  row << "FBBR_TRIGGER_CYCLE,FBBR_TRIGGER_CYCLE,F-BBR," << trace_flow_id_
-      << "," << r.cruise_id << "," << r.cycle_id << ","
-      << r.cycle_start_s << "," << r.cycle_end_s << ","
-      << EventWindowStateName(r.window_state) << ","
-      << (r.is_pulser ? "PULSER" : "WATCHER") << ","
-      << r.carrier_period_s << "," << r.actual_input_amplitude_ratio << ","
-      << r.actual_input_energy << "," << r.delivery_response_amplitude_bps
-      << "," << r.delivery_response_bytes << "," << r.period_estimate_s
-      << "," << r.period_error_ratio << "," << r.spectral_prominence << ","
-      << r.normalized_match << "," << r.selected_delay_s << ","
-      << r.phase_coverage << "," << (r.trigger_pass ? "true" : "false")
-      << "," << (r.continue_pass ? "true" : "false") << ","
-      << r.trigger_reason << "," << r.pause_reason << ","
-      << r.app_limited_fraction << "," << r.recovery_fraction << ","
-      << r.baseline_drift << ","
-      << (r.actual_input_measurable ? "true" : "false") << ","
-      << (r.period_match ? "true" : "false") << ","
-      << (r.weak_periodic_response ? "true" : "false") << ","
-      << r.commanded_amplitude_ratio << "," << r.actual_input_snr << ","
-      << r.delivery_period_estimate_s << ","
-      << r.delivery_period_error_ratio << ","
-      << r.delivery_spectral_prominence << ","
-      << r.delivery_normalized_match << ","
-      << (r.delivery_trigger_pass ? "true" : "false") << ","
-      << (r.delivery_continue_pass ? "true" : "false") << ","
-      << r.delivery_reason << "," << r.queue_derivative_amplitude << ","
-      << r.queue_period_estimate_s << "," << r.queue_period_error_ratio << ","
-      << r.queue_spectral_prominence << "," << r.queue_normalized_match << ","
-      << r.queue_noise_floor << ","
-      << (r.queue_trigger_pass ? "true" : "false") << ","
-      << (r.queue_continue_pass ? "true" : "false") << ","
-      << r.queue_reason << "," << r.combined_trigger_source << ","
-      << r.combined_confidence << "," << r.detected_cycle_start_s << ","
-      << r.alignment_error_cycles << ","
-      << (r.hard_safety ? "true" : "false");
-  cruise_load_trace_cb_(r.cycle_start_s, r.cycle_end_s, 0, 0, 0, 0,
-                        "FBBR_TRIGGER_CYCLE", !r.trigger_pass, row.str());
-}
-
-void FBBRSender::FBBRFrequencySearchEmitBlockTrace(
-    const FbbrOperatingPointBlockResult& r) const {
-  if (!cruise_load_trace_cb_) return;
-  std::ostringstream row;
-  row << "FBBR_EVENT_WINDOW,FBBR_EVENT_WINDOW,F-BBR," << trace_flow_id_ << ","
-      << r.cruise_id << "," << r.block_id << "," << r.start_time_s << ","
-      << r.end_time_s << "," << r.frequency_hz << "," << r.period_rtts << ","
-      << r.code_id << "," << r.initial_phase_rad << ","
-      << r.target_amplitude_ratio << "," << r.realized_amplitude_ratio << ","
-      << r.rtprop_frozen_s * 1e6 << "," << r.selected_delay_s * 1e6 << ","
-      << r.delay_ratio << "," << (r.delay_at_search_boundary ? "true" : "false")
-      << "," << (r.cross_block_delay_stable ? "true" : "false") << ","
-      << r.valid_cycles << "," << r.phase_bin_coverage << ","
-      << r.non_app_limited_fraction << "," << r.input_cycle_coherence << ","
-      << r.native_baseline_drift << "," << r.delivery_baseline_drift << ","
-      << r.loss_ratio << "," << r.ecn_ratio << ","
-      << r.confidence_coverage << "," << r.confidence_input << ","
-      << r.confidence_stationarity << "," << r.confidence_cycle << ","
-      << r.confidence_response << "," << r.confidence_delay << ","
-      << r.confidence_regression << "," << r.measurement_confidence << ","
-      << r.input_fit.snr << "," << r.delivery_fit.snr << ","
-      << r.queue_fit.snr << "," << r.utility_fit.snr << ","
-      << r.input_fit.r_squared << "," << r.delivery_fit.r_squared << ","
-      << r.queue_fit.r_squared << "," << r.utility_fit.r_squared << ","
-      << r.input_fit.condition_number << "," << r.delivery_fit.condition_number
-      << "," << r.queue_fit.condition_number << ","
-      << r.utility_fit.condition_number << "," << r.response.delivery_gain << ","
-      << r.response.queue_storage_gain << ","
-      << r.response.delivery_phase_rad << "," << r.response.queue_phase_rad << ","
-      << r.response.utility_phase_rad << ","
-      << r.response.delivery_harmonic_ratio << ","
-      << r.response.queue_harmonic_ratio << "," << r.positive_delivery_gain
-      << "," << r.positive_queue_build_s * 1e6 << ","
-      << r.positive_queue_build_gain << "," << r.q_zero_s * 1e6 << ","
-      << r.q_probe_max_s * 1e6 << "," << r.q_floor_s * 1e6 << ","
-      << r.q95_s * 1e6 << "," << r.q_amplitude_s * 1e6 << ","
-      << r.drain_ratio << "," << r.queue_trend_per_cycle << ","
-      << r.gradient_lockin << "," << r.gradient_finite_difference << ","
-      << r.gradient_fused << "," << r.curvature_finite_difference << ","
-      << (r.gradient_agreement ? "true" : "false") << ","
-      << r.full_score << "," << r.low_queue_score << ","
-      << r.stationary_score << "," << r.safe_score << ","
-      << r.optimality_score << "," << r.rate_adjustment_signal << ","
-      << FbbrOperatingPointClassificationName(r.classification) << ","
-      << (r.candidate.valid ? "true" : "false") << ","
-      << r.candidate.bandwidth_bps << "," << r.candidate.robust_cv << ","
-      << r.candidate.relative_ci_width << "," << r.candidate.cycle_count << ","
-      << r.candidate.invalid_reason << "," << r.invalid_reason << ","
-      << r.actual_input_amplitude_ratio << ","
-      << r.cwnd_limited_fraction << "," << r.input_carrier_snr << ","
-      << r.signature_leakage << ","
-      << r.residual_to_own_carrier_ratio << ","
-      << (r.collision_suspected ? "true" : "false") << ","
-      << r.raw_optimality_score << "," << r.underload_evidence << ","
-      << r.overload_evidence << "," << r.direction_score;
-  if (!fbbr_control_decisions_.empty() &&
-      fbbr_frequency_search_config_.search_controller_enabled) {
-    const FBBRWindowControlDecision& d = fbbr_control_decisions_.back();
-    const double midpoint = fbbr_search_state_.underload_bound_valid &&
-                                    fbbr_search_state_.overload_bound_valid &&
-                                    fbbr_search_state_.underload_bound_bps <
-                                        fbbr_search_state_.overload_bound_bps
-                                ? std::sqrt(
-                                      fbbr_search_state_.underload_bound_bps *
-                                      fbbr_search_state_.overload_bound_bps)
-                                : 0.0;
-    const double width = midpoint > 0.0
-        ? (fbbr_search_state_.overload_bound_bps -
-           fbbr_search_state_.underload_bound_bps) / midpoint
-        : 0.0;
-    row << "," << FBBRSearchStateName(d.state_before) << ","
-        << FBBRSearchStateName(d.state_after) << ","
-        << d.baseline_before_bps << "," << d.proposed_baseline_bps << ","
-        << d.applied_next_baseline_bps << "," << d.log_step << ","
-        << d.update_reason << "," << (d.hard_loss_abort ? "true" : "false")
-        << "," << (fbbr_search_state_.underload_bound_valid ? "true" : "false")
-        << "," << fbbr_search_state_.underload_bound_bps << ","
-        << (fbbr_search_state_.overload_bound_valid ? "true" : "false")
-        << "," << fbbr_search_state_.overload_bound_bps << "," << width << ","
-        << fbbr_search_state_.same_direction_streak << ","
-        << fbbr_search_state_.consecutive_dynamic << ","
-        << fbbr_search_state_.consecutive_near_optimal << ","
-        << (d.lock_candidate ? "true" : "false") << ","
-        << (d.locked ? "true" : "false") << ","
-        << (d.window_candidate_valid ? "true" : "false") << ","
-        << d.window_candidate_bps << ","
-        << (d.trusted_bw_published ? "true" : "false") << ","
-        << d.trusted_bw_bps << "," << d.trusted_confidence << ","
-        << fbbr_opi_rtprop_anchor_.ToMicroseconds() << ","
-        << fbbr_opi_rtprop_confidence_ << "," << fbbr_opi_rtprop_source_
-        << "," << r.gradient_se << "," << r.gradient_ci90_low << ","
-        << r.gradient_ci90_high << "," << r.gradient_ci95_low << ","
-        << r.gradient_ci95_high << ","
-        << (r.gradient_equivalent ? "true" : "false") << ","
-        << r.delivery_median_bps << ","
-        << (fbbr_search_state_.search_active ? "true" : "false") << ","
-        << fbbr_search_state_.unresolved_cruises << ","
-        << fbbr_search_state_.unresolved_decisions << ","
-        << fbbr_search_state_.search_attempts << ","
-        << fbbr_search_state_.eligible_cruises << ","
-        << fbbr_search_state_.last_failure_reason << ",ADAPTIVE_SEARCH,"
-        << (trusted_bw_valid_ ? "true" : "false") << ","
-        << (fbbr_search_state_.is_pulser ? "true" : "false") << ","
-        << fbbr_search_state_.pulser_lease_remaining << ","
-        << fbbr_probe_signature_.waveform << "," << r.recovery_fraction << ","
-        << r.effective_cycles << ","
-        << (fbbr_search_state_.carrier_detected ? "true" : "false") << ","
-        << (d.collision_suspected ? "true" : "false") << ","
-        << fbbr_search_state_.search_generation << ","
-        << fbbr_search_state_.election_backoff_cycles << ","
-        << fbbr_search_state_.pulser_lease_count << ","
-        << fbbr_search_state_.collision_count << ","
-        << (fbbr_search_state_.provisional_validation_pending ? "true" : "false")
-        << "," << fbbr_search_state_.provisional_age_cruises << ","
-        << fbbr_search_state_.carrier_sense_snr << ","
-        << fbbr_search_state_.carrier_sense_amplitude;
-  } else {
-    row << ",DISABLED,DISABLED,0,0,0,0,NONE,false,false,0,false,0,0,0,0,0,"
-           "false,false,false,0,false,0,0,0,0,NONE,0,0,0,0,0,false,0,false,"
-           "0,0,0,0,none,NATIVE_BBR,false,false,0,none,0,0,false,false,0,0,0,0,false,0,0,0";
-  }
-  row << "," << r.event_window_id << "," << r.trigger_cycle_id << ","
-      << r.capture_start_s << "," << r.capture_end_s << ","
-      << r.window_length_cycles << "," << r.window_stride_cycles << ","
-      << r.sequential_stop_reason << ","
-      << EventWindowStateName(r.event_window_state) << ","
-      << (r.trigger_cycle_excluded_from_score ? "true" : "false") << ","
-      << r.overlap_fraction << ","
-      << (r.independent_for_control ? "true" : "false") << ","
-      << (r.independent_for_trusted ? "true" : "false") << ","
-      << (r.lockable_score ? "true" : "false") << ","
-      << r.saturation_score << "," << r.queue_band_score << ","
-      << r.queue_stability_score << "," << r.target_score << ","
-      << r.q_floor_s * 1e6 << "," << r.q_reserve_low_s * 1e6 << ","
-      << r.q_reserve_high_s * 1e6 << "," << r.q_peak_cap_s * 1e6 << ","
-      << r.q95_s * 1e6 << "," << r.queue_trend_per_cycle << ","
-      << r.frequency_direction << "," << r.queue_band_error << ","
-      << r.total_direction << "," << r.delivery_spectral_prominence << ","
-      << r.delivery_normalized_match << "," << r.trigger_source << ","
-      << r.response.delivery_gain << ","
-      << r.response.queue_storage_gain << "," << r.delivery_partition << ","
-      << r.queue_partition << "," << r.confidence_delivery_channel << ","
-      << r.confidence_queue_channel << "," << r.queue_spectral_prominence << ","
-      << r.queue_normalized_match << "," << r.queue_servo_factor_mean << ","
-      << r.queue_servo_transition_cycles;
-  cruise_load_trace_cb_(r.start_time_s, r.end_time_s, 0, r.optimality_score, 0,
-                        r.measurement_confidence, "FBBR_EVENT_WINDOW",
-                        r.classification ==
-                            FbbrOperatingPointClassification::kInvalid,
-                        row.str());
-}
-
-void FBBRSender::FBBRFrequencySearchEmitShadowWindowTrace(
-    const FbbrOperatingPointBlockResult& r) const {
-  if (!cruise_load_trace_cb_) return;
-  std::ostringstream row;
-  row << "FBBR_DIAGNOSTIC_WINDOW,FBBR_DIAGNOSTIC_WINDOW,F-BBR,"
-      << trace_flow_id_ << "," << r.cruise_id << "," << r.block_id << ","
-      << r.start_time_s << "," << r.end_time_s << ","
-      << r.frequency_hz << "," << r.period_rtts << "," << r.code_id << ","
-      << r.initial_phase_rad << "," << r.target_amplitude_ratio << ","
-      << r.realized_amplitude_ratio << "," << r.rtprop_frozen_s * 1e6 << ","
-      << r.selected_delay_s * 1e6 << "," << r.delay_ratio << ","
-      << (r.delay_at_search_boundary ? "true" : "false") << ","
-      << (r.cross_block_delay_stable ? "true" : "false") << ","
-      << r.valid_cycles << "," << r.phase_bin_coverage << ","
-      << r.non_app_limited_fraction << "," << r.input_cycle_coherence << ","
-      << r.native_baseline_drift << "," << r.delivery_baseline_drift << ","
-      << r.loss_ratio << "," << r.ecn_ratio << ","
-      << r.confidence_coverage << "," << r.confidence_input << ","
-      << r.confidence_stationarity << "," << r.confidence_cycle << ","
-      << r.confidence_response << "," << r.confidence_delay << ","
-      << r.confidence_regression << "," << r.measurement_confidence << ","
-      << r.input_fit.snr << "," << r.delivery_fit.snr << ","
-      << r.queue_fit.snr << "," << r.utility_fit.snr << ","
-      << r.input_fit.r_squared << "," << r.delivery_fit.r_squared << ","
-      << r.queue_fit.r_squared << "," << r.utility_fit.r_squared << ","
-      << r.input_fit.condition_number << "," << r.delivery_fit.condition_number
-      << "," << r.queue_fit.condition_number << ","
-      << r.utility_fit.condition_number << "," << r.response.delivery_gain << ","
-      << r.response.queue_storage_gain << ","
-      << r.response.delivery_phase_rad << "," << r.response.queue_phase_rad << ","
-      << r.response.utility_phase_rad << ","
-      << r.response.delivery_harmonic_ratio << ","
-      << r.response.queue_harmonic_ratio << "," << r.positive_delivery_gain
-      << "," << r.positive_queue_build_s * 1e6 << ","
-      << r.positive_queue_build_gain << "," << r.q_zero_s * 1e6 << ","
-      << r.q_probe_max_s * 1e6 << "," << r.q_floor_s * 1e6 << ","
-      << r.q95_s * 1e6 << "," << r.q_amplitude_s * 1e6 << ","
-      << r.drain_ratio << "," << r.queue_trend_per_cycle << ","
-      << r.gradient_lockin << "," << r.gradient_finite_difference << ","
-      << r.gradient_fused << "," << r.curvature_finite_difference << ","
-      << (r.gradient_agreement ? "true" : "false") << ","
-      << r.full_score << "," << r.low_queue_score << ","
-      << r.stationary_score << "," << r.safe_score << ","
-      << r.optimality_score << "," << r.rate_adjustment_signal << ","
-      << FbbrOperatingPointClassificationName(r.classification) << ",false,0,0,0,0,"
-      << "validation_shadow_window," << r.invalid_reason << ",true,false";
-  cruise_load_trace_cb_(r.start_time_s, r.end_time_s, 0, r.optimality_score, 0,
-                        r.measurement_confidence, "FBBR_DIAGNOSTIC_WINDOW",
-                        r.classification == FbbrOperatingPointClassification::kInvalid,
-                        row.str());
-}
-
-void FBBRSender::FBBRFrequencySearchEmitCruiseSummary(
-    QuicTime now,
-    const FbbrCruiseConsensusResult& consensus,
-    const FbbrHistoryUpdateResult& update) const {
-  if (!cruise_load_trace_cb_) return;
-  uint32_t underload = 0, near_optimal = 0, overload = 0, dynamic = 0, invalid = 0;
-  uint32_t watcher_decisions = 0, drain_decisions = 0, seek_decisions = 0;
-  uint32_t track_decisions = 0, unresolved_decisions = 0;
-  uint32_t event_windows = 0, dense_windows = 0, slow_loop_updates = 0;
-  uint32_t trusted_publications = 0;
-  for (const auto& block : fbbr_block_results_) {
-    if (block.window_length_cycles > 0.0) ++event_windows;
-    if (block.event_window_state == EventWindowState::kContinuousTrack) {
-      ++dense_windows;
-    }
-    switch (block.classification) {
-      case FbbrOperatingPointClassification::kUnderload: ++underload; break;
-      case FbbrOperatingPointClassification::kNearOptimal: ++near_optimal; break;
-      case FbbrOperatingPointClassification::kQueuedOverload: ++overload; break;
-      case FbbrOperatingPointClassification::kBufferSaturated: ++overload; break;
-      case FbbrOperatingPointClassification::kDynamic: ++dynamic; break;
-      case FbbrOperatingPointClassification::kInvalid: ++invalid; break;
-    }
-  }
-  for (const auto& decision : fbbr_control_decisions_) {
-    if (std::abs(decision.applied_next_baseline_bps -
-                 decision.baseline_before_bps) >
-        std::max(1.0, 1e-6 * decision.baseline_before_bps)) {
-      ++slow_loop_updates;
-    }
-    if (decision.trusted_bw_published) ++trusted_publications;
-    switch (decision.state_after) {
-      case FBBRSearchState::kWatcher: ++watcher_decisions; break;
-      case FBBRSearchState::kDrain:
-      case FBBRSearchState::kEmergencyDrain: ++drain_decisions; break;
-      case FBBRSearchState::kSeek: ++seek_decisions; break;
-      case FBBRSearchState::kTrack:
-      case FBBRSearchState::kLockCandidate:
-      case FBBRSearchState::kLocked: ++track_decisions; break;
-      case FBBRSearchState::kPersistentUnresolved:
-      case FBBRSearchState::kDynamicReacquire: ++unresolved_decisions; break;
-      default: break;
-    }
-  }
-  const double start_s = static_cast<double>(
-      (cruise_start_time_ - QuicTime::Zero()).ToMicroseconds()) / 1e6;
-  const double end_s = static_cast<double>(
-      (now - QuicTime::Zero()).ToMicroseconds()) / 1e6;
-  std::ostringstream row;
-  row << "FBBR_CRUISE,FBBR_CRUISE,F-BBR," << trace_flow_id_ << ","
-      << fbbr_probe_signature_.cruise_id << "," << start_s << "," << end_s << ","
-      << (fbbr_probe_active_ ? "true" : "false") << ","
-      << fbbr_probe_disabled_reason_ << "," << fbbr_probe_signature_.frequency_hz
-      << "," << fbbr_probe_signature_.period_rtts << ","
-      << fbbr_probe_signature_.code_id << ","
-      << fbbr_probe_signature_.amplitude_ratio << ","
-      << fbbr_block_results_.size() << "," << underload << "," << near_optimal
-      << "," << overload << "," << dynamic << "," << invalid << ","
-      << (consensus.valid ? "true" : "false") << ","
-      << consensus.raw_candidate_bps << "," << consensus.confidence << ","
-      << consensus.robust_cv << "," << consensus.relative_ci_width << ","
-      << consensus.block_count << "," << consensus.cycle_count << ","
-      << consensus.source_block_id << "," << consensus.invalid_reason << ","
-      << (update.valid ? "true" : "false") << "," << update.published_bps << ","
-      << update.action << "," << update.invalid_reason << ","
-      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
-      << trusted_bw_conf_ << "," << trusted_bw_source_ << ","
-      << trusted_bw_invalid_reason_ << ","
-      << static_cast<double>(fair_share_bandwidth_bps_) << ","
-      << (fbbr_search_state_.search_active ? "true" : "false") << ","
-      << FBBRSearchStateName(fbbr_search_state_.state) << ","
-      << fbbr_search_state_.eligible_cruises << ","
-      << fbbr_search_state_.search_attempts << ","
-      << fbbr_search_state_.unresolved_cruises << ","
-      << fbbr_search_state_.unresolved_decisions << ","
-      << fbbr_search_state_.valid_direction_decisions << ","
-      << fbbr_search_state_.last_failure_reason << ","
-      << (fbbr_search_state_.is_pulser ? "true" : "false") << ","
-      << fbbr_search_state_.pulser_lease_remaining << ","
-      << fbbr_probe_signature_.waveform << ","
-      << (fbbr_search_state_.carrier_detected ? "true" : "false") << ","
-      << fbbr_search_state_.search_generation << ","
-      << fbbr_search_state_.pulser_lease_count << ","
-      << fbbr_search_state_.collision_count << ","
-      << watcher_decisions << "," << drain_decisions << ","
-      << seek_decisions << "," << track_decisions << ","
-      << unresolved_decisions << "," << trusted_bw_age_cruises_ << ","
-      << fbbr_search_state_.carrier_sense_snr << ","
-      << fbbr_search_state_.carrier_sense_amplitude << ","
-      << fbbr_dual_trigger_attempts_ << "," << fbbr_delivery_triggers_ << ","
-      << fbbr_queue_triggers_ << "," << fbbr_both_triggers_ << ","
-      << fbbr_hard_safety_events_ << "," << event_windows << ","
-      << dense_windows << "," << fbbr_queue_servo_updates_ << ","
-      << fbbr_queue_servo_drain_rtts_ << ","
-      << fbbr_queue_servo_recovery_rtts_ << ","
-      << fbbr_queue_servo_baseline_commits_ << "," << slow_loop_updates << ","
-      << trusted_publications << ","
-      << (fbbr_search_state_.unresolved_cruises > 0 ? "true" : "false");
-  cruise_load_trace_cb_(start_s, end_s, 0, 0, 0, consensus.confidence,
-                        "FBBR_CRUISE", !consensus.valid, row.str());
 }
 
 void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
@@ -3170,7 +1968,6 @@ void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
 void FBBRSender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
   ++cruise_id_;
-  if (trusted_bw_valid_) ++trusted_bw_age_cruises_;
   cruise_start_time_ = now;
   trusted_bw_cleared_on_cruise_start_ = false;
   if (!trusted_bw_clear_on_cruise_start_) {
@@ -3179,18 +1976,66 @@ void FBBRSender::EnterCruise(QuicTime now) {
   }
   ClearTrustedBwApplication("cruise_start");
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
-  freq_tool_on_ = ShouldOscillate();
-  cruise_freq_tool_active_ = freq_tool_on_;
+  adaptive_cruise_start_max_bw_ = model_.MaxBandwidth();
+  adaptive_bounds_inherited_this_cruise_ = false;
+  if (UsesAdaptiveLoadJudgment()) {
+    const double current_max_bw_bps = static_cast<double>(
+        adaptive_cruise_start_max_bw_.ToBitsPerSecond());
+    const double previous_max_bw_bps = static_cast<double>(
+        adaptive_previous_cruise_max_bw_.ToBitsPerSecond());
+    adaptive_bounds_inherited_this_cruise_ =
+        adaptive_previous_cruise_max_bw_valid_ &&
+        ShouldInheritAdaptiveBounds(current_max_bw_bps,
+                                    previous_max_bw_bps);
+    if (!adaptive_bounds_inherited_this_cruise_) {
+      adaptive_baseline_low_valid_ = false;
+      adaptive_baseline_low_ = QuicBandwidth::Zero();
+      adaptive_baseline_up_valid_ = false;
+      adaptive_baseline_up_ = QuicBandwidth::Zero();
+      latest_waveform_overload_srtt_mean_valid_ = false;
+      latest_waveform_overload_srtt_mean_ms_ = 0.0;
+      latest_waveform_underload_srtt_mean_valid_ = false;
+      latest_waveform_underload_srtt_mean_ms_ = 0.0;
+    }
+    adaptive_previous_cruise_max_bw_ = adaptive_cruise_start_max_bw_;
+    adaptive_previous_cruise_max_bw_valid_ =
+        !adaptive_cruise_start_max_bw_.IsInfinite() &&
+        std::isfinite(current_max_bw_bps) && current_max_bw_bps > 0.0;
+  }
+  const QuicBandwidth current_native_max_bw = BandwidthEstimate();
+  initial_cruise_baseline_bw_ = current_native_max_bw;
+  current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
+  current_probe_amplitude_bps_ = GetCurrentAmplitudeBps();
+  waveform_initial_probe_amplitude_bps_ = current_probe_amplitude_bps_;
+  waveform_inconclusive_amplification_count_ = 0;
+  current_probe_bw_phase_gain_ =
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
+          ? 1.0
+          : static_cast<double>(PacingGain());
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kLegacySpectral &&
+      (!std::isfinite(current_probe_bw_phase_gain_) ||
+       current_probe_bw_phase_gain_ <= 0.0)) {
+    std::cerr << "[FBBR warning] invalid CRUISE pacing gain "
+              << current_probe_bw_phase_gain_
+              << "; using 1.0 for waveform injection" << std::endl;
+    current_probe_bw_phase_gain_ = 1.0;
+  }
   min_rtt_warning_logged_ = false;
   current_cruise_windows_.clear();
   ResetCruiseWindowState();
-  if (fbbr_frequency_search_config_.frequency_search_enabled) {
-    FBBRFrequencySearchInitializeCruise(now);
-  }
+  ResetWaveformCruiseState(now);
+  freq_tool_on_ = ShouldOscillate();
+  cruise_freq_tool_active_ = freq_tool_on_;
   QUIC_DVLOG(2) << "FBBR: Entering PROBE_CRUISE @ " << now
                 << ", cruise_id=" << cruise_id_
                 << ", fixed_freq=" << cruise_modulation_freq_hz_
-                << "Hz, amplitude_bps=" << GetCurrentAmplitudeBps();
+                << "Hz, detector="
+                << CruiseDetectorModeName(cruise_detector_mode_)
+                << ", initial_maxbw_baseline_bps="
+                << initial_cruise_baseline_bw_.ToBitsPerSecond()
+                << ", adaptive_bounds_inherited="
+                << adaptive_bounds_inherited_this_cruise_
+                << ", amplitude_bps=" << current_probe_amplitude_bps_;
 }
 
 void FBBRSender::LeaveCruise(QuicTime now) {
@@ -3202,10 +2047,17 @@ void FBBRSender::LeaveCruise(QuicTime now) {
   cruise_start_time_ = QuicTime::Zero();
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
   ResetCruiseWindowState();
+  waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+  waveform_window_start_ = QuicTime::Zero();
+  waveform_window_end_ = QuicTime::Zero();
   current_cruise_windows_.clear();
 }
 
 void FBBRSender::ResetCruiseWindowState() {
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    next_cruise_window_start_ = QuicTime::Zero();
+    return;
+  }
   TimeDelta min_rtt = model_.MinRtt();
   if (min_rtt.IsZero() && rtt_stats_ != nullptr) {
     min_rtt = rtt_stats_->MinOrInitialRtt();
@@ -3220,45 +2072,9 @@ void FBBRSender::ResetCruiseWindowState() {
 void FBBRSender::OnCongestionEventStarted(
     const Bbr2CongestionEvent& congestion_event) {
   UpdateRoundDeliveryRateSample(congestion_event);
-  if (fbbr_frequency_search_config_.frequency_search_enabled && in_cruise_) {
-    FBBRFrequencySearchAccumulateAck(congestion_event);
-  }
   if (congestion_event.end_of_round_trip) {
     FinalizeCompletedRound(congestion_event);
   }
-}
-
-bool FBBRSender::ShouldDelayProbeBwCruiseExit(QuicTime now) const {
-  if (!fbbr_frequency_search_config_.frequency_search_enabled || !fbbr_probe_active_ ||
-      cruise_start_time_ == QuicTime::Zero() || fbbr_period_.IsZero()) {
-    return false;
-  }
-  if (fbbr_frequency_search_config_.search_controller_enabled) {
-    if (fbbr_search_state_.state == FBBRSearchState::kLocked ||
-        fbbr_search_state_.state ==
-            FBBRSearchState::kEmergencyDrain ||
-        fbbr_search_state_.control_window_index >=
-            fbbr_frequency_search_config_.max_control_windows ||
-        InRecovery() ||
-        fbbr_last_sample_app_limited_) {
-      return false;
-    }
-    const int64_t rtt_limit_us = fbbr_rtprop_frozen_.ToMicroseconds() *
-        static_cast<int64_t>(fbbr_frequency_search_config_.max_cruise_extension_rtts);
-    const int64_t time_limit_us = static_cast<int64_t>(std::llround(
-        fbbr_frequency_search_config_.max_cruise_extension_s * 1e6));
-    const int64_t extension_limit_us = std::min(rtt_limit_us, time_limit_us);
-    return (now - cruise_start_time_).ToMicroseconds() < extension_limit_us;
-  }
-  const uint64_t required_cycles =
-      static_cast<uint64_t>(fbbr_frequency_search_config_.warmup_cycles) +
-      static_cast<uint64_t>(fbbr_frequency_search_config_.analysis_cycles);
-  const int64_t required_us =
-      static_cast<int64_t>(required_cycles) * fbbr_period_.ToMicroseconds() +
-      static_cast<int64_t>(std::ceil(
-          fbbr_frequency_search_config_.delay_search_ratio_max *
-          fbbr_rtprop_frozen_.ToMicroseconds()));
-  return now - cruise_start_time_ < TimeDelta::FromMicroseconds(required_us);
 }
 
 void FBBRSender::UpdateRoundDeliveryRateSample(
@@ -3434,7 +2250,6 @@ void FBBRSender::ClearTrustedBw(const char* reason) {
   trusted_bw_conf_ = 0.0;
   trusted_bw_source_ = kTrustedBwSourceNone;
   trusted_bw_cruise_id_ = 0;
-  trusted_bw_age_cruises_ = 0;
   trusted_bw_invalid_reason_ = reason == nullptr ? "unknown" : reason;
   ClearTrustedBwApplication(reason);
 }
@@ -3517,14 +2332,20 @@ void FBBRSender::PublishTrustedBwSelection(
   merged_window_count_ = selection.merged_window_count;
   spectral_invalid_count_ = selection.spectral_invalid_count;
 
+  const std::string trusted_bw_source = selection.trusted_bw_source;
+  const bool waveform_source =
+      trusted_bw_source == kTrustedBwSourceTimeWaveformBaseline ||
+      trusted_bw_source == kTrustedBwSourceAdaptiveWindowMean ||
+      trusted_bw_source == kTrustedBwSourceFbbrWindowMean;
   const bool valid_selection =
       selection.trusted_bw_valid &&
-      selection.dual_signal_spectral_gate_pass &&
+      (waveform_source || selection.dual_signal_spectral_gate_pass) &&
       !selection.trusted_bw.IsZero() &&
       std::isfinite(static_cast<double>(
           selection.trusted_bw.ToBitsPerSecond()));
   if (!valid_selection) {
-    ClearTrustedBw("no_dual_signal_trusted_bw");
+    ClearTrustedBw(waveform_source ? "invalid_waveform_trusted_bw"
+                                   : "no_dual_signal_trusted_bw");
     return;
   }
 
@@ -3560,11 +2381,14 @@ const char* FBBRSender::PhaseApplicationName(
 
 const char* FBBRSender::PacingBaseSourceName(
     FBBRPacingBaseSource source) {
-  if (source == FBBRPacingBaseSource::kTrustedBw) return "TRUSTED_BW";
-  if (source == FBBRPacingBaseSource::kAdaptiveSearch) {
-    return "ADAPTIVE_SEARCH";
+  switch (source) {
+    case FBBRPacingBaseSource::kTrustedBw:
+      return "TRUSTED_BW";
+    case FBBRPacingBaseSource::kWaveformCruiseBaseline:
+      return "WAVEFORM_CRUISE_BASELINE";
+    default:
+      return "NATIVE_BBR";
   }
-  return "NATIVE_BBR";
 }
 
 bool FBBRSender::IsCruisePhase(
@@ -3803,15 +2627,7 @@ void FBBRSender::EmitFreqGateCsvRow(
       << normal_window_count_ << ","
       << merged_window_count_ << ","
       << spectral_invalid_count_ << ","
-      << (trusted_bw_cleared_on_cruise_start_ ? "true" : "false") << ","
-      << "F-BBR" << ","
-      << (fbbr_frequency_search_config_.frequency_search_enabled ? "CODED_SINE" : "LEGACY_TRIANGLE")
-      << ","
-      << (1.0 + (fbbr_frequency_search_config_.frequency_search_enabled
-                     ? fbbr_probe_signature_.amplitude_ratio * triangle_wave
-                     : 0.0)) << ","
-      << fbbr_probe_signature_.period_rtts << ","
-      << fbbr_probe_signature_.code_id;
+      << (trusted_bw_cleared_on_cruise_start_ ? "true" : "false");
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -3829,18 +2645,9 @@ void FBBRSender::OnPacketSent(QuicTime sent_time,
                                   HasRetransmittableData is_retransmittable) {
   current_time_ = sent_time;
   QuicBandwidth sender_rate = PacingRate(bytes_in_flight);
-  if (!fbbr_frequency_search_config_.frequency_search_enabled &&
-      fbbr_frequency_search_config_.legacy_spectral_path_enabled) {
-    sender_rate_history_.push_back({sent_time, sender_rate});
-    while (sender_rate_history_.size() > kMaxHistorySamples) {
-      sender_rate_history_.pop_front();
-    }
-  }
-
-  if (fbbr_frequency_search_config_.frequency_search_enabled && in_cruise_) {
-    FBBRFrequencySearchAccumulateSend(
-        sent_time, bytes_in_flight, bytes,
-        is_retransmittable == HAS_RETRANSMITTABLE_DATA);
+  sender_rate_history_.push_back({sent_time, sender_rate});
+  while (sender_rate_history_.size() > kMaxHistorySamples) {
+    sender_rate_history_.pop_front();
   }
 
   Bbr2Sender::OnPacketSent(sent_time,
@@ -3868,51 +2675,6 @@ void FBBRSender::OnCongestionEvent(
                                 acked_packets,
                                 lost_packets);
 
-  if (fbbr_frequency_search_config_.frequency_search_enabled && !in_cruise_ &&
-      trusted_bw_application_valid_) {
-    const DebugState state = ExportDebugState();
-    if (state.last_sample_is_app_limited) {
-      ClearTrustedBwApplication("post_cruise_app_limited");
-      trusted_bw_invalid_reason_ = "post_cruise_app_limited";
-    }
-    const double trusted_bps = static_cast<double>(trusted_bw_.ToBitsPerSecond());
-    const double native_bps = static_cast<double>(
-        BandwidthEstimate().ToBitsPerSecond());
-    if (trusted_bps > 0.0 && native_bps > 0.0 &&
-        std::abs(native_bps - trusted_bps) / trusted_bps > 0.20) {
-      ClearTrustedBwApplication("post_cruise_native_deviation");
-      trusted_bw_invalid_reason_ = "post_cruise_native_deviation";
-    }
-    if (trusted_bw_age_cruises_ > fbbr_frequency_search_config_.trusted_ttl_cruises) {
-      ClearTrustedBw("trusted_ttl_expired");
-    }
-    uint64_t lost_bytes = 0;
-    for (const auto& lost : lost_packets) lost_bytes += lost.bytes_lost;
-    const double event_loss_ratio = acked_bytes + lost_bytes > 0
-        ? static_cast<double>(lost_bytes) /
-              static_cast<double>(acked_bytes + lost_bytes)
-        : 0.0;
-    const double event_ecn_ratio = acked_bytes > 0
-        ? static_cast<double>(GetBytesEcnInRounds()) / acked_bytes
-        : 0.0;
-    if (event_loss_ratio > fbbr_frequency_search_config_.max_loss_ratio_for_trusted ||
-        event_ecn_ratio > fbbr_frequency_search_config_.max_ecn_ratio_for_trusted) {
-      ClearTrustedBwApplication("post_cruise_congestion");
-      trusted_bw_invalid_reason_ = "post_cruise_congestion";
-    }
-    TimeDelta current_rtprop = model_.MinRtt();
-    if (!fbbr_rtprop_frozen_.IsZero() && !current_rtprop.IsZero()) {
-      const double rtprop_step = std::abs(
-          static_cast<double>(current_rtprop.ToMicroseconds() -
-                              fbbr_rtprop_frozen_.ToMicroseconds())) /
-          std::max<double>(1.0, fbbr_rtprop_frozen_.ToMicroseconds());
-      if (rtprop_step > 0.20) {
-        ClearTrustedBwApplication("post_cruise_rtprop_step");
-        trusted_bw_invalid_reason_ = "post_cruise_rtprop_step";
-      }
-    }
-  }
-
   if (mode_ != Bbr2Mode::PROBE_BW) {
     ClearTrustedBw("non_probe_bw");
   } else if (enable_convergence_gate_control_ && bbr_stable_) {
@@ -3923,14 +2685,19 @@ void FBBRSender::OnCongestionEvent(
     drain_completed_ = true;
   }
 
-  if (!fbbr_frequency_search_config_.frequency_search_enabled &&
-      fbbr_frequency_search_config_.legacy_spectral_path_enabled &&
-      last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_ &&
+  if (last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_ &&
       acked_bytes > 0) {
     QuicBandwidth recv_signal = use_delivery_rate_latest_for_signal_history_
                                     ? DeliveryRateLatest()
                                     : BandwidthLatest();
-    delivery_rate_history_.push_back({event_time, recv_signal});
+    const bool recv_valid =
+        !recv_signal.IsZero() &&
+        std::isfinite(static_cast<double>(recv_signal.ToBitsPerSecond()));
+    const bool sample_is_app_limited =
+        ExportDebugState().last_sample_is_app_limited;
+    delivery_rate_history_.push_back(
+        {event_time, recv_signal, recv_valid, sample_is_app_limited,
+         acked_bytes});
     if (rtt_stats_ != nullptr) {
       TimeDelta smoothed_rtt = rtt_stats_->smoothed_rtt();
       if (smoothed_rtt.IsZero()) {
@@ -3959,8 +2726,9 @@ void FBBRSender::OnCongestionEvent(
 
   if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
       GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
-    if (fbbr_frequency_search_config_.frequency_search_enabled) {
-      FBBRFrequencySearchFinalizeReadyBlocks(event_time, false);
+    if (cruise_detector_mode_ ==
+        FBBRCruiseDetectorMode::kTimeWaveform) {
+      RunWaveformCruiseStateMachine(event_time);
     } else {
       RunDueCruiseWindowAnalysis(event_time);
     }
@@ -3969,11 +2737,6 @@ void FBBRSender::OnCongestionEvent(
 
 QuicBandwidth FBBRSender::PacingRate(
     QuicByteCount bytes_in_flight) const {
-  // PacingRate() is queried by the pacer between packet/ACK callbacks.  Using
-  // the last callback timestamp freezes or phase-shifts the carrier under
-  // multi-flow scheduling; query the transport clock so commanded and actual
-  // input are defined on the same time axis.
-  if (clock_ != nullptr) current_time_ = clock_->Now();
   const QuicBandwidth native_pacing =
       Bbr2Sender::PacingRate(bytes_in_flight);
   const QuicBandwidth native_bw = BandwidthEstimate();
@@ -4000,7 +2763,18 @@ QuicBandwidth FBBRSender::PacingRate(
       trusted_value_is_usable &&
       stable_allows_application;
 
-  if (use_trusted_bw) {
+  const bool use_waveform_cruise_baseline =
+      cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform &&
+      IsCruisePhase(phase) && in_cruise_ &&
+      waveform_cruise_state_ != WaveformCruiseState::kDisabled &&
+      !current_injection_baseline_bw_.IsZero();
+
+  if (use_waveform_cruise_baseline) {
+    pacing_base_bw = current_injection_baseline_bw_;
+    pacing_base_source =
+        FBBRPacingBaseSource::kWaveformCruiseBaseline;
+    trusted_bw_application_phase_ = "CRUISE";
+  } else if (use_trusted_bw) {
     pacing_base_bw = trusted_bw_;
     pacing_base_source = FBBRPacingBaseSource::kTrustedBw;
     trusted_bw_application_phase_ = PhaseApplicationName(phase);
@@ -4009,62 +2783,53 @@ QuicBandwidth FBBRSender::PacingRate(
   }
 
   QuicBandwidth baseline_pacing = native_pacing;
-  const bool use_adaptive_cruise_baseline =
-      fbbr_frequency_search_config_.search_controller_enabled &&
-      fbbr_probe_active_ && in_cruise_ &&
-      phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
-  if (use_trusted_bw) {
+  if (use_waveform_cruise_baseline) {
+    current_probe_bw_phase_gain_ = 1.0;
+    baseline_pacing = current_injection_baseline_bw_;
+  } else if (use_trusted_bw) {
     baseline_pacing =
         static_cast<float>(phase_gain) * pacing_base_bw;
-  } else if (use_adaptive_cruise_baseline) {
-    // CRUISE has unit pacing gain. Use the F-BBR search baseline directly;
-    // using the parent's cached pacing rate here would reintroduce per-ACK
-    // drift and could apply the phase gain twice.
-    const double search_baseline_bps =
-        FBBRSearchSearchBaselineBps(current_time_);
-    const double servo_factor = ClampValue(
-        fbbr_queue_servo_state_.factor, 0.10, 1.02);
-    baseline_pacing = BandwidthFromBps(
-        search_baseline_bps * servo_factor);
-    pacing_base_bw = BandwidthFromBps(search_baseline_bps);
-    pacing_base_source = FBBRPacingBaseSource::kAdaptiveSearch;
+  }
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
+      cruise_detector_mode_ ==
+          FBBRCruiseDetectorMode::kLegacySpectral &&
+      cruise_baseline_cap_bps_ > 0 &&
+      baseline_pacing.ToBitsPerSecond() >
+          static_cast<int64_t>(std::min<uint64_t>(
+              cruise_baseline_cap_bps_,
+              static_cast<uint64_t>(std::numeric_limits<int64_t>::max())))) {
+    baseline_pacing =
+        QuicBandwidth::FromBitsPerSecond(cruise_baseline_cap_bps_);
   }
 
   const bool base_should_oscillate = BaseShouldOscillate();
-  // Frequency Search freezes the probe decision for the CRUISE block.  A convergence
-  // transition may invalidate the block, but must never change its waveform
-  // half-way through.  The legacy path retains its historical gate behavior.
-  const bool should_oscillate = fbbr_frequency_search_config_.frequency_search_enabled
+  const bool should_oscillate = use_waveform_cruise_baseline
       ? base_should_oscillate
-      : (enable_convergence_gate_control_
-             ? (base_should_oscillate && !bbr_stable_)
-             : base_should_oscillate);
+      : enable_convergence_gate_control_
+          ? (base_should_oscillate && !bbr_stable_)
+          : base_should_oscillate;
   freq_tool_on_ = should_oscillate;
-  const double probe_wave = should_oscillate
-      ? (fbbr_frequency_search_config_.frequency_search_enabled
-             ? FBBRFrequencySearchCodedSineValue(current_time_)
-             : TriangleWave(current_time_))
-      : 0.0;
-  const int64_t amplitude_bps = should_oscillate
-      ? (fbbr_frequency_search_config_.frequency_search_enabled
-             ? static_cast<int64_t>(fbbr_probe_signature_.amplitude_ratio *
-                                    baseline_pacing.ToBitsPerSecond())
-             : static_cast<int64_t>(GetCurrentAmplitudeBps()))
-      : 0;
-  // F-BBR uses a multiplicative relative dither so its queue budget and
-  // identifiability have the same meaning at every bottleneck rate.  A pure
-  // sinusoid has one carrier; therefore its second harmonic is attributable
-  // to saturation/zero-queue nonlinearities rather than the input waveform.
+  const int64_t amplitude_bps =
+      should_oscillate
+          ? static_cast<int64_t>(
+                use_waveform_cruise_baseline
+                    ? current_probe_amplitude_bps_
+                    : GetCurrentAmplitudeBps())
+          : 0;
+  const double triangle_wave =
+      should_oscillate ? TriangleWave(current_time_) : 0.0;
   const int64_t offset_bps =
-      static_cast<int64_t>(amplitude_bps * probe_wave);
-  int64_t final_bps = static_cast<int64_t>(baseline_pacing.ToBitsPerSecond()) +
-                      offset_bps;
-  final_bps = std::max<int64_t>(1000, final_bps);
+      static_cast<int64_t>(amplitude_bps * triangle_wave);
+  const int64_t final_bps = AddPacingOffsetWithFloor(
+      baseline_pacing.ToBitsPerSecond(), offset_bps,
+      minimum_pacing_rate_bps_);
   const QuicBandwidth final_pacing =
       QuicBandwidth::FromBitsPerSecond(static_cast<uint64_t>(final_bps));
   const QuicBandwidth returned_pacing =
-      (!should_oscillate && !use_trusted_bw && !use_adaptive_cruise_baseline)
-          ? native_pacing : final_pacing;
+      (!should_oscillate && !use_trusted_bw &&
+       !use_waveform_cruise_baseline)
+          ? native_pacing
+          : final_pacing;
 
   EmitPacingTrace(native_bw,
                   pacing_base_bw,
@@ -4074,7 +2839,7 @@ QuicBandwidth FBBRSender::PacingRate(
                   phase_gain,
                   amplitude_bps,
                   amplitude_bps,
-                  probe_wave,
+                  triangle_wave,
                   should_oscillate);
   if (pacing_audit_trace_cb_) {
     const double time_s =
@@ -4094,53 +2859,2927 @@ QuicBandwidth FBBRSender::PacingRate(
   }
   return returned_pacing;
 }
-
-FbbrPacketPacingDebugState FBBRSender::ExportPacketPacingDebugState(
-    QuicTime sent_time,
-    QuicByteCount bytes_in_flight,
-    uint64_t commanded_pacing_bps) const {
-  FbbrPacketPacingDebugState state;
-  const bool cruise_search = fbbr_frequency_search_config_.frequency_search_enabled &&
-      fbbr_probe_active_ && in_cruise_ &&
-      GetCurrentProbeBwPhase() ==
-          Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
-  state.search_baseline_bps = cruise_search
-      ? static_cast<uint64_t>(std::llround(std::max(
-            0.0, FBBRSearchSearchBaselineBps(sent_time) *
-                ClampValue(fbbr_queue_servo_state_.factor, 0.10, 1.02))))
-      : BandwidthEstimate().ToBitsPerSecond();
-  state.commanded_probe_offset_bps =
-      static_cast<int64_t>(commanded_pacing_bps) -
-      static_cast<int64_t>(state.search_baseline_bps);
-  if (cruise_search && !fbbr_period_.IsZero() &&
-      cruise_start_time_ != QuicTime::Zero() && sent_time >= cruise_start_time_) {
-    const double elapsed_s = static_cast<double>(
-        (sent_time - cruise_start_time_).ToMicroseconds()) / 1e6;
-    state.carrier_phase = std::fmod(
-        fbbr_probe_signature_.initial_phase_rad +
-            2.0 * M_PI * elapsed_s /
-                std::max(fbbr_probe_signature_.period_s, 1e-9),
-        2.0 * M_PI);
-  }
-  state.cwnd_bytes = GetCongestionWindow();
-  state.search_active = fbbr_search_state_.search_active;
-  state.is_pulser = cruise_search &&
-      fbbr_search_state_.is_pulser;
-  state.is_cwnd_limited = bytes_in_flight >= state.cwnd_bytes;
-  state.is_app_limited = fbbr_last_sample_app_limited_;
-  return state;
-}
-
 int32_t FBBRSender::GetCurrentBbrModeIndex() const {
   return Bbr2Sender::GetCurrentBbrModeIndex();
 }
 
-void FBBRSender::RunDueCruiseWindowAnalysis(QuicTime now) {
-  if (fbbr_frequency_search_config_.frequency_search_enabled) {
-    FBBRFrequencySearchFinalizeReadyBlocks(now, false);
+const char* FBBRSender::WaveformStateName(WaveformCruiseState state) {
+  switch (state) {
+    case WaveformCruiseState::kWaitInitialSettle:
+      return "WAIT_INITIAL_SETTLE";
+    case WaveformCruiseState::kCollectCycle:
+      return "COLLECT_CYCLE";
+    case WaveformCruiseState::kExtendCycle:
+      return "EXTEND_CYCLE";
+    case WaveformCruiseState::kAnalyzeCycle:
+      return "ANALYZE_CYCLE";
+    case WaveformCruiseState::kWaitPostAdjustmentSettle:
+      return "WAIT_POST_ADJUSTMENT_SETTLE";
+    case WaveformCruiseState::kTrustedLocked:
+      return "TRUSTED_LOCKED";
+    case WaveformCruiseState::kFallbackLocked:
+      return "FALLBACK_LOCKED";
+    default:
+      return "DISABLED";
+  }
+}
+
+const char* FBBRSender::WaveformClassificationName(
+    WaveformClassification classification) {
+  switch (classification) {
+    case WaveformClassification::kFullLoad:
+      return "FULL_LOAD";
+    case WaveformClassification::kUnderload:
+      return "UNDERLOAD";
+    case WaveformClassification::kOverload:
+      return "OVERLOAD";
+    default:
+      return "INCONCLUSIVE";
+  }
+}
+
+bool FBBRSender::UsesAdaptiveLoadJudgment() const {
+  return adaptive_guard_enabled_ || fbbr_window_baseline_enabled_;
+}
+
+WaveformClassification FBBRSender::ClassifyWaveformState(
+    const WaveformDecisionInputs& inputs,
+    const char** decision_rule) {
+  auto decide = [decision_rule](WaveformClassification classification,
+                                const char* rule) {
+    if (decision_rule != nullptr) {
+      *decision_rule = rule;
+    }
+    return classification;
+  };
+  auto decide_r6 = [&]() {
+    if (!inputs.adaptive_guard_enabled) {
+      return decide(WaveformClassification::kInconclusive, "R6");
+    }
+    const bool window_stats_valid = inputs.srtt_window_stats_valid &&
+        std::isfinite(inputs.srtt_mean_ms) && inputs.srtt_mean_ms > 0.0 &&
+        std::isfinite(inputs.srtt_min_ms) && inputs.srtt_min_ms > 0.0 &&
+        std::isfinite(inputs.srtt_max_ms) && inputs.srtt_max_ms > 0.0;
+    const bool srtt_up_valid =
+        inputs.latest_waveform_overload_srtt_mean_valid &&
+        std::isfinite(inputs.latest_waveform_overload_srtt_mean_ms) &&
+        inputs.latest_waveform_overload_srtt_mean_ms > 0.0;
+    if (window_stats_valid && srtt_up_valid &&
+        (inputs.srtt_mean_ms >
+             inputs.latest_waveform_overload_srtt_mean_ms ||
+         inputs.srtt_max_ms >
+             inputs.latest_waveform_overload_srtt_mean_ms)) {
+      return decide(WaveformClassification::kOverload, "R6.1");
+    }
+    const bool srtt_low_valid =
+        inputs.latest_waveform_underload_srtt_mean_valid &&
+        std::isfinite(inputs.latest_waveform_underload_srtt_mean_ms) &&
+        inputs.latest_waveform_underload_srtt_mean_ms > 0.0;
+    if (window_stats_valid && srtt_low_valid &&
+        (inputs.srtt_mean_ms <
+             inputs.latest_waveform_underload_srtt_mean_ms ||
+         inputs.srtt_min_ms <
+             inputs.latest_waveform_underload_srtt_mean_ms)) {
+      return decide(WaveformClassification::kUnderload, "R6.2");
+    }
+    return decide(WaveformClassification::kInconclusive, "R6.3");
+  };
+  if (!inputs.prechecks_valid || !inputs.srtt_input_valid) {
+    return decide_r6();
+  }
+
+  const bool drate_effective_similar =
+      inputs.drate_similar || inputs.drate_similar_without_middle;
+  if (inputs.adaptive_guard_enabled) {
+    const bool srtt_effective_similar =
+        inputs.srtt_similar || inputs.srtt_similar_without_middle;
+    if (srtt_effective_similar) {
+      const bool positive_side_suppressed =
+          inputs.srtt_positive_half_clipped ||
+          inputs.srtt_only_negative_half;
+      const bool negative_side_suppressed =
+          inputs.srtt_negative_half_clipped ||
+          inputs.srtt_only_positive_half;
+      const bool positive_only = positive_side_suppressed &&
+                                 !negative_side_suppressed;
+      const bool negative_only = !positive_side_suppressed &&
+                                 negative_side_suppressed;
+      const bool both_clipped = positive_side_suppressed &&
+                                negative_side_suppressed;
+      if (positive_only) {
+        if (!inputs.drate_input_valid) {
+          return decide(WaveformClassification::kInconclusive, "R2.4");
+        }
+        if (inputs.drate_similar &&
+            ((inputs.drate_positive_half_clipped &&
+              inputs.positive_half_clips_simultaneous) ||
+             inputs.drate_only_negative_half)) {
+          return decide(WaveformClassification::kOverload, "R2.1");
+        }
+        if (drate_effective_similar) {
+          return decide(WaveformClassification::kFullLoad, "R2.2");
+        }
+        return decide(WaveformClassification::kOverload, "R2.3");
+      }
+      if (negative_only || both_clipped) {
+        const char* similar_rule = negative_only ? "R3.1" : "R4.1";
+        const char* plateau_rule = negative_only ? "R3.2" : "R4.2";
+        const char* otherwise_rule = negative_only ? "R3.3" : "R4.3";
+        if (inputs.drate_input_valid && inputs.drate_similar) {
+          return decide(WaveformClassification::kUnderload, similar_rule);
+        }
+        if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
+          return decide(WaveformClassification::kUnderload, plateau_rule);
+        }
+        return decide(WaveformClassification::kInconclusive, otherwise_rule);
+      }
+      return decide(WaveformClassification::kFullLoad, "R1");
+    }
+    if (drate_effective_similar) {
+      return decide(WaveformClassification::kUnderload, "R5.1");
+    }
+    return decide(WaveformClassification::kOverload, "R5.2");
+  }
+
+  if (inputs.srtt_similar) {
+    const bool positive_only = inputs.srtt_positive_half_clipped &&
+                               !inputs.srtt_negative_half_clipped;
+    const bool negative_only = !inputs.srtt_positive_half_clipped &&
+                               inputs.srtt_negative_half_clipped;
+    const bool both_clipped = inputs.srtt_positive_half_clipped &&
+                              inputs.srtt_negative_half_clipped;
+    if (positive_only) {
+      if (!inputs.drate_input_valid) {
+        return decide(WaveformClassification::kInconclusive, "R2.4");
+      }
+      if (inputs.drate_similar && inputs.drate_positive_half_clipped &&
+          inputs.positive_half_clips_simultaneous) {
+        return decide(WaveformClassification::kOverload, "R2.1");
+      }
+      if (drate_effective_similar) {
+        return decide(WaveformClassification::kFullLoad, "R2.2");
+      }
+      return decide(WaveformClassification::kOverload, "R2.3");
+    }
+    if (negative_only || both_clipped) {
+      const char* similar_rule = negative_only ? "R3.1" : "R4.1";
+      const char* plateau_rule = negative_only ? "R3.2" : "R4.2";
+      const char* otherwise_rule = negative_only ? "R3.3" : "R4.3";
+      if (inputs.drate_input_valid && inputs.drate_similar) {
+        return decide(WaveformClassification::kUnderload, similar_rule);
+      }
+      if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
+        return decide(WaveformClassification::kUnderload, plateau_rule);
+      }
+      return decide(WaveformClassification::kInconclusive, otherwise_rule);
+    }
+    return decide(WaveformClassification::kFullLoad, "R1");
+  }
+  if (inputs.srtt_similar_without_middle) {
+    return decide(WaveformClassification::kFullLoad, "R1");
+  }
+  if (!inputs.drate_input_valid) {
+    return decide_r6();
+  }
+  if (drate_effective_similar) {
+    return decide(WaveformClassification::kUnderload, "R5.1");
+  }
+  return decide(WaveformClassification::kOverload, "R5.2");
+}
+
+const char* FBBRSender::CruiseDetectorModeName(
+    FBBRCruiseDetectorMode mode) {
+  return mode == FBBRCruiseDetectorMode::kLegacySpectral
+             ? "legacy_spectral"
+             : "time_waveform";
+}
+
+TimeDelta FBBRSender::CurrentSmoothedRtt() const {
+  if (rtt_stats_ != nullptr) {
+    const TimeDelta srtt = rtt_stats_->smoothed_rtt();
+    if (!srtt.IsZero()) {
+      return srtt;
+    }
+  }
+  const TimeDelta min_rtt = model_.MinRtt();
+  if (!min_rtt.IsZero()) {
+    return min_rtt;
+  }
+  return rtt_stats_ == nullptr ? TimeDelta::Zero()
+                               : rtt_stats_->MinOrInitialRtt();
+}
+
+QuicTime FBBRSender::AlignToNextTriangleCycle(QuicTime time) const {
+  if (cruise_start_time_ == QuicTime::Zero() ||
+      cruise_modulation_freq_hz_ <= 0.0 || time <= cruise_start_time_) {
+    return cruise_start_time_;
+  }
+  const int64_t period_us = static_cast<int64_t>(std::llround(
+      1000000.0 / cruise_modulation_freq_hz_));
+  if (period_us <= 0) {
+    return time;
+  }
+  const int64_t elapsed_us =
+      (time - cruise_start_time_).ToMicroseconds();
+  const int64_t cycles = (elapsed_us + period_us - 1) / period_us;
+  return cruise_start_time_ +
+         TimeDelta::FromMicroseconds(cycles * period_us);
+}
+
+FBBRSender::ResampledWaveformSeries
+FBBRSender::ResampleRateWaveform(
+    const std::vector<FBBRRateSample>& samples,
+    QuicTime start,
+    QuicTime end,
+    double sample_step_s,
+    double max_interpolation_gap_s) const {
+  ResampledWaveformSeries result;
+  if (end <= start || sample_step_s <= 0.0) {
+    return result;
+  }
+  const double duration_s =
+      static_cast<double>((end - start).ToMicroseconds()) / 1000000.0;
+  const size_t count =
+      static_cast<size_t>(std::floor(duration_s / sample_step_s)) + 1;
+  result.values.assign(count, 0.0);
+  result.valid.assign(count, false);
+  std::vector<std::vector<double>> bins(count);
+  for (const auto& sample : samples) {
+    if (!sample.valid || sample.rate.IsZero() || sample.time < start ||
+        sample.time > end) {
+      continue;
+    }
+    const double value =
+        static_cast<double>(sample.rate.ToBitsPerSecond());
+    if (!std::isfinite(value) || value <= 0.0) {
+      continue;
+    }
+    const double offset_s =
+        static_cast<double>((sample.time - start).ToMicroseconds()) /
+        1000000.0;
+    const size_t index = std::min(
+        count - 1,
+        static_cast<size_t>(std::floor(offset_s / sample_step_s + 0.5)));
+    bins[index].push_back(value);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (!bins[i].empty()) {
+      result.values[i] = Median(bins[i]);
+      result.valid[i] = true;
+    }
+  }
+  size_t left = 0;
+  while (left < count) {
+    while (left < count && !result.valid[left]) {
+      ++left;
+    }
+    if (left >= count) {
+      break;
+    }
+    size_t right = left + 1;
+    while (right < count && !result.valid[right]) {
+      ++right;
+    }
+    if (right < count) {
+      const double gap_s = (right - left) * sample_step_s;
+      if (gap_s <= max_interpolation_gap_s + 1e-12) {
+        for (size_t i = left + 1; i < right; ++i) {
+          const double fraction =
+              static_cast<double>(i - left) /
+              static_cast<double>(right - left);
+          result.values[i] = result.values[left] +
+              fraction * (result.values[right] - result.values[left]);
+          result.valid[i] = true;
+        }
+      }
+    }
+    left = right;
+  }
+  const size_t valid_count = static_cast<size_t>(
+      std::count(result.valid.begin(), result.valid.end(), true));
+  result.coverage_ratio = count == 0
+                              ? 0.0
+                              : static_cast<double>(valid_count) / count;
+  return result;
+}
+
+FBBRSender::ResampledWaveformSeries
+FBBRSender::ResampleRttWaveform(
+    const std::vector<FBBRRttSample>& samples,
+    QuicTime start,
+    QuicTime end,
+    double sample_step_s,
+    double max_interpolation_gap_s) const {
+  std::vector<FBBRRateSample> rate_samples;
+  rate_samples.reserve(samples.size());
+  for (const auto& sample : samples) {
+    if (!std::isfinite(sample.rtt_ms) || sample.rtt_ms <= 0.0) {
+      continue;
+    }
+    rate_samples.push_back(
+        {sample.time, BandwidthFromBps(sample.rtt_ms * 1000000.0),
+         true, false, 0});
+  }
+  ResampledWaveformSeries result = ResampleRateWaveform(
+      rate_samples, start, end, sample_step_s, max_interpolation_gap_s);
+  for (double& value : result.values) {
+    value /= 1000000.0;
+  }
+  return result;
+}
+
+std::vector<double> FBBRSender::DetrendLinear(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid) {
+  std::vector<double> result(values.size(), 0.0);
+  if (values.size() != valid.size()) {
+    return result;
+  }
+  double sum_x = 0.0;
+  double sum_y = 0.0;
+  double sum_xx = 0.0;
+  double sum_xy = 0.0;
+  size_t count = 0;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (!valid[i] || !std::isfinite(values[i])) {
+      continue;
+    }
+    const double x = static_cast<double>(i);
+    sum_x += x;
+    sum_y += values[i];
+    sum_xx += x * x;
+    sum_xy += x * values[i];
+    ++count;
+  }
+  if (count < 2) {
+    return result;
+  }
+  const double denominator = count * sum_xx - sum_x * sum_x;
+  const double slope = std::abs(denominator) <= 1e-12
+                           ? 0.0
+                           : (count * sum_xy - sum_x * sum_y) / denominator;
+  const double intercept = (sum_y - slope * sum_x) / count;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i])) {
+      result[i] = values[i] -
+                  (intercept + slope * static_cast<double>(i));
+    }
+  }
+  return result;
+}
+
+std::vector<double> FBBRSender::MedianFilter3(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid) {
+  std::vector<double> result = values;
+  if (values.size() != valid.size() || values.size() < 3) {
+    return result;
+  }
+  for (size_t i = 1; i + 1 < values.size(); ++i) {
+    if (valid[i - 1] && valid[i] && valid[i + 1]) {
+      result[i] = Median({values[i - 1], values[i], values[i + 1]});
+    }
+  }
+  return result;
+}
+
+double FBBRSender::ComputeNormalizedCrossCorrelation(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs,
+    const std::vector<bool>& valid) {
+  if (lhs.size() != rhs.size() || lhs.size() != valid.size()) {
+    return 0.0;
+  }
+  double lhs_mean = 0.0;
+  double rhs_mean = 0.0;
+  size_t count = 0;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (valid[i] && std::isfinite(lhs[i]) && std::isfinite(rhs[i])) {
+      lhs_mean += lhs[i];
+      rhs_mean += rhs[i];
+      ++count;
+    }
+  }
+  if (count < 3) {
+    return 0.0;
+  }
+  lhs_mean /= count;
+  rhs_mean /= count;
+  double numerator = 0.0;
+  double lhs_energy = 0.0;
+  double rhs_energy = 0.0;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!valid[i] || !std::isfinite(lhs[i]) || !std::isfinite(rhs[i])) {
+      continue;
+    }
+    const double x = lhs[i] - lhs_mean;
+    const double y = rhs[i] - rhs_mean;
+    numerator += x * y;
+    lhs_energy += x * x;
+    rhs_energy += y * y;
+  }
+  const double denominator = std::sqrt(lhs_energy * rhs_energy);
+  return denominator <= 1e-12 ? 0.0 : ClampValue(numerator / denominator,
+                                                  -1.0, 1.0);
+}
+
+std::vector<double> FBBRSender::RobustNormalize(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid) {
+  std::vector<double> normalized(values.size(), 0.0);
+  if (values.size() != valid.size()) {
+    return normalized;
+  }
+  std::vector<double> selected;
+  selected.reserve(values.size());
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i])) {
+      selected.push_back(values[i]);
+    }
+  }
+  if (selected.size() < 3) {
+    return normalized;
+  }
+  const double center = Median(selected);
+  std::vector<double> deviations;
+  deviations.reserve(selected.size());
+  for (double value : selected) {
+    deviations.push_back(std::abs(value - center));
+  }
+  double scale = 1.4826 * Median(deviations);
+  if (!std::isfinite(scale) || scale <= 1e-12) {
+    const auto minmax = std::minmax_element(selected.begin(), selected.end());
+    scale = std::max(1e-12, 0.5 * (*minmax.second - *minmax.first));
+  }
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i])) {
+      normalized[i] = (values[i] - center) / scale;
+    }
+  }
+  return normalized;
+}
+
+double FBBRSender::ComputeSlopeDirectionAgreement(
+    const std::vector<double>& lhs,
+    const std::vector<double>& rhs,
+    const std::vector<bool>& valid) {
+  if (lhs.size() != rhs.size() || lhs.size() != valid.size() ||
+      lhs.size() < 2) {
+    return 0.0;
+  }
+  size_t compared = 0;
+  size_t matched = 0;
+  for (size_t i = 1; i < lhs.size(); ++i) {
+    if (!valid[i - 1] || !valid[i] || !std::isfinite(lhs[i - 1]) ||
+        !std::isfinite(lhs[i]) || !std::isfinite(rhs[i - 1]) ||
+        !std::isfinite(rhs[i])) {
+      continue;
+    }
+    const double lhs_delta = lhs[i] - lhs[i - 1];
+    const double rhs_delta = rhs[i] - rhs[i - 1];
+    const int lhs_sign = lhs_delta > 1e-9 ? 1 : (lhs_delta < -1e-9 ? -1 : 0);
+    const int rhs_sign = rhs_delta > 1e-9 ? 1 : (rhs_delta < -1e-9 ? -1 : 0);
+    ++compared;
+    if (lhs_sign == rhs_sign) {
+      ++matched;
+    }
+  }
+  return compared == 0 ? 0.0
+                       : static_cast<double>(matched) / compared;
+}
+
+double FBBRSender::ComputeLaggedCorrelation(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    size_t lag_samples,
+    size_t* pair_count) {
+  if (pair_count != nullptr) {
+    *pair_count = 0;
+  }
+  if (values.size() != valid.size() || lag_samples == 0 ||
+      lag_samples >= values.size()) {
+    return -1.0;
+  }
+  double lhs_mean = 0.0;
+  double rhs_mean = 0.0;
+  size_t count = 0;
+  for (size_t i = 0; i + lag_samples < values.size(); ++i) {
+    const size_t j = i + lag_samples;
+    if (!valid[i] || !valid[j] || !std::isfinite(values[i]) ||
+        !std::isfinite(values[j])) {
+      continue;
+    }
+    lhs_mean += values[i];
+    rhs_mean += values[j];
+    ++count;
+  }
+  if (pair_count != nullptr) {
+    *pair_count = count;
+  }
+  if (count < 4) {
+    return -1.0;
+  }
+  lhs_mean /= count;
+  rhs_mean /= count;
+  double covariance = 0.0;
+  double lhs_energy = 0.0;
+  double rhs_energy = 0.0;
+  for (size_t i = 0; i + lag_samples < values.size(); ++i) {
+    const size_t j = i + lag_samples;
+    if (!valid[i] || !valid[j] || !std::isfinite(values[i]) ||
+        !std::isfinite(values[j])) {
+      continue;
+    }
+    const double lhs = values[i] - lhs_mean;
+    const double rhs = values[j] - rhs_mean;
+    covariance += lhs * rhs;
+    lhs_energy += lhs * lhs;
+    rhs_energy += rhs * rhs;
+  }
+  const double denominator = std::sqrt(lhs_energy * rhs_energy);
+  if (!std::isfinite(denominator) || denominator <= 1e-18) {
+    return -1.0;
+  }
+  return ClampValue(covariance / denominator, -1.0, 1.0);
+}
+
+bool FBBRSender::HasMacroOpposingShoulders(
+    double slope_before,
+    double slope_after,
+    double shoulder_duration_s,
+    double minimum_abs_slope,
+    double minimum_signal_change) {
+  if (!std::isfinite(slope_before) || !std::isfinite(slope_after) ||
+      !std::isfinite(shoulder_duration_s) ||
+      !std::isfinite(minimum_abs_slope) ||
+      !std::isfinite(minimum_signal_change) ||
+      shoulder_duration_s <= 0.0 || minimum_abs_slope < 0.0 ||
+      minimum_signal_change < 0.0) {
+    return false;
+  }
+  const bool opposite_directions =
+      (slope_before >= minimum_abs_slope &&
+       slope_after <= -minimum_abs_slope) ||
+      (slope_before <= -minimum_abs_slope &&
+       slope_after >= minimum_abs_slope);
+  return opposite_directions &&
+      std::abs(slope_before) * shoulder_duration_s >=
+          minimum_signal_change &&
+      std::abs(slope_after) * shoulder_duration_s >=
+          minimum_signal_change;
+}
+
+bool FBBRSender::HasMacroSameDirectionShoulders(
+    double slope_before,
+    double slope_after) {
+  return std::isfinite(slope_before) && std::isfinite(slope_after) &&
+         std::abs(slope_before) > 1e-12 &&
+         std::abs(slope_after) > 1e-12 &&
+         slope_before * slope_after > 0.0;
+}
+
+bool FBBRSender::HasDualMacroOpposingShoulders(
+    double first_before,
+    double first_after,
+    double first_minimum_abs_slope,
+    double first_minimum_signal_change,
+    double second_before,
+    double second_after,
+    double second_minimum_abs_slope,
+    double second_minimum_signal_change,
+    double shoulder_duration_s) {
+  return HasMacroOpposingShoulders(
+             first_before, first_after, shoulder_duration_s,
+             first_minimum_abs_slope, first_minimum_signal_change) &&
+         HasMacroOpposingShoulders(
+             second_before, second_after, shoulder_duration_s,
+             second_minimum_abs_slope, second_minimum_signal_change);
+}
+
+FBBRSender::TemplateFitResult FBBRSender::EstimateRobustNoise(
+    const std::vector<double>& response,
+    const std::vector<double>& waveform_template,
+    const std::vector<bool>& valid) {
+  TemplateFitResult result;
+  if (response.size() != waveform_template.size() ||
+      response.size() != valid.size()) {
+    return result;
+  }
+  std::vector<double> response_values;
+  response_values.reserve(response.size());
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (valid[i] && std::isfinite(response[i]) &&
+        std::isfinite(waveform_template[i])) {
+      response_values.push_back(response[i]);
+    }
+  }
+  if (response_values.size() < 4) {
+    return result;
+  }
+  std::sort(response_values.begin(), response_values.end());
+  const size_t p1_index = static_cast<size_t>(
+      std::floor(0.01 * (response_values.size() - 1)));
+  const size_t p99_index = static_cast<size_t>(
+      std::ceil(0.99 * (response_values.size() - 1)));
+  const double low = response_values[p1_index];
+  const double high = response_values[p99_index];
+  double mean_x = 0.0;
+  double mean_y = 0.0;
+  size_t count = 0;
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (!valid[i] || !std::isfinite(response[i]) ||
+        !std::isfinite(waveform_template[i])) {
+      continue;
+    }
+    mean_x += waveform_template[i];
+    mean_y += ClampValue(response[i], low, high);
+    ++count;
+  }
+  mean_x /= count;
+  mean_y /= count;
+  double covariance = 0.0;
+  double template_energy = 0.0;
+  double template_min = std::numeric_limits<double>::infinity();
+  double template_max = -std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (!valid[i] || !std::isfinite(response[i]) ||
+        !std::isfinite(waveform_template[i])) {
+      continue;
+    }
+    const double x = waveform_template[i];
+    const double y = ClampValue(response[i], low, high);
+    covariance += (x - mean_x) * (y - mean_y);
+    template_energy += (x - mean_x) * (x - mean_x);
+    template_min = std::min(template_min, x);
+    template_max = std::max(template_max, x);
+  }
+  if (template_energy <= 1e-12 || !std::isfinite(template_min) ||
+      !std::isfinite(template_max)) {
+    return result;
+  }
+  result.beta = covariance / template_energy;
+  result.alpha = mean_y - result.beta * mean_x;
+  std::vector<double> residuals;
+  residuals.reserve(count);
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (!valid[i] || !std::isfinite(response[i]) ||
+        !std::isfinite(waveform_template[i])) {
+      continue;
+    }
+    const double y = ClampValue(response[i], low, high);
+    residuals.push_back(y -
+        (result.alpha + result.beta * waveform_template[i]));
+  }
+  const double residual_median = Median(residuals);
+  std::vector<double> absolute_deviations;
+  absolute_deviations.reserve(residuals.size());
+  for (double residual : residuals) {
+    absolute_deviations.push_back(std::abs(residual - residual_median));
+  }
+  result.robust_noise_sigma = 1.4826 * Median(absolute_deviations);
+  result.fitted_response_amplitude =
+      std::abs(result.beta) * 0.5 * (template_max - template_min);
+  result.response_snr = result.fitted_response_amplitude /
+      std::max(result.robust_noise_sigma, 1e-12);
+  result.valid = std::isfinite(result.response_snr);
+  return result;
+}
+
+std::vector<double> FBBRSender::ComputeLocalLinearSlopes(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double slope_window_s) {
+  std::vector<double> slopes(values.size(), 0.0);
+  if (values.size() != valid.size() || sample_step_s <= 0.0 ||
+      values.empty()) {
+    return slopes;
+  }
+  const size_t radius = std::max<size_t>(
+      2, static_cast<size_t>(std::ceil(
+             0.5 * slope_window_s / sample_step_s)));
+  for (size_t center = 0; center < values.size(); ++center) {
+    const size_t begin = center > radius ? center - radius : 0;
+    const size_t end = std::min(values.size(), center + radius + 1);
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_xx = 0.0;
+    double sum_xy = 0.0;
+    size_t count = 0;
+    for (size_t i = begin; i < end; ++i) {
+      if (!valid[i] || !std::isfinite(values[i])) {
+        continue;
+      }
+      const double x =
+          (static_cast<double>(i) - static_cast<double>(center)) *
+          sample_step_s;
+      sum_x += x;
+      sum_y += values[i];
+      sum_xx += x * x;
+      sum_xy += x * values[i];
+      ++count;
+    }
+    const double denominator = count * sum_xx - sum_x * sum_x;
+    if (count >= 3 && std::abs(denominator) > 1e-15) {
+      slopes[center] =
+          (count * sum_xy - sum_x * sum_y) / denominator;
+    }
+  }
+  return slopes;
+}
+
+std::vector<double> FBBRSender::BuildQueueIntegralTemplate(
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double period_s) {
+  std::vector<double> integral(sender_residual.size(), 0.0);
+  if (sender_residual.size() != valid.size() || sample_step_s <= 0.0) {
+    return integral;
+  }
+  const size_t cycle_samples = std::max<size_t>(
+      2, static_cast<size_t>(std::llround(
+             std::max(period_s, sample_step_s) / sample_step_s)));
+  for (size_t cycle_begin = 0; cycle_begin < sender_residual.size();
+       cycle_begin += cycle_samples) {
+    const size_t cycle_end = std::min(sender_residual.size(),
+                                      cycle_begin + cycle_samples + 1);
+    double mean = 0.0;
+    size_t count = 0;
+    for (size_t i = cycle_begin; i < cycle_end; ++i) {
+      if (valid[i] && std::isfinite(sender_residual[i])) {
+        mean += sender_residual[i];
+        ++count;
+      }
+    }
+    if (count < 2) {
+      continue;
+    }
+    mean /= count;
+    integral[cycle_begin] = 0.0;
+    for (size_t i = cycle_begin + 1; i < cycle_end; ++i) {
+      integral[i] = integral[i - 1];
+      if (valid[i - 1] && valid[i]) {
+        integral[i] += 0.5 * sample_step_s *
+            ((sender_residual[i - 1] - mean) +
+             (sender_residual[i] - mean));
+      }
+    }
+    const size_t last = cycle_end - 1;
+    const double drift = integral[last] - integral[cycle_begin];
+    if (last > cycle_begin) {
+      for (size_t i = cycle_begin; i <= last; ++i) {
+        const double fraction = static_cast<double>(i - cycle_begin) /
+                                static_cast<double>(last - cycle_begin);
+        integral[i] -= integral[cycle_begin] + fraction * drift;
+      }
+    }
+  }
+  return integral;
+}
+
+FBBRSender::CycleCompletenessResult
+FBBRSender::AnalyzeCycleCompleteness(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double expected_period_s,
+    double minimum_coverage_ratio) const {
+  CycleCompletenessResult result;
+  if (values.size() != valid.size() || values.size() < 4 ||
+      sample_step_s <= 0.0 || expected_period_s <= 0.0) {
+    result.invalid_reason = "invalid_cycle_input";
+    return result;
+  }
+  const size_t valid_count = static_cast<size_t>(
+      std::count(valid.begin(), valid.end(), true));
+  result.coverage_ratio =
+      static_cast<double>(valid_count) / static_cast<double>(valid.size());
+  std::vector<double> finite_values;
+  finite_values.reserve(valid_count);
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i])) {
+      finite_values.push_back(values[i]);
+    }
+  }
+  if (finite_values.size() < 4) {
+    result.invalid_reason = "insufficient_cycle_samples";
+    return result;
+  }
+  const auto extrema = std::minmax_element(finite_values.begin(),
+                                            finite_values.end());
+  const double range = *extrema.second - *extrema.first;
+  const double slope_epsilon = std::max(1e-12, range * 1e-4);
+  size_t rising = 0;
+  size_t falling = 0;
+  size_t directional = 0;
+  size_t adjacent_valid_count = 0;
+  int previous_sign = 0;
+  std::vector<size_t> peak_indices;
+  std::vector<size_t> trough_indices;
+  for (size_t i = 1; i < values.size(); ++i) {
+    if (!valid[i - 1] || !valid[i]) {
+      previous_sign = 0;
+      continue;
+    }
+    ++adjacent_valid_count;
+    const double delta = values[i] - values[i - 1];
+    const int sign = delta > slope_epsilon
+                         ? 1
+                         : (delta < -slope_epsilon ? -1 : 0);
+    if (sign > 0) {
+      ++rising;
+      ++directional;
+    } else if (sign < 0) {
+      ++falling;
+      ++directional;
+    }
+    if (previous_sign > 0 && sign < 0) {
+      peak_indices.push_back(i - 1);
+    } else if (previous_sign < 0 && sign > 0) {
+      trough_indices.push_back(i - 1);
+    }
+    if (sign != 0) {
+      previous_sign = sign;
+    }
+  }
+  const double adjacent_valid =
+      static_cast<double>(std::max<size_t>(1, adjacent_valid_count));
+  result.rising_duration_ratio = rising / adjacent_valid;
+  result.falling_duration_ratio = falling / adjacent_valid;
+  result.has_peak = !peak_indices.empty();
+  result.has_trough = !trough_indices.empty();
+  result.turning_point_score =
+      0.5 * (result.has_peak ? 1.0 : 0.0) +
+      0.5 * (result.has_trough ? 1.0 : 0.0);
+  result.monotonicity_score =
+      adjacent_valid_count == 0
+          ? 0.0
+          : ClampValue(static_cast<double>(directional) /
+                           adjacent_valid,
+                       0.0, 1.0);
+  const size_t expected_period_samples = std::max<size_t>(
+      2, static_cast<size_t>(std::llround(expected_period_s / sample_step_s)));
+  const size_t minimum_lag = std::max<size_t>(
+      1, static_cast<size_t>(std::floor(0.5 * expected_period_samples)));
+  const size_t maximum_lag = std::min<size_t>(
+      values.size() > 4 ? values.size() - 4 : 0,
+      static_cast<size_t>(std::ceil(1.5 * expected_period_samples)));
+  const size_t minimum_pairs = std::max<size_t>(
+      4, static_cast<size_t>(std::ceil(0.35 * expected_period_samples)));
+  struct LagCorrelation {
+    size_t lag = 0;
+    double correlation = -1.0;
+  };
+  std::vector<LagCorrelation> lag_correlations;
+  size_t best_overall_lag = 0;
+  double best_overall_correlation = -1.0;
+  for (size_t lag = minimum_lag; lag <= maximum_lag; ++lag) {
+    size_t pair_count = 0;
+    const double correlation =
+        ComputeLaggedCorrelation(values, valid, lag, &pair_count);
+    if (pair_count < minimum_pairs) {
+      continue;
+    }
+    lag_correlations.push_back({lag, correlation});
+    const bool stronger =
+        correlation > best_overall_correlation + 1e-12;
+    const bool equally_strong = std::abs(
+        correlation - best_overall_correlation) <= 1e-12;
+    const bool closer_to_expected = best_overall_lag == 0 ||
+        std::abs(static_cast<int64_t>(lag) -
+                 static_cast<int64_t>(expected_period_samples)) <
+            std::abs(static_cast<int64_t>(best_overall_lag) -
+                     static_cast<int64_t>(expected_period_samples));
+    if (stronger || (equally_strong && closer_to_expected)) {
+      best_overall_lag = lag;
+      best_overall_correlation = correlation;
+    }
+  }
+  size_t best_lag = 0;
+  double best_correlation = -1.0;
+  for (size_t i = 1; i + 1 < lag_correlations.size(); ++i) {
+    const LagCorrelation& candidate = lag_correlations[i];
+    const double period_error = std::abs(
+        static_cast<double>(candidate.lag) - expected_period_samples) /
+        expected_period_samples;
+    const bool local_peak =
+        candidate.correlation >= lag_correlations[i - 1].correlation &&
+        candidate.correlation > lag_correlations[i + 1].correlation;
+    if (!local_peak || period_error > waveform_period_tolerance_ratio_ ||
+        candidate.correlation < waveform_min_periodicity_correlation_) {
+      continue;
+    }
+    const bool stronger =
+        candidate.correlation > best_correlation + 1e-12;
+    const bool equally_strong =
+        std::abs(candidate.correlation - best_correlation) <= 1e-12;
+    const bool closer_to_expected = best_lag == 0 ||
+        std::abs(static_cast<int64_t>(candidate.lag) -
+                 static_cast<int64_t>(expected_period_samples)) <
+            std::abs(static_cast<int64_t>(best_lag) -
+                     static_cast<int64_t>(expected_period_samples));
+    if (stronger || (equally_strong && closer_to_expected)) {
+      best_lag = candidate.lag;
+      best_correlation = candidate.correlation;
+    }
+  }
+  const bool target_period_peak_found = best_lag > 0;
+  if (!target_period_peak_found) {
+    best_lag = best_overall_lag;
+    best_correlation = best_overall_correlation;
+  }
+  if (best_lag > 0) {
+    result.estimated_period = best_lag * sample_step_s;
+    result.periodicity_correlation = best_correlation;
+  }
+  result.period_error_ratio =
+      std::abs(result.estimated_period - expected_period_s) /
+      expected_period_s;
+  const double required_coverage = minimum_coverage_ratio < 0.0
+      ? waveform_min_cycle_coverage_ratio_
+      : ClampValue(minimum_coverage_ratio, 0.0, 1.0);
+  const double coverage_score = ClampValue(
+      result.coverage_ratio /
+          std::max(required_coverage, 1e-12),
+      0.0, 1.0);
+  const double period_score = ClampValue(
+      1.0 - result.period_error_ratio /
+                std::max(waveform_period_tolerance_ratio_, 1e-12),
+      0.0, 1.0);
+  const double periodicity_score = ClampValue(
+      0.5 * (result.periodicity_correlation + 1.0), 0.0, 1.0);
+  result.completeness_score =
+      0.40 * coverage_score + 0.30 * period_score +
+      0.30 * periodicity_score;
+  result.valid =
+      result.coverage_ratio >= required_coverage &&
+      target_period_peak_found &&
+      result.period_error_ratio <= waveform_period_tolerance_ratio_ &&
+      result.periodicity_correlation >=
+          waveform_min_periodicity_correlation_;
+  result.invalid_reason = result.valid ? "none" : "period_not_identified";
+  return result;
+}
+
+FBBRSender::PlateauDetectionResult
+FBBRSender::DetectDualSignalPlateaus(
+    const std::vector<double>& srtt,
+    const std::vector<double>& srtt_slopes,
+    const std::vector<double>& drate,
+    const std::vector<double>& drate_slopes,
+    const std::vector<double>& sender_residual,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double period_s,
+    double srtt_noise_sigma,
+    double drate_noise_sigma) const {
+  PlateauDetectionResult result;
+  result.srtt_middle_sequential_mask.assign(valid.size(), false);
+  result.drate_middle_sequential_mask.assign(valid.size(), false);
+  if (srtt.size() != valid.size() || drate.size() != valid.size() ||
+      srtt_slopes.size() != valid.size() ||
+      drate_slopes.size() != valid.size() ||
+      sender_residual.size() != valid.size() || srtt.size() < 5 ||
+      sample_step_s <= 0.0 || period_s <= 0.0) {
+    result.invalid_reason = "invalid_dual_plateau_input";
+    return result;
+  }
+  const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
+
+  struct SignalThresholds {
+    bool valid = false;
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double peak_to_peak = 0.0;
+    double low_slope = 0.0;
+    double shoulder_slope = 0.0;
+    double minimum_shoulder_change = 0.0;
+  };
+  auto build_thresholds = [&](const std::vector<double>& signal,
+                              const std::vector<double>& slopes,
+                              double noise_sigma) {
+    SignalThresholds thresholds;
+    std::vector<double> levels;
+    std::vector<double> selected_slopes;
+    for (size_t i = 0; i < signal.size(); ++i) {
+      if (valid[i] && std::isfinite(signal[i]) &&
+          std::isfinite(slopes[i])) {
+        levels.push_back(signal[i]);
+        selected_slopes.push_back(slopes[i]);
+      }
+    }
+    if (levels.size() < 5) {
+      return thresholds;
+    }
+    const auto extrema = std::minmax_element(levels.begin(), levels.end());
+    thresholds.minimum = *extrema.first;
+    thresholds.maximum = *extrema.second;
+    thresholds.peak_to_peak = thresholds.maximum - thresholds.minimum;
+    if (thresholds.peak_to_peak <= std::max(2.0 * noise_sigma, 1e-9)) {
+      return thresholds;
+    }
+    const double slope_median = Median(selected_slopes);
+    std::vector<double> deviations;
+    std::vector<double> absolute_slopes;
+    deviations.reserve(selected_slopes.size());
+    absolute_slopes.reserve(selected_slopes.size());
+    for (double slope : selected_slopes) {
+      deviations.push_back(std::abs(slope - slope_median));
+      absolute_slopes.push_back(std::abs(slope));
+    }
+    const double local_noise_slope = 1.4826 * Median(deviations);
+    std::sort(absolute_slopes.begin(), absolute_slopes.end());
+    const size_t characteristic_index = static_cast<size_t>(std::floor(
+        0.80 * static_cast<double>(absolute_slopes.size() - 1)));
+    const double characteristic_slope =
+        absolute_slopes[characteristic_index];
+    thresholds.low_slope = std::max(
+        1e-12, std::max(0.5 * local_noise_slope,
+                        waveform_clip_max_slope_ratio_ *
+                            characteristic_slope));
+    thresholds.shoulder_slope = std::max(
+        std::max(2.0 * thresholds.low_slope, local_noise_slope),
+        0.25 * characteristic_slope);
+    thresholds.minimum_shoulder_change = std::max(
+        std::isfinite(noise_sigma) && noise_sigma > 0.0
+            ? 2.0 * noise_sigma
+            : 0.0,
+        waveform_clip_min_duration_ratio_ * thresholds.peak_to_peak);
+    thresholds.valid = true;
+    return thresholds;
+  };
+  const SignalThresholds srtt_thresholds =
+      build_thresholds(srtt, srtt_slopes, srtt_noise_sigma);
+  const SignalThresholds drate_thresholds =
+      build_thresholds(drate, drate_slopes, drate_noise_sigma);
+  result.drate_has_waveform = drate_thresholds.valid;
+  if ((!srtt_thresholds.valid && !drate_thresholds.valid) ||
+      (!use_adaptive_load_judgment &&
+       (!srtt_thresholds.valid || !drate_thresholds.valid))) {
+    result.invalid_reason = "dual_signal_flat_or_below_noise";
+    return result;
+  }
+
+  const size_t minimum_run = std::max<size_t>(
+      3, static_cast<size_t>(std::ceil(
+             waveform_clip_min_duration_ratio_ * period_s /
+             sample_step_s)));
+  const size_t shoulder_width = std::max<size_t>(
+      3, static_cast<size_t>(std::ceil(
+             std::max(0.05, waveform_clip_min_duration_ratio_) *
+             period_s / sample_step_s)));
+  const double shoulder_duration_s = shoulder_width * sample_step_s;
+  auto median_range = [](const std::vector<double>& values,
+                         const std::vector<bool>& valid_values,
+                         size_t begin,
+                         size_t end) {
+    std::vector<double> selected;
+    for (size_t i = begin; i < end && i < values.size(); ++i) {
+      if (valid_values[i] && std::isfinite(values[i])) {
+        selected.push_back(values[i]);
+      }
+    }
+    return selected.empty() ? 0.0 : Median(selected);
+  };
+  struct Candidate {
+    bool owner_is_srtt = false;
+    size_t begin = 0;
+    size_t end = 0;
+    bool is_positive = false;
+    bool middle_level = false;
+    bool middle_sequential = false;
+    bool genuine_shoulder_clip = false;
+    double mean = 0.0;
+    double span_ratio = 0.0;
+    double extreme_distance_ratio = 1.0;
+    double abs_slope = 0.0;
+    double before = 0.0;
+    double after = 0.0;
+    double other_before = 0.0;
+    double other_after = 0.0;
+    double overlap_ratio = 0.0;
+    double minimum_shoulder_change = 0.0;
+  };
+  std::vector<Candidate> candidates;
+  auto collect = [&](bool owner_is_srtt,
+                     const std::vector<double>& signal,
+                     const std::vector<double>& signal_slopes,
+                     const std::vector<double>& other_slopes,
+                     const SignalThresholds& thresholds,
+                     const SignalThresholds& other_thresholds) {
+    size_t i = 0;
+    while (i < signal.size()) {
+      if (!valid[i] ||
+          std::abs(signal_slopes[i]) > thresholds.low_slope) {
+        ++i;
+        continue;
+      }
+      const size_t begin = i;
+      while (i < signal.size() && valid[i] &&
+             std::abs(signal_slopes[i]) <= thresholds.low_slope) {
+        ++i;
+      }
+      const size_t end = i;
+      if (end - begin < minimum_run ||
+          end - begin >= static_cast<size_t>(0.80 * signal.size())) {
+        continue;
+      }
+      std::vector<double> run_levels;
+      std::vector<double> run_abs_slopes;
+      size_t positive_count = 0;
+      size_t negative_count = 0;
+      for (size_t j = begin; j < end; ++j) {
+        run_levels.push_back(signal[j]);
+        run_abs_slopes.push_back(std::abs(signal_slopes[j]));
+        if (sender_residual[j] >= 0.0) {
+          ++positive_count;
+        } else {
+          ++negative_count;
+        }
+      }
+      const auto run_extrema =
+          std::minmax_element(run_levels.begin(), run_levels.end());
+      const double span_ratio =
+          (*run_extrema.second - *run_extrema.first) /
+          thresholds.peak_to_peak;
+      if (span_ratio > waveform_plateau_max_level_span_ratio_) {
+        continue;
+      }
+      Candidate candidate;
+      candidate.owner_is_srtt = owner_is_srtt;
+      candidate.begin = begin;
+      candidate.end = end;
+      candidate.is_positive = sender_residual[begin] >= 0.0;
+      candidate.overlap_ratio = static_cast<double>(
+          candidate.is_positive ? positive_count : negative_count) /
+          static_cast<double>(end - begin);
+      candidate.mean = Median(run_levels);
+      const double top_distance =
+          std::abs(thresholds.maximum - candidate.mean) /
+          thresholds.peak_to_peak;
+      const double bottom_distance =
+          std::abs(candidate.mean - thresholds.minimum) /
+          thresholds.peak_to_peak;
+      candidate.middle_level =
+          top_distance > waveform_plateau_extreme_distance_ratio_ &&
+          bottom_distance > waveform_plateau_extreme_distance_ratio_;
+      candidate.extreme_distance_ratio = candidate.is_positive
+          ? top_distance
+          : bottom_distance;
+      candidate.span_ratio = span_ratio;
+      candidate.abs_slope = Median(run_abs_slopes);
+      candidate.before = median_range(
+          signal_slopes, valid,
+          begin > shoulder_width ? begin - shoulder_width : 0, begin);
+      candidate.after = median_range(
+          signal_slopes, valid, end,
+          std::min(signal.size(), end + shoulder_width));
+      candidate.other_before = median_range(
+          other_slopes, valid,
+          begin > shoulder_width ? begin - shoulder_width : 0, begin);
+      candidate.other_after = median_range(
+          other_slopes, valid, end,
+          std::min(signal.size(), end + shoulder_width));
+      const bool owner_same = HasMacroSameDirectionShoulders(
+          candidate.before, candidate.after);
+      const bool other_same = HasMacroSameDirectionShoulders(
+          candidate.other_before, candidate.other_after);
+      const bool owner_opposing = HasMacroOpposingShoulders(
+          candidate.before, candidate.after, shoulder_duration_s,
+          thresholds.shoulder_slope,
+          thresholds.minimum_shoulder_change);
+      const bool dual_opposing = other_thresholds.valid &&
+          HasDualMacroOpposingShoulders(
+              candidate.before, candidate.after,
+              thresholds.shoulder_slope,
+              thresholds.minimum_shoulder_change,
+              candidate.other_before, candidate.other_after,
+              other_thresholds.shoulder_slope,
+              other_thresholds.minimum_shoulder_change,
+              shoulder_duration_s);
+      candidate.middle_sequential = use_adaptive_load_judgment
+          ? owner_same
+          : owner_same || other_same;
+      candidate.genuine_shoulder_clip =
+          !candidate.middle_sequential &&
+          (use_adaptive_load_judgment ? owner_opposing : dual_opposing) &&
+          candidate.overlap_ratio >= waveform_clip_min_half_overlap_ratio_ &&
+          candidate.extreme_distance_ratio <=
+              waveform_plateau_extreme_distance_ratio_;
+      candidate.minimum_shoulder_change =
+          thresholds.minimum_shoulder_change;
+      candidates.push_back(candidate);
+    }
+  };
+  if (srtt_thresholds.valid) {
+    collect(true, srtt, srtt_slopes, drate_slopes,
+            srtt_thresholds, drate_thresholds);
+  }
+  if (drate_thresholds.valid) {
+    collect(false, drate, drate_slopes, srtt_slopes,
+            drate_thresholds, srtt_thresholds);
+  }
+
+  result.plateau_candidate_count = candidates.size();
+  Candidate selected;
+  bool selected_found = false;
+  std::vector<std::pair<size_t, size_t>> srtt_positive_intervals;
+  std::vector<std::pair<size_t, size_t>> drate_positive_intervals;
+  for (const Candidate& candidate : candidates) {
+    if (candidate.middle_sequential) {
+      ++result.middle_sequential_candidate_count;
+      for (size_t i = candidate.begin; i < candidate.end; ++i) {
+        if (candidate.owner_is_srtt) {
+          result.srtt_middle_sequential_mask[i] = true;
+        } else {
+          result.drate_middle_sequential_mask[i] = true;
+        }
+      }
+      if (candidate.owner_is_srtt) {
+        result.srtt_middle_sequential_plateau = true;
+      } else {
+        result.drate_middle_sequential_plateau = true;
+      }
+    }
+    if (!candidate.owner_is_srtt && candidate.middle_level) {
+      result.drate_middle_any_plateau = true;
+    }
+    if (candidate.genuine_shoulder_clip) {
+      if (candidate.owner_is_srtt) {
+        result.positive_half_clipped |= candidate.is_positive;
+        result.negative_half_clipped |= !candidate.is_positive;
+        if (candidate.is_positive) {
+          srtt_positive_intervals.push_back(
+              {candidate.begin, candidate.end});
+        }
+      } else {
+        result.drate_positive_half_clipped |= candidate.is_positive;
+        result.drate_negative_half_clipped |= !candidate.is_positive;
+        if (candidate.is_positive) {
+          drate_positive_intervals.push_back(
+              {candidate.begin, candidate.end});
+        }
+      }
+    }
+    if (candidate.owner_is_srtt &&
+        (!selected_found ||
+         (candidate.genuine_shoulder_clip &&
+          !selected.genuine_shoulder_clip) ||
+         (candidate.genuine_shoulder_clip ==
+              selected.genuine_shoulder_clip &&
+          candidate.end - candidate.begin >
+              selected.end - selected.begin))) {
+      selected = candidate;
+      selected_found = true;
+    }
+  }
+  for (const auto& srtt_interval : srtt_positive_intervals) {
+    for (const auto& drate_interval : drate_positive_intervals) {
+      const size_t overlap_begin =
+          std::max(srtt_interval.first, drate_interval.first);
+      const size_t overlap_end =
+          std::min(srtt_interval.second, drate_interval.second);
+      const size_t shorter = std::min(
+          srtt_interval.second - srtt_interval.first,
+          drate_interval.second - drate_interval.first);
+      if (overlap_end > overlap_begin && shorter > 0 &&
+          static_cast<double>(overlap_end - overlap_begin) /
+                  static_cast<double>(shorter) >=
+              0.50) {
+        result.positive_half_clips_simultaneous = true;
+      }
+    }
+  }
+
+  result.top_clip = result.positive_half_clipped;
+  result.bottom_clip = result.negative_half_clipped;
+  result.ambiguous = result.positive_half_clipped &&
+                     result.negative_half_clipped;
+  result.drate_clip_ambiguous = result.drate_positive_half_clipped &&
+                                result.drate_negative_half_clipped;
+  result.valid = !candidates.empty();
+  if (!selected_found) {
+    result.invalid_reason = result.valid ? "no_srtt_plateau"
+                                         : "no_valid_plateau";
+    return result;
+  }
+  result.plateau_start = selected.begin * sample_step_s;
+  result.plateau_end = selected.end * sample_step_s;
+  result.plateau_duration_ratio =
+      (selected.end - selected.begin) * sample_step_s / period_s;
+  result.plateau_mean = selected.mean;
+  result.plateau_level_span_ratio = selected.span_ratio;
+  result.plateau_extreme_distance_ratio =
+      selected.extreme_distance_ratio;
+  result.plateau_abs_slope = selected.abs_slope;
+  result.shoulder_slope_before = selected.before;
+  result.shoulder_slope_after = selected.after;
+  result.other_shoulder_slope_before = selected.other_before;
+  result.other_shoulder_slope_after = selected.other_after;
+  result.shoulders_opposite = selected.genuine_shoulder_clip;
+  result.shoulder_change_before =
+      std::abs(selected.before) * shoulder_duration_s;
+  result.shoulder_change_after =
+      std::abs(selected.after) * shoulder_duration_s;
+  result.minimum_shoulder_change = selected.minimum_shoulder_change;
+  result.phase_at_plateau_start = sender_residual[selected.begin];
+  result.phase_at_plateau_end = sender_residual[
+      std::min(selected.end - 1, sender_residual.size() - 1)];
+  result.half_overlap_ratio = selected.overlap_ratio;
+  result.invalid_reason = result.ambiguous ? "both_clip_directions" : "none";
+  return result;
+}
+
+bool FBBRSender::LocateBoundaryLiftPoint(
+    const PlateauDetectionResult& plateau,
+    const std::vector<double>& srtt_slopes,
+    const std::vector<bool>& valid,
+    QuicTime receiver_window_start,
+    double sample_step_s,
+    double best_lag_s,
+    double* lift_time_s,
+    double* sender_phase,
+    double* boundary_rate_bps,
+    double* boundary_delta_bps) const {
+  if (!plateau.valid || !plateau.bottom_clip || plateau.top_clip ||
+      srtt_slopes.size() != valid.size() || sample_step_s <= 0.0 ||
+      current_probe_bw_phase_gain_ <= 0.0) {
+    return false;
+  }
+  const size_t search_begin = std::min(
+      srtt_slopes.size() - 1,
+      static_cast<size_t>(std::floor(plateau.plateau_end / sample_step_s)));
+  std::vector<double> valid_slopes;
+  for (size_t i = 0; i < srtt_slopes.size(); ++i) {
+    if (valid[i] && std::isfinite(srtt_slopes[i])) {
+      valid_slopes.push_back(srtt_slopes[i]);
+    }
+  }
+  if (valid_slopes.size() < 4) {
+    return false;
+  }
+  const double slope_median = Median(valid_slopes);
+  std::vector<double> deviations;
+  for (double slope : valid_slopes) {
+    deviations.push_back(std::abs(slope - slope_median));
+  }
+  const double positive_threshold =
+      std::max(1e-9, 2.0 * 1.4826 * Median(deviations));
+  const size_t persistent_samples = std::max<size_t>(
+      3, static_cast<size_t>(std::ceil(0.03 /
+          std::max(cruise_modulation_freq_hz_, 1e-9) / sample_step_s)));
+  size_t lift_index = srtt_slopes.size();
+  for (size_t i = search_begin;
+       i + persistent_samples <= srtt_slopes.size(); ++i) {
+    bool persistent = true;
+    for (size_t j = i; j < i + persistent_samples; ++j) {
+      if (!valid[j] || srtt_slopes[j] <= positive_threshold) {
+        persistent = false;
+        break;
+      }
+    }
+    if (persistent) {
+      lift_index = i;
+      break;
+    }
+  }
+  if (lift_index >= srtt_slopes.size()) {
+    return false;
+  }
+  const double receiver_lift_offset_s = lift_index * sample_step_s;
+  const QuicTime receiver_lift = receiver_window_start +
+      TimeDelta::FromMicroseconds(static_cast<int64_t>(std::llround(
+          receiver_lift_offset_s * 1000000.0)));
+  const QuicTime sender_lift = receiver_lift -
+      TimeDelta::FromMicroseconds(static_cast<int64_t>(std::llround(
+          best_lag_s * 1000000.0)));
+  const double period_s = 1.0 / cruise_modulation_freq_hz_;
+  const double radius_s = std::max(0.002, 0.02 * period_s);
+  const TimeDelta radius = TimeDelta::FromMicroseconds(
+      static_cast<int64_t>(std::llround(radius_s * 1000000.0)));
+  const auto samples = SelectRateSamples(sender_rate_history_,
+                                         sender_lift - radius,
+                                         sender_lift + radius);
+  std::vector<double> rates;
+  for (const auto& sample : samples) {
+    if (sample.valid && !sample.rate.IsZero()) {
+      rates.push_back(
+          static_cast<double>(sample.rate.ToBitsPerSecond()));
+    }
+  }
+  if (rates.size() < 3) {
+    return false;
+  }
+  const double rate_bps = Median(rates);
+  const double baseline_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_bw =
+      static_cast<double>(current_probe_amplitude_bps_) /
+      current_probe_bw_phase_gain_;
+  const double delta = ClampValue(
+      rate_bps / current_probe_bw_phase_gain_ - baseline_bps,
+      0.0, amplitude_bw);
+  if (!std::isfinite(delta) || delta <= 1.0) {
+    return false;
+  }
+  *lift_time_s =
+      static_cast<double>((receiver_lift - QuicTime::Zero())
+                              .ToMicroseconds()) /
+      1000000.0;
+  *sender_phase = TriangleWave(sender_lift);
+  *boundary_rate_bps = rate_bps;
+  *boundary_delta_bps = delta;
+  return true;
+}
+
+void FBBRSender::ResetWaveformCruiseState(QuicTime now) {
+  waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+  probe_epoch_start_time_ = QuicTime::Zero();
+  probe_epoch_rtt_ = TimeDelta::Zero();
+  waveform_settle_start_ = QuicTime::Zero();
+  waveform_settle_end_ = QuicTime::Zero();
+  waveform_window_start_ = QuicTime::Zero();
+  waveform_window_end_ = QuicTime::Zero();
+  waveform_window_periods_ = 0.0;
+  waveform_window_extended_ = false;
+  underload_located_ = false;
+  trusted_baseline_locked_ = false;
+  has_last_similar_drate_amplitude_ = false;
+  last_similar_drate_amplitude_bps_ = 0.0;
+  waveform_delta_reference_valid_ = false;
+  waveform_delta_reference_bps_ = 0.0;
+  consecutive_overload_count_ = 0;
+  waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+  waveform_last_raw_delta_bw_bps_ = 0.0;
+  waveform_last_applied_delta_bw_bps_ = 0.0;
+  baseline_adjustment_count_ = 0;
+  inconclusive_extension_count_ = 0;
+  waveform_inconclusive_amplification_count_ = 0;
+  floor_clip_confirmation_count_ = 0;
+  waveform_last_clip_direction_ = 0;
+  waveform_decision_count_ = 0;
+  waveform_amplitude_reduction_count_ = 0;
+  trusted_bw_candidate_update_count_ = 0;
+  trusted_bw_candidate_ = QuicBandwidth::Zero();
+  trusted_bw_candidate_source_ = kTrustedBwSourceNone;
+  waveform_last_action_ = "none";
+  waveform_last_invalid_reason_ = "none";
+  if (cruise_detector_mode_ != FBBRCruiseDetectorMode::kTimeWaveform) {
     return;
   }
-  if (!fbbr_frequency_search_config_.legacy_spectral_path_enabled) {
+  const double native_max_bw_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  if (current_injection_baseline_bw_.IsZero() ||
+      !std::isfinite(native_max_bw_bps) || native_max_bw_bps <= 0.0) {
+    waveform_last_invalid_reason_ = "invalid_native_max_bw";
+    waveform_last_action_ = "NATIVE_BBR_FALLBACK";
+    return;
+  }
+  if (cruise_modulation_freq_hz_ <= 0.0 ||
+      !std::isfinite(cruise_modulation_freq_hz_)) {
+    waveform_last_invalid_reason_ = "invalid_modulation_frequency";
+    return;
+  }
+  ScheduleWaveformCollectionAfterSettle(now, true);
+}
+
+void FBBRSender::ScheduleWaveformCollectionAfterSettle(
+    QuicTime now,
+    bool initial_settle) {
+  const TimeDelta srtt = CurrentSmoothedRtt();
+  if (srtt.IsZero()) {
+    waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+    waveform_last_invalid_reason_ = "invalid_probe_epoch_rtt";
+    waveform_last_action_ = "NATIVE_BBR_FALLBACK";
+    return;
+  }
+  probe_epoch_start_time_ = now;
+  probe_epoch_rtt_ = srtt;
+  waveform_settle_start_ = now;
+  waveform_settle_end_ = now + probe_epoch_rtt_;
+  waveform_window_start_ = waveform_settle_end_;
+  waveform_window_periods_ =
+      !initial_settle && baseline_adjustment_count_ > 0
+          ? kWaveformPostAdjustmentCollectionPeriods
+          : waveform_initial_window_periods_;
+  const double response_duration_s = waveform_window_periods_ /
+                                     cruise_modulation_freq_hz_;
+  waveform_window_end_ = waveform_window_start_ +
+      TimeDelta::FromMicroseconds(static_cast<int64_t>(std::llround(
+          response_duration_s * 1000000.0)));
+  waveform_window_extended_ = false;
+  current_probe_bw_phase_gain_ = 1.0;
+  inconclusive_extension_count_ = 0;
+  waveform_cruise_state_ =
+      initial_settle ? WaveformCruiseState::kWaitInitialSettle
+                     : WaveformCruiseState::kWaitPostAdjustmentSettle;
+}
+
+void FBBRSender::StartWaveformCollectionAt(
+    QuicTime cycle_start,
+    double window_periods,
+    bool extended_window) {
+  if (cruise_modulation_freq_hz_ <= 0.0) {
+    waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+    waveform_last_invalid_reason_ = "invalid_modulation_frequency";
+    return;
+  }
+  window_periods = ClampValue(window_periods,
+                              waveform_initial_window_periods_,
+                              waveform_max_window_periods_);
+  const double duration_s = window_periods /
+                            cruise_modulation_freq_hz_;
+  waveform_window_start_ = cycle_start;
+  waveform_window_end_ = cycle_start +
+      TimeDelta::FromMicroseconds(static_cast<int64_t>(std::llround(
+          duration_s * 1000000.0)));
+  waveform_window_periods_ = window_periods;
+  waveform_window_extended_ = extended_window;
+  waveform_cruise_state_ = extended_window
+                               ? WaveformCruiseState::kExtendCycle
+                               : WaveformCruiseState::kCollectCycle;
+}
+
+FBBRSender::WaveformWindowAnalysis
+FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
+                                      QuicTime window_end,
+                                      double window_periods,
+                                      bool extended_window) const {
+  WaveformWindowAnalysis result;
+  result.probe_epoch_start = probe_epoch_start_time_;
+  result.probe_epoch_rtt = probe_epoch_rtt_;
+  result.collection_window_start = window_start;
+  result.collection_window_end = window_end;
+  result.collection_window_periods = window_periods;
+  result.window_start = window_start;
+  result.window_end = window_end;
+  result.window_periods = window_periods;
+  result.extended_window = extended_window;
+  const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
+  auto apply_r6_fallback = [&]() {
+    WaveformDecisionInputs decision;
+    decision.adaptive_guard_enabled = use_adaptive_load_judgment;
+    decision.srtt_window_stats_valid = result.srtt_stats_valid;
+    decision.srtt_mean_ms = result.srtt_mean_ms;
+    decision.srtt_min_ms = result.srtt_min_ms;
+    decision.srtt_max_ms = result.srtt_max_ms;
+    decision.latest_waveform_overload_srtt_mean_valid =
+        result.latest_waveform_overload_srtt_mean_valid;
+    decision.latest_waveform_overload_srtt_mean_ms =
+        result.latest_waveform_overload_srtt_mean_ms;
+    decision.latest_waveform_underload_srtt_mean_valid =
+        result.latest_waveform_underload_srtt_mean_valid;
+    decision.latest_waveform_underload_srtt_mean_ms =
+        result.latest_waveform_underload_srtt_mean_ms;
+    result.classification = ClassifyWaveformState(
+        decision, &result.decision_rule);
+  };
+  if (window_end <= window_start || cruise_modulation_freq_hz_ <= 0.0 ||
+      current_injection_baseline_bw_.IsZero() ||
+      probe_epoch_start_time_ == QuicTime::Zero() ||
+      probe_epoch_rtt_.IsZero()) {
+    result.invalid_reason = "invalid_waveform_window";
+    apply_r6_fallback();
+    return result;
+  }
+  const double period_s = 1.0 / cruise_modulation_freq_hz_;
+  const double max_gap_s =
+      waveform_max_interpolation_gap_period_ratio_ * period_s;
+  const double srtt_s = static_cast<double>(
+      probe_epoch_rtt_.ToMicroseconds()) / 1000000.0;
+  const double lag_radius_s = std::min(0.5 * srtt_s, 0.25 * period_s);
+  const double lag_min_s = std::max(0.0, srtt_s - lag_radius_s);
+  const double lag_max_s = srtt_s + lag_radius_s;
+  const TimeDelta lag_max = TimeDelta::FromMicroseconds(
+      static_cast<int64_t>(std::llround(lag_max_s * 1000000.0)));
+
+  const auto sender_samples = SelectRateSamples(
+      sender_rate_history_, window_start - lag_max, window_end);
+  const auto drate_samples = SelectRateSamples(
+      delivery_rate_history_, window_start, window_end);
+  const auto srtt_samples = SelectRttSamples(
+      srtt_history_, window_start, window_end);
+  const DeliveryRateWindowStats delivery_stats =
+      ComputeDeliveryRateWindowStats(drate_samples);
+  const SrttWindowStats srtt_stats = ComputeSrttWindowStats(srtt_samples);
+  result.sender_sample_count = sender_samples.size();
+  result.drate_sample_count = drate_samples.size();
+  result.srtt_sample_count = srtt_samples.size();
+  result.srtt_stat_sample_count = srtt_stats.sample_count;
+  result.srtt_stats_valid = srtt_stats.valid;
+  result.srtt_mean_ms = srtt_stats.mean_ms;
+  result.srtt_min_ms = srtt_stats.min_ms;
+  result.srtt_max_ms = srtt_stats.max_ms;
+  result.latest_waveform_overload_srtt_mean_valid =
+      latest_waveform_overload_srtt_mean_valid_;
+  result.latest_waveform_overload_srtt_mean_ms =
+      latest_waveform_overload_srtt_mean_ms_;
+  result.latest_waveform_underload_srtt_mean_valid =
+      latest_waveform_underload_srtt_mean_valid_;
+  result.latest_waveform_underload_srtt_mean_ms =
+      latest_waveform_underload_srtt_mean_ms_;
+  result.delivery_rate_stat_sample_count = delivery_stats.sample_count;
+  result.delivery_rate_stats_valid = delivery_stats.valid;
+  result.delivery_rate_min_bps = delivery_stats.min_bps;
+  result.delivery_rate_max_bps = delivery_stats.max_bps;
+  result.delivery_rate_mean_bps = delivery_stats.mean_bps;
+  result.latest_trusted_bw_bps = static_cast<double>(
+      fbbr_latest_trusted_bw_.ToBitsPerSecond());
+  result.smoothed_trusted_bw_bps = static_cast<double>(
+      fbbr_smoothed_trusted_bw_.ToBitsPerSecond());
+  size_t app_limited_samples = 0;
+  uint64_t acked_bytes = 0;
+  for (const auto& sample : drate_samples) {
+    if (sample.is_app_limited) {
+      ++app_limited_samples;
+    }
+    acked_bytes += sample.acked_bytes;
+  }
+  result.app_limited_ratio = drate_samples.empty()
+      ? 1.0
+      : static_cast<double>(app_limited_samples) /
+            static_cast<double>(drate_samples.size());
+
+  ResampledWaveformSeries drate = ResampleRateWaveform(
+      drate_samples, window_start, window_end, kSampleStepSec, max_gap_s);
+  ResampledWaveformSeries srtt = ResampleRttWaveform(
+      srtt_samples, window_start, window_end, kSampleStepSec, max_gap_s);
+  if (drate.values.empty() || srtt.values.empty() ||
+      drate.values.size() != srtt.values.size()) {
+    result.invalid_reason = "receiver_resampling_failed";
+    apply_r6_fallback();
+    return result;
+  }
+  auto winsorize = [](std::vector<double>* values,
+                      const std::vector<bool>& valid_values) {
+    std::vector<double> finite;
+    for (size_t i = 0; i < values->size(); ++i) {
+      if (valid_values[i] && std::isfinite((*values)[i])) {
+        finite.push_back((*values)[i]);
+      }
+    }
+    if (finite.size() < 4) {
+      return;
+    }
+    std::sort(finite.begin(), finite.end());
+    const size_t low_index = static_cast<size_t>(
+        std::floor(0.01 * (finite.size() - 1)));
+    const size_t high_index = static_cast<size_t>(
+        std::ceil(0.99 * (finite.size() - 1)));
+    for (size_t i = 0; i < values->size(); ++i) {
+      if (valid_values[i] && std::isfinite((*values)[i])) {
+        (*values)[i] = ClampValue((*values)[i],
+                                  finite[low_index],
+                                  finite[high_index]);
+      }
+    }
+  };
+  winsorize(&drate.values, drate.valid);
+  winsorize(&srtt.values, srtt.valid);
+  result.drate_input_valid =
+      result.drate_sample_count >= 4 && acked_bytes > 0 &&
+      drate.coverage_ratio >= waveform_min_cycle_coverage_ratio_ &&
+      result.app_limited_ratio <= waveform_max_app_limited_sample_ratio_;
+  result.srtt_input_valid =
+      result.srtt_sample_count >= 4 &&
+      srtt.coverage_ratio >= waveform_min_cycle_coverage_ratio_;
+  std::vector<bool> receiver_valid(drate.values.size(), false);
+  for (size_t i = 0; i < receiver_valid.size(); ++i) {
+    receiver_valid[i] = drate.valid[i] && srtt.valid[i];
+  }
+  const std::vector<double> drate_raw_detrended =
+      DetrendLinear(drate.values, drate.valid);
+  std::vector<double> drate_detrended =
+      MedianFilter3(drate_raw_detrended, drate.valid);
+  std::vector<double> srtt_detrended =
+      DetrendLinear(srtt.values, srtt.valid);
+  const std::vector<double> srtt_smoothed =
+      MedianFilter3(srtt_detrended, srtt.valid);
+  std::vector<double> srtt_noise_residuals;
+  for (size_t i = 0; i < srtt_detrended.size(); ++i) {
+    if (srtt.valid[i] && std::isfinite(srtt_detrended[i]) &&
+        std::isfinite(srtt_smoothed[i])) {
+      srtt_noise_residuals.push_back(
+          srtt_detrended[i] - srtt_smoothed[i]);
+    }
+  }
+  const double srtt_noise_center = Median(srtt_noise_residuals);
+  std::vector<double> srtt_noise_deviations;
+  srtt_noise_deviations.reserve(srtt_noise_residuals.size());
+  for (double residual : srtt_noise_residuals) {
+    srtt_noise_deviations.push_back(
+        std::abs(residual - srtt_noise_center));
+  }
+  const double shape_independent_srtt_noise_sigma =
+      1.4826 * Median(srtt_noise_deviations);
+  std::vector<double> drate_noise_residuals;
+  for (size_t i = 0; i < drate_raw_detrended.size(); ++i) {
+    if (drate.valid[i] && std::isfinite(drate_raw_detrended[i]) &&
+        std::isfinite(drate_detrended[i])) {
+      drate_noise_residuals.push_back(
+          drate_raw_detrended[i] - drate_detrended[i]);
+    }
+  }
+  const double drate_noise_center = Median(drate_noise_residuals);
+  std::vector<double> drate_noise_deviations;
+  for (double residual : drate_noise_residuals) {
+    drate_noise_deviations.push_back(
+        std::abs(residual - drate_noise_center));
+  }
+  const double shape_independent_drate_noise_sigma =
+      1.4826 * Median(drate_noise_deviations);
+  const std::vector<double> drate_normalized =
+      RobustNormalize(drate_detrended, drate.valid);
+  const std::vector<double> srtt_normalized =
+      RobustNormalize(srtt_detrended, srtt.valid);
+  const double slope_window_s = std::max(
+      waveform_min_local_slope_window_ms_ / 1000.0,
+      waveform_local_slope_window_period_ratio_ * period_s);
+  std::vector<double> srtt_slopes = ComputeLocalLinearSlopes(
+      srtt_detrended, srtt.valid, kSampleStepSec, slope_window_s);
+  std::vector<double> drate_slopes = ComputeLocalLinearSlopes(
+      drate_detrended, drate.valid, kSampleStepSec, slope_window_s);
+  const std::vector<double> srtt_slopes_normalized =
+      RobustNormalize(srtt_slopes, srtt.valid);
+
+  double best_score = -std::numeric_limits<double>::infinity();
+  bool lag_identified = false;
+  ResampledWaveformSeries best_sender;
+  std::vector<double> best_sender_residual;
+  std::vector<double> best_sender_unit;
+  std::vector<double> best_sender_normalized;
+  std::vector<double> best_integral;
+  std::vector<double> best_integral_normalized;
+  std::vector<bool> best_valid;
+  const double base_pacing_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double configured_amplitude_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  if (!std::isfinite(base_pacing_bps) || base_pacing_bps <= 0.0 ||
+      !std::isfinite(configured_amplitude_bps) ||
+      configured_amplitude_bps <= 0.0) {
+    result.invalid_reason = "invalid_baseline_or_amplitude";
+    apply_r6_fallback();
+    return result;
+  }
+  const int lag_steps = std::max(
+      1, static_cast<int>(std::ceil(
+             (lag_max_s - lag_min_s) / kSampleStepSec)) + 1);
+  for (int lag_index = 0; lag_index < lag_steps; ++lag_index) {
+    const double lag_s = std::min(
+        lag_max_s, lag_min_s + lag_index * kSampleStepSec);
+    const TimeDelta lag = TimeDelta::FromMicroseconds(
+        static_cast<int64_t>(std::llround(lag_s * 1000000.0)));
+    ResampledWaveformSeries sender = ResampleRateWaveform(
+        sender_samples, window_start - lag, window_end - lag,
+        kSampleStepSec, max_gap_s);
+    if (sender.values.size() != drate.values.size()) {
+      continue;
+    }
+    std::vector<double> residual(sender.values.size(), 0.0);
+    std::vector<double> sender_unit(sender.values.size(), 0.0);
+    std::vector<bool> joint_valid(sender.values.size(), false);
+    for (size_t i = 0; i < sender.values.size(); ++i) {
+      residual[i] = sender.values[i] - base_pacing_bps;
+      sender_unit[i] = residual[i] / configured_amplitude_bps;
+      joint_valid[i] = sender.valid[i] && receiver_valid[i];
+    }
+    const size_t joint_count = static_cast<size_t>(
+        std::count(joint_valid.begin(), joint_valid.end(), true));
+    if (joint_count < 4) {
+      continue;
+    }
+    const std::vector<double> sender_normalized = RobustNormalize(
+        DetrendLinear(sender_unit, joint_valid), joint_valid);
+    std::vector<double> integral = BuildQueueIntegralTemplate(
+        sender_unit, joint_valid, kSampleStepSec, period_s);
+    const std::vector<double> integral_normalized = RobustNormalize(
+        DetrendLinear(integral, joint_valid), joint_valid);
+    const double drate_ncc = ComputeNormalizedCrossCorrelation(
+        sender_normalized, drate_normalized, joint_valid);
+    const double srtt_direct_ncc = ComputeNormalizedCrossCorrelation(
+        sender_normalized, srtt_normalized, joint_valid);
+    const double integral_ncc = ComputeNormalizedCrossCorrelation(
+        integral_normalized, srtt_normalized, joint_valid);
+    const double derivative_ncc = ComputeNormalizedCrossCorrelation(
+        sender_normalized, srtt_slopes_normalized, joint_valid);
+    // Align sender phase from Delivery Rate only. SRTT shape may be sinusoidal,
+    // triangular, or otherwise distorted, so its template correlations are
+    // diagnostics and must not influence clipping phase or classification.
+    const double score = drate_ncc;
+    if (!lag_identified || score > best_score) {
+      lag_identified = true;
+      best_score = score;
+      result.best_lag_s = lag_s;
+      result.drate_ncc = drate_ncc;
+      result.srtt_direct_ncc = srtt_direct_ncc;
+      result.srtt_integral_ncc = integral_ncc;
+      result.srtt_derivative_ncc = derivative_ncc;
+      best_sender = sender;
+      best_sender_residual.swap(residual);
+      best_sender_unit.swap(sender_unit);
+      best_sender_normalized.assign(sender_normalized.begin(),
+                                    sender_normalized.end());
+      best_integral.swap(integral);
+      best_integral_normalized.assign(integral_normalized.begin(),
+                                      integral_normalized.end());
+      best_valid.swap(joint_valid);
+    }
+  }
+  if (!lag_identified || best_sender.values.empty()) {
+    result.invalid_reason = "lag_not_identifiable";
+    apply_r6_fallback();
+    return result;
+  }
+  const size_t joint_valid_count = static_cast<size_t>(
+      std::count(best_valid.begin(), best_valid.end(), true));
+  result.coverage_ratio = static_cast<double>(joint_valid_count) /
+                          static_cast<double>(best_valid.size());
+  result.drate_slope_direction_agreement = ComputeSlopeDirectionAgreement(
+      best_sender_normalized, drate_normalized, best_valid);
+  result.srtt_slope_direction_agreement = std::max(
+      ComputeSlopeDirectionAgreement(best_sender_normalized,
+                                     srtt_normalized, best_valid),
+      std::max(ComputeSlopeDirectionAgreement(best_integral_normalized,
+                                              srtt_normalized, best_valid),
+               ComputeSlopeDirectionAgreement(best_sender_normalized,
+                                              srtt_slopes_normalized,
+                                              best_valid)));
+
+  std::vector<bool> sender_srtt_valid(best_valid.size(), false);
+  for (size_t i = 0; i < sender_srtt_valid.size(); ++i) {
+    sender_srtt_valid[i] = best_sender.valid[i] && srtt.valid[i];
+  }
+  const CycleCompletenessResult sender_completeness =
+      AnalyzeCycleCompleteness(best_sender_residual, sender_srtt_valid,
+                               kSampleStepSec, period_s);
+  double sender_residual_min = std::numeric_limits<double>::infinity();
+  double sender_residual_max = -std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < best_sender_residual.size(); ++i) {
+    if (sender_srtt_valid[i]) {
+      sender_residual_min = std::min(sender_residual_min,
+                                     best_sender_residual[i]);
+      sender_residual_max = std::max(sender_residual_max,
+                                     best_sender_residual[i]);
+    }
+  }
+  const double minimum_emitted_half_amplitude = std::max(
+      1.0, 0.05 * static_cast<double>(current_probe_amplitude_bps_));
+  const bool sender_has_both_half_cycles =
+      sender_residual_min <= -minimum_emitted_half_amplitude &&
+      sender_residual_max >= minimum_emitted_half_amplitude;
+  result.sender_waveform_valid =
+      sender_completeness.valid && sender_has_both_half_cycles;
+  result.drate_completeness = AnalyzeCycleCompleteness(
+      drate_detrended, drate.valid, kSampleStepSec, period_s);
+  result.srtt_completeness = AnalyzeCycleCompleteness(
+      srtt_detrended, srtt.valid, kSampleStepSec, period_s);
+  result.drate_fit = EstimateRobustNoise(
+      drate_detrended, best_sender_unit, best_valid);
+  const double best_srtt_shape = std::max(
+      result.srtt_direct_ncc,
+      std::max(result.srtt_integral_ncc, result.srtt_derivative_ncc));
+  if (best_srtt_shape == result.srtt_direct_ncc) {
+    result.srtt_fit = EstimateRobustNoise(
+        srtt_detrended, best_sender_unit, best_valid);
+  } else if (best_srtt_shape == result.srtt_integral_ncc) {
+    result.srtt_fit = EstimateRobustNoise(
+        srtt_detrended, best_integral, best_valid);
+  } else {
+    result.srtt_fit = EstimateRobustNoise(
+        srtt_slopes, best_sender_unit, best_valid);
+  }
+  result.current_drate_response_amplitude_bps =
+      result.drate_fit.valid ? result.drate_fit.fitted_response_amplitude : 0.0;
+  result.drate_similar =
+      result.drate_input_valid &&
+      result.drate_completeness.valid;
+  result.srtt_similar_frequency =
+      result.srtt_input_valid &&
+      result.srtt_completeness.valid;
+  result.srtt_cycle_complete = result.srtt_completeness.valid;
+  result.plateau = DetectDualSignalPlateaus(
+      srtt.values, srtt_slopes, drate.values, drate_slopes,
+      best_sender_residual, best_valid, kSampleStepSec, period_s,
+      shape_independent_srtt_noise_sigma,
+      shape_independent_drate_noise_sigma);
+  if (result.plateau.srtt_middle_sequential_mask.size() ==
+          best_valid.size() &&
+      result.plateau.drate_middle_sequential_mask.size() ==
+          best_valid.size() &&
+      result.plateau.middle_sequential_candidate_count > 0) {
+    std::vector<bool> srtt_without_middle(srtt.valid.size(), false);
+    std::vector<bool> drate_without_middle(drate.valid.size(), false);
+    for (size_t i = 0; i < best_valid.size(); ++i) {
+      srtt_without_middle[i] =
+          srtt.valid[i] &&
+          !result.plateau.srtt_middle_sequential_mask[i];
+      drate_without_middle[i] =
+          drate.valid[i] &&
+          !result.plateau.drate_middle_sequential_mask[i];
+    }
+    if (result.plateau.srtt_middle_sequential_plateau) {
+      result.srtt_without_middle_completeness = AnalyzeCycleCompleteness(
+          srtt_detrended, srtt_without_middle, kSampleStepSec, period_s,
+          waveform_masked_min_cycle_coverage_ratio_);
+      result.srtt_similar_without_middle =
+          result.srtt_input_valid &&
+          result.srtt_without_middle_completeness.valid;
+    }
+    if (result.plateau.drate_middle_sequential_plateau) {
+      result.drate_without_middle_completeness = AnalyzeCycleCompleteness(
+          drate_detrended, drate_without_middle, kSampleStepSec, period_s,
+          waveform_masked_min_cycle_coverage_ratio_);
+      result.drate_similar_without_middle =
+          result.drate_input_valid &&
+          result.drate_without_middle_completeness.valid;
+    }
+  }
+  std::vector<bool> srtt_half_valid(srtt.valid.size(), false);
+  std::vector<bool> drate_half_valid(drate.valid.size(), false);
+  const bool srtt_mask_valid =
+      result.plateau.srtt_middle_sequential_mask.size() == srtt.valid.size();
+  const bool drate_mask_valid =
+      result.plateau.drate_middle_sequential_mask.size() == drate.valid.size();
+  for (size_t i = 0; i < best_sender.valid.size(); ++i) {
+    srtt_half_valid[i] = best_sender.valid[i] && srtt.valid[i] &&
+        (!srtt_mask_valid ||
+         !result.plateau.srtt_middle_sequential_mask[i]);
+    drate_half_valid[i] = best_sender.valid[i] && drate.valid[i] &&
+        (!drate_mask_valid ||
+         !result.plateau.drate_middle_sequential_mask[i]);
+  }
+  result.plateau.srtt_only_negative_half = HasOnlyNegativeHalfWaveform(
+      srtt_detrended, best_sender_residual, srtt_half_valid,
+      shape_independent_srtt_noise_sigma,
+      &result.plateau.srtt_positive_half_span_ms,
+      &result.plateau.srtt_negative_half_span_ms);
+  result.plateau.srtt_only_positive_half = HasOnlyPositiveHalfWaveform(
+      srtt_detrended, best_sender_residual, srtt_half_valid,
+      shape_independent_srtt_noise_sigma, nullptr, nullptr);
+  result.plateau.drate_only_negative_half = HasOnlyNegativeHalfWaveform(
+      drate_detrended, best_sender_residual, drate_half_valid,
+      shape_independent_drate_noise_sigma,
+      &result.plateau.drate_positive_half_span_bps,
+      &result.plateau.drate_negative_half_span_bps);
+  result.srtt_positive_half_clipped =
+      result.plateau.positive_half_clipped;
+  result.srtt_negative_half_clipped =
+      result.plateau.negative_half_clipped;
+  result.srtt_only_negative_half =
+      result.plateau.srtt_only_negative_half;
+  result.srtt_only_positive_half =
+      result.plateau.srtt_only_positive_half;
+  result.srtt_clip_ambiguous = result.plateau.ambiguous;
+  result.srtt_similar = result.srtt_similar_frequency;
+  result.srtt_effective_similar =
+      result.srtt_similar || result.srtt_similar_without_middle;
+  result.drate_effective_similar =
+      result.drate_similar || result.drate_similar_without_middle;
+  result.drate_match = result.drate_effective_similar;
+  result.srtt_match = result.srtt_similar;
+
+  std::vector<double> actual_sender_rates;
+  size_t floor_clipped = 0;
+  for (size_t i = 0; i < best_sender.values.size(); ++i) {
+    if (!best_sender.valid[i]) {
+      continue;
+    }
+    actual_sender_rates.push_back(best_sender.values[i]);
+    if (best_sender.values[i] <=
+        static_cast<double>(minimum_pacing_rate_bps_) + 0.5) {
+      ++floor_clipped;
+    }
+  }
+  std::sort(actual_sender_rates.begin(), actual_sender_rates.end());
+  const size_t p5_index = actual_sender_rates.empty()
+      ? 0
+      : static_cast<size_t>(std::floor(
+            0.05 * (actual_sender_rates.size() - 1)));
+  const size_t p95_index = actual_sender_rates.empty()
+      ? 0
+      : static_cast<size_t>(std::ceil(
+            0.95 * (actual_sender_rates.size() - 1)));
+  const double sender_center = actual_sender_rates.empty()
+      ? 0.0
+      : 0.5 * (actual_sender_rates[p5_index] +
+               actual_sender_rates[p95_index]);
+  const double observed_sender_amplitude = actual_sender_rates.empty()
+      ? 0.0
+      : 0.5 * (actual_sender_rates[p95_index] -
+               actual_sender_rates[p5_index]);
+  const double allowed_baseline_drift = std::max(
+      0.05 * std::max(base_pacing_bps, 1.0),
+      0.10 * static_cast<double>(current_probe_amplitude_bps_));
+  std::string precheck_failure;
+  if (result.sender_sample_count < 4 || !result.srtt_input_valid) {
+    precheck_failure = AppendReason(precheck_failure,
+                                    "insufficient_samples_or_acked_bytes");
+  }
+  if (!result.sender_waveform_valid) {
+    precheck_failure = AppendReason(precheck_failure,
+                                    "sender_waveform_incomplete");
+    if (!sender_has_both_half_cycles) {
+      precheck_failure = AppendReason(
+          precheck_failure,
+          "sender_missing_positive_or_negative_half_cycle");
+    }
+  }
+  if (!actual_sender_rates.empty() &&
+      static_cast<double>(floor_clipped) / actual_sender_rates.size() > 0.10) {
+    precheck_failure = AppendReason(precheck_failure,
+                                    "pacing_floor_severely_clipped");
+  }
+  if (!actual_sender_rates.empty() &&
+      std::abs(sender_center - base_pacing_bps) > allowed_baseline_drift) {
+    precheck_failure = AppendReason(precheck_failure,
+                                    "window_baseline_drift");
+  }
+  if (!actual_sender_rates.empty() &&
+      std::abs(observed_sender_amplitude - configured_amplitude_bps) >
+          std::max(1000.0, 0.25 * configured_amplitude_bps)) {
+    precheck_failure = AppendReason(precheck_failure,
+                                    "window_amplitude_changed_or_unformed");
+  }
+  result.cycle_detected_but_incomplete =
+      result.srtt_input_valid && !result.srtt_effective_similar &&
+      result.srtt_completeness.periodicity_correlation >=
+          waveform_min_periodicity_correlation_;
+  if (!precheck_failure.empty()) {
+    result.invalid_reason = precheck_failure;
+    apply_r6_fallback();
+    if (result.classification != WaveformClassification::kInconclusive) {
+      result.invalid_reason = "none";
+    }
+    return result;
+  }
+
+  WaveformDecisionInputs decision;
+  decision.prechecks_valid = true;
+  decision.adaptive_guard_enabled = use_adaptive_load_judgment;
+  decision.srtt_input_valid = result.srtt_input_valid;
+  decision.srtt_window_stats_valid = result.srtt_stats_valid;
+  decision.srtt_mean_ms = result.srtt_mean_ms;
+  decision.srtt_min_ms = result.srtt_min_ms;
+  decision.srtt_max_ms = result.srtt_max_ms;
+  decision.latest_waveform_overload_srtt_mean_valid =
+      result.latest_waveform_overload_srtt_mean_valid;
+  decision.latest_waveform_overload_srtt_mean_ms =
+      result.latest_waveform_overload_srtt_mean_ms;
+  decision.latest_waveform_underload_srtt_mean_valid =
+      result.latest_waveform_underload_srtt_mean_valid;
+  decision.latest_waveform_underload_srtt_mean_ms =
+      result.latest_waveform_underload_srtt_mean_ms;
+  decision.drate_input_valid = result.drate_input_valid;
+  decision.srtt_similar = result.srtt_similar;
+  decision.srtt_similar_without_middle =
+      result.srtt_similar_without_middle;
+  decision.drate_similar = result.drate_similar;
+  decision.drate_similar_without_middle =
+      result.drate_similar_without_middle;
+  decision.srtt_positive_half_clipped =
+      result.srtt_positive_half_clipped;
+  decision.srtt_negative_half_clipped =
+      result.srtt_negative_half_clipped;
+  decision.srtt_only_negative_half = result.srtt_only_negative_half;
+  decision.srtt_only_positive_half = result.srtt_only_positive_half;
+  decision.drate_positive_half_clipped =
+      result.plateau.drate_positive_half_clipped;
+  decision.drate_only_negative_half =
+      result.plateau.drate_only_negative_half;
+  decision.positive_half_clips_simultaneous =
+      result.plateau.positive_half_clips_simultaneous;
+  decision.drate_has_waveform = result.plateau.drate_has_waveform;
+  decision.drate_middle_any_plateau =
+      result.plateau.drate_middle_any_plateau;
+  result.classification = ClassifyWaveformState(
+      decision, &result.decision_rule);
+  if (result.classification == WaveformClassification::kInconclusive) {
+    if (std::string(result.decision_rule) == "R2.4" ||
+        std::string(result.decision_rule) == "R3.3" ||
+        std::string(result.decision_rule) == "R4.3") {
+      result.invalid_reason = std::string("classification_rule_") +
+                              result.decision_rule;
+    } else if (result.cycle_detected_but_incomplete) {
+      result.invalid_reason = "srtt_period_outside_tolerance";
+    } else if (!result.srtt_effective_similar) {
+      result.invalid_reason = "srtt_period_not_identified";
+    } else {
+      result.invalid_reason = "invalid_or_insufficient_data";
+    }
+  } else {
+    result.invalid_reason = "none";
+  }
+  return result;
+}
+
+void FBBRSender::ApplyWaveformClassification(
+    const WaveformWindowAnalysis& analysis,
+    QuicTime now) {
+  WaveformWindowAnalysis trace_analysis = analysis;
+  const double baseline_before_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_before_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  std::string action = "RETRY_WITHOUT_BASELINE_CHANGE";
+  waveform_last_invalid_reason_ = analysis.invalid_reason;
+  ++waveform_decision_count_;
+
+  TimeDelta min_rtt = model_.MinRtt();
+  if (min_rtt.IsZero() && rtt_stats_ != nullptr) {
+    min_rtt = rtt_stats_->MinOrInitialRtt();
+  }
+  TimeDelta queue_rtt = rtt_stats_ == nullptr
+      ? TimeDelta::Zero()
+      : rtt_stats_->latest_rtt();
+  if (queue_rtt.IsZero()) {
+    queue_rtt = CurrentSmoothedRtt();
+  }
+  const bool queue_signal_valid = !min_rtt.IsZero() && !queue_rtt.IsZero();
+  double queue_delay_us = 0.0;
+  double queue_delay_ratio = -1.0;
+  if (queue_signal_valid) {
+    queue_delay_us = static_cast<double>(std::max<int64_t>(
+        0, queue_rtt.ToMicroseconds() - min_rtt.ToMicroseconds()));
+    queue_delay_ratio = queue_delay_us /
+        static_cast<double>(min_rtt.ToMicroseconds());
+  }
+  trace_analysis.queue_delay_ms = queue_delay_us / 1000.0;
+  trace_analysis.queue_delay_min_rtt_ratio = queue_delay_ratio;
+  consecutive_overload_count_ = 0;
+  trace_analysis.overload_confirmation_count = consecutive_overload_count_;
+
+  auto adjustment_limit_reached = [&]() {
+    if (baseline_adjustment_count_ < waveform_max_baseline_adjustments_) {
+      return false;
+    }
+    waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+    waveform_last_invalid_reason_ = "max_baseline_adjustments_reached";
+    waveform_last_action_ = trusted_baseline_locked_
+        ? "STOP_SEARCH_KEEP_LATEST_TRUSTED_BW"
+        : "STOP_SEARCH_WITHOUT_TRUSTED_BW";
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    EmitWaveformSearchTrace(trace_analysis,
+                            waveform_last_action_,
+                            baseline_before_bps,
+                            amplitude_before_bps);
+    return true;
+  };
+
+  if (analysis.classification == WaveformClassification::kInconclusive) {
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = action;
+    EmitWaveformSearchTrace(trace_analysis, action, baseline_before_bps,
+                            amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+
+  if (fbbr_window_baseline_enabled_) {
+    if (!analysis.delivery_rate_stats_valid) {
+      waveform_last_invalid_reason_ = "fbbr_delivery_rate_stats_invalid";
+      waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+      waveform_last_raw_delta_bw_bps_ = 0.0;
+      waveform_last_applied_delta_bw_bps_ = 0.0;
+      waveform_last_action_ = "RETRY_WITHOUT_BASELINE_CHANGE";
+      trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+      EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                              baseline_before_bps, amplitude_before_bps);
+      ScheduleWaveformCollectionAfterSettle(now, false);
+      return;
+    }
+
+    double next_baseline_bps = baseline_before_bps;
+    const char* delta_source = kWaveformDeltaSourceNone;
+    const bool waveform_derived =
+        IsWaveformDecisionRule(analysis.decision_rule);
+    const bool waveform_srtt_mean_valid =
+        waveform_derived && analysis.srtt_stats_valid &&
+        std::isfinite(analysis.srtt_mean_ms) && analysis.srtt_mean_ms > 0.0;
+    switch (analysis.classification) {
+      case WaveformClassification::kFullLoad: {
+        const double latest_trusted_bps = analysis.delivery_rate_mean_bps;
+        fbbr_latest_trusted_bw_ = BandwidthFromBps(latest_trusted_bps);
+        fbbr_smoothed_trusted_bw_ =
+            BandwidthFromBps(latest_trusted_bps);
+        fbbr_smoothed_trusted_bw_valid_ =
+            !fbbr_smoothed_trusted_bw_.IsZero();
+        next_baseline_bps = latest_trusted_bps;
+        current_injection_baseline_bw_ = fbbr_smoothed_trusted_bw_;
+        trusted_baseline_locked_ = fbbr_smoothed_trusted_bw_valid_;
+        trusted_bw_candidate_ = fbbr_smoothed_trusted_bw_;
+        trusted_bw_candidate_source_ =
+            kTrustedBwSourceFbbrWindowMean;
+        ++trusted_bw_candidate_update_count_;
+        trace_analysis.latest_trusted_bw_bps = latest_trusted_bps;
+        trace_analysis.smoothed_trusted_bw_bps = latest_trusted_bps;
+        delta_source = kWaveformDeltaSourceFbbrTrustedBw;
+        action = "FBBR_FULL_LOAD_USE_WINDOW_MEAN";
+        break;
+      }
+      case WaveformClassification::kUnderload:
+        if (adjustment_limit_reached()) {
+          return;
+        }
+        if (waveform_derived) {
+          adaptive_baseline_low_ =
+              BandwidthFromBps(analysis.delivery_rate_mean_bps);
+          adaptive_baseline_low_valid_ = !adaptive_baseline_low_.IsZero();
+          if (waveform_srtt_mean_valid) {
+            latest_waveform_underload_srtt_mean_ms_ =
+                analysis.srtt_mean_ms;
+            latest_waveform_underload_srtt_mean_valid_ = true;
+          }
+        }
+        underload_located_ = true;
+        next_baseline_bps = analysis.delivery_rate_max_bps;
+        current_injection_baseline_bw_ = BandwidthFromBps(next_baseline_bps);
+        ++baseline_adjustment_count_;
+        delta_source = kWaveformDeltaSourceFbbrWindowMaximum;
+        action = "FBBR_UNDERLOAD_USE_WINDOW_MAXIMUM";
+        break;
+      case WaveformClassification::kOverload:
+        if (adjustment_limit_reached()) {
+          return;
+        }
+        if (waveform_derived) {
+          adaptive_baseline_up_ =
+              BandwidthFromBps(analysis.delivery_rate_mean_bps);
+          adaptive_baseline_up_valid_ = !adaptive_baseline_up_.IsZero();
+          if (waveform_srtt_mean_valid) {
+            latest_waveform_overload_srtt_mean_ms_ =
+                analysis.srtt_mean_ms;
+            latest_waveform_overload_srtt_mean_valid_ = true;
+          }
+        }
+        next_baseline_bps = analysis.delivery_rate_min_bps;
+        current_injection_baseline_bw_ = BandwidthFromBps(next_baseline_bps);
+        ++baseline_adjustment_count_;
+        delta_source = kWaveformDeltaSourceFbbrWindowMinimum;
+        action = "FBBR_OVERLOAD_USE_WINDOW_MINIMUM";
+        break;
+      case WaveformClassification::kInconclusive:
+      default:
+        break;
+    }
+
+    const double baseline_change_bps =
+        std::abs(next_baseline_bps - baseline_before_bps);
+    trace_analysis.delta_source = delta_source;
+    trace_analysis.raw_delta_bw_bps = baseline_change_bps;
+    trace_analysis.applied_delta_bw_bps = baseline_change_bps;
+    waveform_last_delta_source_ = delta_source;
+    waveform_last_raw_delta_bw_bps_ = baseline_change_bps;
+    waveform_last_applied_delta_bw_bps_ = baseline_change_bps;
+    waveform_last_action_ = action;
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    EmitWaveformSearchTrace(trace_analysis, action, baseline_before_bps,
+                            amplitude_before_bps);
+    return;
+  }
+
+  if (!adaptive_guard_enabled_) {
+    if (analysis.drate_similar &&
+        std::isfinite(analysis.current_drate_response_amplitude_bps) &&
+        analysis.current_drate_response_amplitude_bps > 0.0) {
+      last_similar_drate_amplitude_bps_ =
+          analysis.current_drate_response_amplitude_bps;
+      has_last_similar_drate_amplitude_ = true;
+    }
+
+    if (analysis.classification == WaveformClassification::kFullLoad) {
+      trusted_baseline_locked_ = true;
+      trusted_bw_candidate_ = current_injection_baseline_bw_;
+      trusted_bw_candidate_source_ = kTrustedBwSourceTimeWaveformBaseline;
+      ++trusted_bw_candidate_update_count_;
+      trace_analysis.delta_source = kWaveformDeltaSourceNone;
+      trace_analysis.raw_delta_bw_bps = 0.0;
+      trace_analysis.applied_delta_bw_bps = 0.0;
+      waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+      waveform_last_raw_delta_bw_bps_ = 0.0;
+      waveform_last_applied_delta_bw_bps_ = 0.0;
+      waveform_last_action_ = "UPDATE_TRUSTED_BW_FROM_FULL_LOAD";
+      ScheduleWaveformCollectionAfterSettle(now, false);
+      EmitWaveformSearchTrace(trace_analysis,
+                              waveform_last_action_,
+                              baseline_before_bps,
+                              amplitude_before_bps);
+      return;
+    }
+
+    const bool recent_amplitude_valid =
+        has_last_similar_drate_amplitude_ &&
+        std::isfinite(last_similar_drate_amplitude_bps_) &&
+        last_similar_drate_amplitude_bps_ > 0.0;
+    const char* delta_source = recent_amplitude_valid
+        ? kWaveformDeltaSourceRecentDrate
+        : kWaveformDeltaSourceBaselineFallback;
+    double raw_delta_bw_bps = recent_amplitude_valid
+        ? waveform_delta_drate_amplitude_ratio_ *
+              last_similar_drate_amplitude_bps_
+        : waveform_delta_fallback_baseline_ratio_ * baseline_before_bps;
+    if (!std::isfinite(raw_delta_bw_bps) || raw_delta_bw_bps < 0.0) {
+      raw_delta_bw_bps = 0.0;
+    }
+    double applied_delta_bw_bps = raw_delta_bw_bps;
+    const bool decreases_baseline =
+        analysis.classification == WaveformClassification::kOverload;
+    if (decreases_baseline) {
+      applied_delta_bw_bps = std::min(
+          raw_delta_bw_bps,
+          std::max(0.0, baseline_before_bps -
+                            static_cast<double>(minimum_pacing_rate_bps_)));
+    }
+    trace_analysis.delta_source = delta_source;
+    trace_analysis.raw_delta_bw_bps = raw_delta_bw_bps;
+    trace_analysis.applied_delta_bw_bps = applied_delta_bw_bps;
+    waveform_last_delta_source_ = delta_source;
+    waveform_last_raw_delta_bw_bps_ = raw_delta_bw_bps;
+    waveform_last_applied_delta_bw_bps_ = applied_delta_bw_bps;
+
+    switch (analysis.classification) {
+      case WaveformClassification::kFullLoad:
+        break;
+      case WaveformClassification::kUnderload:
+        if (adjustment_limit_reached()) {
+          return;
+        }
+        underload_located_ = true;
+        current_injection_baseline_bw_ = BandwidthFromBps(
+            baseline_before_bps + applied_delta_bw_bps);
+        ++baseline_adjustment_count_;
+        action = "MARK_UNDERLOAD_AND_INCREASE_BASELINE";
+        ScheduleWaveformCollectionAfterSettle(now, false);
+        break;
+      case WaveformClassification::kOverload: {
+        if (adjustment_limit_reached()) {
+          return;
+        }
+        const double updated = baseline_before_bps - applied_delta_bw_bps;
+        current_injection_baseline_bw_ = BandwidthFromBps(updated);
+        ++baseline_adjustment_count_;
+        action = "DECREASE_BASELINE";
+        ScheduleWaveformCollectionAfterSettle(now, false);
+        break;
+      }
+      case WaveformClassification::kInconclusive:
+      default:
+        break;
+    }
+    waveform_last_action_ = action;
+    EmitWaveformSearchTrace(trace_analysis,
+                            action,
+                            baseline_before_bps,
+                            amplitude_before_bps);
+    return;
+  }
+
+  if (!analysis.delivery_rate_stats_valid) {
+    waveform_last_invalid_reason_ = "adaptive_delivery_rate_stats_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = "ADAPTIVE_RETRY_WITHOUT_BASELINE_CHANGE";
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+
+  if (analysis.classification == WaveformClassification::kFullLoad) {
+    trusted_bw_candidate_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    trusted_baseline_locked_ = !trusted_bw_candidate_.IsZero();
+    trusted_bw_candidate_source_ = kTrustedBwSourceAdaptiveWindowMean;
+    if (trusted_baseline_locked_) {
+      ++trusted_bw_candidate_update_count_;
+    }
+    trace_analysis.latest_trusted_bw_bps =
+        analysis.delivery_rate_mean_bps;
+    trace_analysis.delta_source = kWaveformDeltaSourceNone;
+    trace_analysis.raw_delta_bw_bps = 0.0;
+    trace_analysis.applied_delta_bw_bps = 0.0;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = "ADAPTIVE_UPDATE_TRUSTED_BW_FROM_WINDOW_MEAN";
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    return;
+  }
+
+  const bool waveform_derived =
+      IsWaveformDecisionRule(analysis.decision_rule);
+  if (waveform_derived &&
+      (!analysis.srtt_stats_valid || !std::isfinite(analysis.srtt_mean_ms) ||
+       analysis.srtt_mean_ms <= 0.0)) {
+    waveform_last_invalid_reason_ = "adaptive_srtt_stats_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    waveform_last_action_ = "ADAPTIVE_RETRY_WITHOUT_BOUND_UPDATE";
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+  if (adjustment_limit_reached()) {
+    return;
+  }
+
+  if (analysis.classification == WaveformClassification::kOverload &&
+      waveform_derived) {
+    adaptive_baseline_up_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    adaptive_baseline_up_valid_ = !adaptive_baseline_up_.IsZero();
+    latest_waveform_overload_srtt_mean_ms_ = analysis.srtt_mean_ms;
+    latest_waveform_overload_srtt_mean_valid_ = true;
+  } else if (analysis.classification == WaveformClassification::kUnderload &&
+             waveform_derived) {
+    adaptive_baseline_low_ =
+        BandwidthFromBps(analysis.delivery_rate_mean_bps);
+    adaptive_baseline_low_valid_ = !adaptive_baseline_low_.IsZero();
+    latest_waveform_underload_srtt_mean_ms_ = analysis.srtt_mean_ms;
+    latest_waveform_underload_srtt_mean_valid_ = true;
+    underload_located_ = true;
+  }
+
+  const double baseline_low_bps = static_cast<double>(
+      adaptive_baseline_low_.ToBitsPerSecond());
+  const double baseline_up_bps = static_cast<double>(
+      adaptive_baseline_up_.ToBitsPerSecond());
+  const bool bracket_valid = adaptive_baseline_low_valid_ &&
+      adaptive_baseline_up_valid_ && baseline_up_bps > baseline_low_bps;
+  const bool overload =
+      analysis.classification == WaveformClassification::kOverload;
+  const double baseline_gap_bps = bracket_valid
+      ? baseline_up_bps - baseline_low_bps
+      : 0.0;
+  const double bracket_target_bps = bracket_valid
+      ? baseline_low_bps + baseline_gap_bps / (overload ? 4.0 : 2.0)
+      : 0.0;
+  const bool use_bracket_target = bracket_valid &&
+      ((overload && baseline_before_bps > bracket_target_bps) ||
+       (!overload && baseline_before_bps < bracket_target_bps));
+  const double next_baseline_bps = ComputeAdaptiveNextBaseline(
+      analysis.classification,
+      adaptive_baseline_low_valid_, baseline_low_bps,
+      adaptive_baseline_up_valid_, baseline_up_bps,
+      baseline_before_bps,
+      analysis.delivery_rate_min_bps,
+      analysis.delivery_rate_max_bps,
+      static_cast<double>(minimum_pacing_rate_bps_));
+  const double baseline_change_bps =
+      std::abs(next_baseline_bps - baseline_before_bps);
+  const char* delta_source = use_bracket_target
+      ? kWaveformDeltaSourceAdaptiveBracketBound
+      : (overload ? kWaveformDeltaSourceAdaptiveWindowMinimum
+                  : kWaveformDeltaSourceAdaptiveWindowMaximum);
+  trace_analysis.delta_source = delta_source;
+  trace_analysis.raw_delta_bw_bps = baseline_change_bps;
+  trace_analysis.applied_delta_bw_bps = baseline_change_bps;
+  trace_analysis.delta_reference_bps = bracket_valid
+      ? bracket_target_bps
+      : 0.0;
+  trace_analysis.window_extreme_gap_bps = bracket_valid
+      ? baseline_gap_bps
+      : std::abs((overload ? analysis.delivery_rate_min_bps
+                           : analysis.delivery_rate_max_bps) -
+                 baseline_before_bps);
+  trace_analysis.actuator_step_multiplier = 1.0;
+  waveform_last_delta_source_ = delta_source;
+  waveform_last_raw_delta_bw_bps_ = baseline_change_bps;
+  waveform_last_applied_delta_bw_bps_ = baseline_change_bps;
+  current_injection_baseline_bw_ = BandwidthFromBps(next_baseline_bps);
+  if (baseline_change_bps > 0.5) {
+    ++baseline_adjustment_count_;
+  }
+  if (overload) {
+    action = use_bracket_target
+        ? "ADAPTIVE_OVERLOAD_USE_LOW_PLUS_QUARTER_GAP"
+        : "ADAPTIVE_OVERLOAD_USE_WINDOW_MINIMUM";
+  } else {
+    action = use_bracket_target
+        ? "ADAPTIVE_UNDERLOAD_USE_LOW_PLUS_HALF_GAP"
+        : "ADAPTIVE_UNDERLOAD_USE_WINDOW_MAXIMUM";
+  }
+  ScheduleWaveformCollectionAfterSettle(now, false);
+  waveform_last_action_ = action;
+  EmitWaveformSearchTrace(trace_analysis,
+                          action,
+                          baseline_before_bps,
+                          amplitude_before_bps);
+}
+
+bool FBBRSender::AmplifyWaveformProbeAfterInconclusive(
+    const WaveformWindowAnalysis& analysis,
+    QuicTime now) {
+  const uint64_t initial_amplitude_bps =
+      waveform_initial_probe_amplitude_bps_ == 0
+          ? GetCurrentAmplitudeBps()
+          : waveform_initial_probe_amplitude_bps_;
+  const uint64_t amplified_amplitude_bps = AmplifiedWaveformProbeAmplitude(
+      current_probe_amplitude_bps_, initial_amplitude_bps,
+      waveform_inconclusive_signal_amplification_factor_,
+      waveform_inconclusive_signal_amplification_max_ratio_);
+  if (amplified_amplitude_bps <= current_probe_amplitude_bps_) {
+    return false;
+  }
+
+  WaveformWindowAnalysis trace_analysis = analysis;
+  const double baseline_before_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_before_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  current_probe_amplitude_bps_ = amplified_amplitude_bps;
+  if (waveform_inconclusive_amplification_count_ <
+      std::numeric_limits<uint32_t>::max()) {
+    ++waveform_inconclusive_amplification_count_;
+  }
+  ++waveform_decision_count_;
+  const std::string action = "AMPLIFY_INCONCLUSIVE_SIGNAL_AND_RETRY";
+  waveform_last_action_ = action;
+  waveform_last_invalid_reason_ = AppendReason(
+      analysis.invalid_reason,
+      "signal_amplified_after_second_inconclusive");
+  trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+  waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+  waveform_last_raw_delta_bw_bps_ = 0.0;
+  waveform_last_applied_delta_bw_bps_ = 0.0;
+  ScheduleWaveformCollectionAfterSettle(now, false);
+  EmitWaveformSearchTrace(trace_analysis,
+                          action,
+                          baseline_before_bps,
+                          amplitude_before_bps);
+  return true;
+}
+
+void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
+  if (cruise_detector_mode_ != FBBRCruiseDetectorMode::kTimeWaveform ||
+      !in_cruise_ || waveform_cruise_state_ ==
+                         WaveformCruiseState::kDisabled) {
+    return;
+  }
+  for (int transition = 0; transition < 4; ++transition) {
+    if (waveform_cruise_state_ ==
+            WaveformCruiseState::kWaitInitialSettle ||
+        waveform_cruise_state_ ==
+            WaveformCruiseState::kWaitPostAdjustmentSettle) {
+      if (now < waveform_settle_end_) {
+        return;
+      }
+      waveform_cruise_state_ = WaveformCruiseState::kCollectCycle;
+      continue;
+    }
+    if (waveform_cruise_state_ == WaveformCruiseState::kCollectCycle ||
+        waveform_cruise_state_ == WaveformCruiseState::kExtendCycle) {
+      if (now < waveform_window_end_) {
+        return;
+      }
+      waveform_cruise_state_ = WaveformCruiseState::kAnalyzeCycle;
+      continue;
+    }
+    if (waveform_cruise_state_ == WaveformCruiseState::kAnalyzeCycle) {
+      WaveformWindowAnalysis analysis;
+      const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
+      if (use_adaptive_load_judgment && waveform_window_extended_ &&
+          waveform_window_periods_ >= 3.0 &&
+          cruise_modulation_freq_hz_ > 0.0) {
+        const TimeDelta period = TimeDelta::FromMicroseconds(
+            static_cast<int64_t>(std::llround(
+                1000000.0 / cruise_modulation_freq_hz_)));
+        const QuicTime later_window_start = waveform_window_start_ + period;
+        const QuicTime prior_window_end = later_window_start + period;
+        const WaveformWindowAnalysis prior = AnalyzeWaveformWindow(
+            waveform_window_start_, prior_window_end, 2.0, false);
+        analysis = AnalyzeWaveformWindow(
+            later_window_start, waveform_window_end_, 2.0, true);
+        analysis.collection_window_start = waveform_window_start_;
+        analysis.collection_window_end = waveform_window_end_;
+        analysis.collection_window_periods = waveform_window_periods_;
+        analysis.extended_window = true;
+        analysis.analysis_uses_later_cycle = true;
+        analysis.prior_cycle_srtt_input_valid = prior.srtt_input_valid;
+        analysis.prior_cycle_srtt_similar = prior.srtt_effective_similar;
+        analysis.prior_cycle_drate_input_valid = prior.drate_input_valid;
+        analysis.prior_cycle_drate_similar = prior.drate_effective_similar;
+        analysis.prior_cycle_classification = prior.classification;
+      } else {
+        analysis = AnalyzeWaveformWindow(
+            waveform_window_start_, waveform_window_end_,
+            waveform_window_periods_, waveform_window_extended_);
+      }
+      if (analysis.classification ==
+              WaveformClassification::kInconclusive &&
+          inconclusive_extension_count_ > 0 &&
+          AmplifyWaveformProbeAfterInconclusive(analysis, now)) {
+        return;
+      }
+      if (analysis.classification ==
+              WaveformClassification::kInconclusive &&
+          ShouldObserveAfterInconclusive(
+              use_adaptive_load_judgment, inconclusive_extension_count_,
+              waveform_max_inconclusive_extensions_,
+              waveform_window_periods_, waveform_max_window_periods_)) {
+        const double start_advance_periods =
+            InconclusiveWindowStartAdvancePeriods(
+                use_adaptive_load_judgment, waveform_window_extended_,
+                waveform_window_periods_);
+        const double extended_periods = use_adaptive_load_judgment
+            ? std::min(3.0, waveform_max_window_periods_)
+            : std::min(waveform_max_window_periods_,
+                       waveform_window_periods_ + 1.0);
+        if (start_advance_periods == 0.0 &&
+            extended_periods <= waveform_window_periods_ + 1e-12) {
+          ApplyWaveformClassification(analysis, now);
+          return;
+        }
+        const double baseline_before_bps = static_cast<double>(
+            current_injection_baseline_bw_.ToBitsPerSecond());
+        const double amplitude_before_bps =
+            static_cast<double>(current_probe_amplitude_bps_);
+        if (inconclusive_extension_count_ <
+            std::numeric_limits<uint32_t>::max()) {
+          ++inconclusive_extension_count_;
+        }
+        ++waveform_decision_count_;
+        waveform_last_action_ = "OBSERVE_ONE_MORE_PERIOD";
+        waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+        waveform_last_raw_delta_bw_bps_ = 0.0;
+        waveform_last_applied_delta_bw_bps_ = 0.0;
+        waveform_cruise_state_ = WaveformCruiseState::kExtendCycle;
+        EmitWaveformSearchTrace(analysis,
+                                waveform_last_action_,
+                                baseline_before_bps,
+                                amplitude_before_bps);
+        const TimeDelta period = TimeDelta::FromMicroseconds(
+            static_cast<int64_t>(std::llround(
+                1000000.0 / cruise_modulation_freq_hz_)));
+        const QuicTime next_window_start = start_advance_periods > 0.5
+            ? waveform_window_start_ + period
+            : waveform_window_start_;
+        StartWaveformCollectionAt(
+            next_window_start, extended_periods, true);
+        return;
+      }
+      ApplyWaveformClassification(analysis, now);
+      return;
+    }
+    return;
+  }
+}
+
+void FBBRSender::EmitWaveformSearchTrace(
+    const WaveformWindowAnalysis& analysis,
+    const std::string& action,
+    double baseline_before_bps,
+    double amplitude_before_bps) const {
+  if (!cruise_load_trace_cb_) {
+    return;
+  }
+  auto seconds = [](QuicTime time) {
+    return time == QuicTime::Zero()
+               ? 0.0
+               : static_cast<double>((time - QuicTime::Zero())
+                                         .ToMicroseconds()) /
+                     1000000.0;
+  };
+  const double time_s = seconds(analysis.collection_window_end);
+  const double baseline_after_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_after_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  const double probe_epoch_rtt_s = static_cast<double>(
+      analysis.probe_epoch_rtt.ToMicroseconds()) / 1000000.0;
+  std::ostringstream row;
+  row << time_s << ","
+      << cruise_id_ << ","
+      << waveform_decision_count_ << ","
+      << WaveformStateName(waveform_cruise_state_) << ","
+      << CruiseDetectorModeName(cruise_detector_mode_) << ","
+      << model_.cwnd_gain() << ","
+      << seconds(analysis.probe_epoch_start) << ","
+      << probe_epoch_rtt_s << ","
+      << seconds(analysis.collection_window_start) << ","
+      << seconds(analysis.collection_window_end) << ","
+      << (waveform_negative_half_first_ ? "true" : "false") << ","
+      << analysis.collection_window_periods << ","
+      << (analysis.extended_window ? "true" : "false") << ","
+      << seconds(analysis.window_start) << ","
+      << seconds(analysis.window_end) << ","
+      << analysis.window_periods << ","
+      << (analysis.analysis_uses_later_cycle ? "true" : "false") << ","
+      << (analysis.prior_cycle_srtt_input_valid ? "true" : "false") << ","
+      << (analysis.prior_cycle_srtt_similar ? "true" : "false") << ","
+      << (analysis.prior_cycle_drate_input_valid ? "true" : "false") << ","
+      << (analysis.prior_cycle_drate_similar ? "true" : "false") << ","
+      << WaveformClassificationName(
+             analysis.prior_cycle_classification) << ","
+      << analysis.sender_sample_count << ","
+      << analysis.drate_sample_count << ","
+      << analysis.srtt_sample_count << ","
+      << analysis.srtt_stat_sample_count << ","
+      << (analysis.srtt_stats_valid ? "true" : "false") << ","
+      << analysis.srtt_mean_ms << ","
+      << analysis.srtt_min_ms << ","
+      << analysis.srtt_max_ms << ","
+      << (analysis.latest_waveform_overload_srtt_mean_valid
+              ? "true"
+              : "false") << ","
+      << analysis.latest_waveform_overload_srtt_mean_ms << ","
+      << (analysis.latest_waveform_underload_srtt_mean_valid
+              ? "true"
+              : "false") << ","
+      << analysis.latest_waveform_underload_srtt_mean_ms << ","
+      << analysis.coverage_ratio << ","
+      << analysis.app_limited_ratio << ","
+      << (analysis.sender_waveform_valid ? "true" : "false") << ","
+      << analysis.best_lag_s << ","
+      << (analysis.srtt_input_valid ? "true" : "false") << ","
+      << (analysis.srtt_similar_frequency ? "true" : "false") << ","
+      << (analysis.srtt_similar ? "true" : "false") << ","
+      << (analysis.srtt_similar_without_middle ? "true" : "false") << ","
+      << (analysis.srtt_effective_similar ? "true" : "false") << ","
+      << analysis.srtt_without_middle_completeness.estimated_period << ","
+      << analysis.srtt_without_middle_completeness.periodicity_correlation
+      << ","
+      << (analysis.srtt_cycle_complete ? "true" : "false") << ","
+      << (analysis.srtt_positive_half_clipped ? "true" : "false") << ","
+      << (analysis.srtt_negative_half_clipped ? "true" : "false") << ","
+      << (analysis.srtt_only_negative_half ? "true" : "false") << ","
+      << (analysis.srtt_only_positive_half ? "true" : "false") << ","
+      << analysis.plateau.srtt_positive_half_span_ms << ","
+      << analysis.plateau.srtt_negative_half_span_ms << ","
+      << (analysis.srtt_clip_ambiguous ? "true" : "false") << ","
+      << analysis.srtt_direct_ncc << ","
+      << analysis.srtt_integral_ncc << ","
+      << analysis.srtt_derivative_ncc << ","
+      << analysis.srtt_slope_direction_agreement << ","
+      << analysis.srtt_completeness.estimated_period << ","
+      << analysis.srtt_completeness.period_error_ratio << ","
+      << analysis.srtt_completeness.periodicity_correlation << ","
+      << analysis.srtt_fit.fitted_response_amplitude << ","
+      << analysis.srtt_fit.robust_noise_sigma << ","
+      << analysis.srtt_fit.response_snr << ","
+      << analysis.srtt_completeness.completeness_score << ","
+      << (analysis.drate_input_valid ? "true" : "false") << ","
+      << (analysis.drate_similar ? "true" : "false") << ","
+      << (analysis.drate_similar_without_middle ? "true" : "false") << ","
+      << (analysis.drate_effective_similar ? "true" : "false") << ","
+      << analysis.drate_without_middle_completeness.estimated_period << ","
+      << analysis.drate_without_middle_completeness.periodicity_correlation
+      << ","
+      << analysis.drate_ncc << ","
+      << analysis.drate_slope_direction_agreement << ","
+      << analysis.drate_completeness.estimated_period << ","
+      << analysis.drate_completeness.period_error_ratio << ","
+      << analysis.drate_completeness.periodicity_correlation << ","
+      << analysis.current_drate_response_amplitude_bps << ","
+      << analysis.drate_fit.robust_noise_sigma << ","
+      << analysis.drate_fit.response_snr << ","
+      << analysis.drate_completeness.completeness_score << ","
+      << (has_last_similar_drate_amplitude_ ? "true" : "false") << ","
+      << last_similar_drate_amplitude_bps_ << ","
+      << analysis.delta_source << ","
+      << analysis.raw_delta_bw_bps << ","
+      << analysis.applied_delta_bw_bps << ","
+      << analysis.delta_reference_bps << ","
+      << analysis.window_extreme_gap_bps << ","
+      << analysis.actuator_step_multiplier << ","
+      << analysis.queue_delay_ms << ","
+      << analysis.queue_delay_min_rtt_ratio << ","
+      << analysis.overload_confirmation_count << ","
+      << (underload_located_ ? "true" : "false") << ","
+      << WaveformClassificationName(analysis.classification) << ","
+      << action << ","
+      << baseline_before_bps << ","
+      << baseline_after_bps << ","
+      << amplitude_before_bps << ","
+      << amplitude_after_bps << ","
+      << (trusted_baseline_locked_ ? "true" : "false") << ","
+      << trusted_bw_candidate_update_count_ << ","
+      << "true" << ","
+      << (trusted_bw_candidate_.IsZero()
+              ? 0
+              : trusted_bw_candidate_.ToBitsPerSecond()) << ","
+      << trusted_bw_candidate_source_ << ","
+      << (analysis.invalid_reason.empty()
+              ? "none"
+              : analysis.invalid_reason) << ","
+      << analysis.decision_rule << ","
+      << analysis.delivery_rate_stat_sample_count << ","
+      << (analysis.delivery_rate_stats_valid ? "true" : "false") << ","
+      << analysis.delivery_rate_min_bps << ","
+      << analysis.delivery_rate_max_bps << ","
+      << analysis.delivery_rate_mean_bps << ","
+      << analysis.latest_trusted_bw_bps << ","
+      << analysis.smoothed_trusted_bw_bps << ","
+      << (analysis.plateau.drate_positive_half_clipped ? "true" : "false")
+      << ","
+      << (analysis.plateau.drate_negative_half_clipped ? "true" : "false")
+      << ","
+      << (analysis.plateau.drate_only_negative_half ? "true" : "false")
+      << ","
+      << analysis.plateau.drate_positive_half_span_bps << ","
+      << analysis.plateau.drate_negative_half_span_bps << ","
+      << (analysis.plateau.positive_half_clips_simultaneous ? "true" : "false")
+      << ","
+      << (analysis.plateau.srtt_middle_sequential_plateau ? "true" : "false")
+      << ","
+      << (analysis.plateau.drate_middle_sequential_plateau ? "true" : "false")
+      << ","
+      << (analysis.plateau.drate_middle_any_plateau ? "true" : "false")
+      << ","
+      << (analysis.plateau.drate_has_waveform ? "true" : "false") << ","
+      << analysis.plateau.plateau_candidate_count << ","
+      << analysis.plateau.middle_sequential_candidate_count << ","
+      << (analysis.plateau.top_clip ? "true" : "false") << ","
+      << (analysis.plateau.bottom_clip ? "true" : "false") << ","
+      << (analysis.plateau.shoulders_opposite ? "true" : "false") << ","
+      << analysis.plateau.shoulder_slope_before << ","
+      << analysis.plateau.shoulder_slope_after << ","
+      << analysis.plateau.other_shoulder_slope_before << ","
+      << analysis.plateau.other_shoulder_slope_after << ","
+      << analysis.plateau.shoulder_change_before << ","
+      << analysis.plateau.shoulder_change_after << ","
+      << analysis.plateau.minimum_shoulder_change << ","
+      << analysis.plateau.plateau_duration_ratio << ","
+      << analysis.plateau.plateau_level_span_ratio << ","
+      << analysis.plateau.half_overlap_ratio << ","
+      << analysis.plateau.plateau_extreme_distance_ratio << ","
+      << analysis.boundary_lift_time_s << ","
+      << analysis.boundary_delta_bps << ","
+      << waveform_amplitude_reduction_count_ << ","
+      << floor_clip_confirmation_count_ << ","
+      << (adaptive_bounds_inherited_this_cruise_ ? "true" : "false")
+      << ","
+      << adaptive_cruise_start_max_bw_.ToBitsPerSecond() << ","
+      << (adaptive_baseline_low_valid_ ? "true" : "false") << ","
+      << adaptive_baseline_low_.ToBitsPerSecond() << ","
+      << (adaptive_baseline_up_valid_ ? "true" : "false") << ","
+      << adaptive_baseline_up_.ToBitsPerSecond() << ","
+      << (latest_waveform_underload_srtt_mean_valid_ ? "true" : "false")
+      << ","
+      << latest_waveform_underload_srtt_mean_ms_ << ","
+      << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
+      << ","
+      << latest_waveform_overload_srtt_mean_ms_;
+  cruise_load_trace_cb_(time_s,
+                        time_s,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        "WAVEFORM_SEARCH",
+                        analysis.classification ==
+                            WaveformClassification::kInconclusive,
+                        row.str());
+}
+
+void FBBRSender::PublishWaveformTrustedBw() {
+  const double candidate_bps = static_cast<double>(
+      trusted_bw_candidate_.ToBitsPerSecond());
+  if (!trusted_baseline_locked_ || trusted_bw_candidate_.IsZero() ||
+      !std::isfinite(candidate_bps) || candidate_bps <= 0.0) {
+    ClearTrustedBw(waveform_last_invalid_reason_.empty() ||
+                           waveform_last_invalid_reason_ == "none"
+                       ? "waveform_not_locked"
+                       : waveform_last_invalid_reason_.c_str());
+    return;
+  }
+  TrustedBwSelectionResult selection = {
+      BandwidthEstimate(),
+      trusted_bw_candidate_,
+      true,
+      1.0,
+      trusted_bw_candidate_source_,
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::quiet_NaN(),
+      false,
+      false,
+      false,
+      "NOT_APPLICABLE",
+      false,
+      false,
+      0,
+      0,
+      0,
+      0};
+  PublishTrustedBwSelection(selection);
+}
+
+void FBBRSender::RunDueCruiseWindowAnalysis(QuicTime now) {
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    RunWaveformCruiseStateMachine(now);
     return;
   }
   if (configured_modulation_freq_hz_ <= 0.0 ||
@@ -4765,12 +6404,10 @@ void FBBRSender::RankCruiseWindows(
 }
 
 void FBBRSender::FinalizeCruise(QuicTime now) {
-  if (fbbr_frequency_search_config_.frequency_search_enabled) {
-    FBBRFrequencySearchFinalizeCruise(now);
-    return;
-  }
-  if (!fbbr_frequency_search_config_.legacy_spectral_path_enabled) {
-    ClearTrustedBw("frequency_search_and_legacy_disabled");
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    RunWaveformCruiseStateMachine(now);
+    PublishWaveformTrustedBw();
+    EmitCruiseSummaryTrace(now);
     return;
   }
   RunDueCruiseWindowAnalysis(now);
@@ -4945,13 +6582,42 @@ void FBBRSender::EmitCruiseSummaryTrace(QuicTime now) const {
 	      << (best != nullptr && best->srtt_spectral_gate_pass ? "true" : "false") << ","
 	      << (best != nullptr && best->dual_signal_spectral_gate_pass ? "true" : "false") << ","
 	      << (best != nullptr ? best->limiting_spectral_signal
-	                          : kLimitingSpectralSignalEqual) << ","
-	      << (best != nullptr ? best->spectral_invalid_reason : "none") << ","
+	                          : (cruise_detector_mode_ ==
+	                                     FBBRCruiseDetectorMode::kTimeWaveform
+	                                 ? "NOT_APPLICABLE"
+	                                 : kLimitingSpectralSignalEqual)) << ","
+	      << (best != nullptr ? best->spectral_invalid_reason
+	                          : (cruise_detector_mode_ ==
+	                                     FBBRCruiseDetectorMode::kTimeWaveform
+	                                 ? "NOT_APPLICABLE"
+	                                 : "none")) << ","
 	      << summary_selection_native_bw.ToBitsPerSecond() << ","
 	      << (trusted_bw_valid_ ? "true" : "false") << ","
 	      << trusted_bw_cruise_id_ << ","
 	      << (trusted_bw_fresh_ ? "true" : "false") << ","
-	      << (trusted_bw_application_valid_ ? "true" : "false");
+	      << (trusted_bw_application_valid_ ? "true" : "false") << ","
+	      << CruiseDetectorModeName(cruise_detector_mode_) << ","
+	      << WaveformStateName(waveform_cruise_state_) << ","
+	      << waveform_decision_count_ << ","
+	      << baseline_adjustment_count_ << ","
+	      << waveform_amplitude_reduction_count_ << ","
+		      << (underload_located_ ? "true" : "false") << ","
+		      << (trusted_bw_candidate_source_ == nullptr
+		              ? kTrustedBwSourceNone
+		              : trusted_bw_candidate_source_) << ","
+		      << (adaptive_bounds_inherited_this_cruise_ ? "true" : "false")
+		      << ","
+		      << adaptive_cruise_start_max_bw_.ToBitsPerSecond() << ","
+		      << (adaptive_baseline_low_valid_ ? "true" : "false") << ","
+		      << adaptive_baseline_low_.ToBitsPerSecond() << ","
+		      << (adaptive_baseline_up_valid_ ? "true" : "false") << ","
+		      << adaptive_baseline_up_.ToBitsPerSecond() << ","
+		      << (latest_waveform_underload_srtt_mean_valid_ ? "true" : "false")
+		      << ","
+		      << latest_waveform_underload_srtt_mean_ms_ << ","
+		      << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
+		      << ","
+		      << latest_waveform_overload_srtt_mean_ms_;
   cruise_load_trace_cb_(cruise_start_s,
                         cruise_end_s,
                         0.0,
@@ -4974,6 +6640,63 @@ std::vector<FBBRRateSample> FBBRSender::SelectRateSamples(
     }
   }
   return out;
+}
+
+FBBRSender::DeliveryRateWindowStats
+FBBRSender::ComputeDeliveryRateWindowStats(
+    const std::vector<FBBRRateSample>& samples) {
+  DeliveryRateWindowStats stats;
+  double sum_bps = 0.0;
+  stats.min_bps = std::numeric_limits<double>::infinity();
+  stats.max_bps = -std::numeric_limits<double>::infinity();
+  for (const auto& sample : samples) {
+    const double rate_bps =
+        static_cast<double>(sample.rate.ToBitsPerSecond());
+    if (!sample.valid || !std::isfinite(rate_bps) || rate_bps <= 0.0) {
+      continue;
+    }
+    ++stats.sample_count;
+    stats.min_bps = std::min(stats.min_bps, rate_bps);
+    stats.max_bps = std::max(stats.max_bps, rate_bps);
+    sum_bps += rate_bps;
+  }
+  stats.valid = stats.sample_count > 0 && std::isfinite(sum_bps);
+  if (!stats.valid) {
+    stats.min_bps = 0.0;
+    stats.max_bps = 0.0;
+    return stats;
+  }
+  stats.mean_bps = sum_bps / static_cast<double>(stats.sample_count);
+  stats.valid = std::isfinite(stats.mean_bps) && stats.mean_bps > 0.0;
+  return stats;
+}
+
+FBBRSender::SrttWindowStats FBBRSender::ComputeSrttWindowStats(
+    const std::vector<FBBRRttSample>& samples) {
+  SrttWindowStats stats;
+  double sum_ms = 0.0;
+  stats.min_ms = std::numeric_limits<double>::infinity();
+  stats.max_ms = -std::numeric_limits<double>::infinity();
+  for (const auto& sample : samples) {
+    if (!std::isfinite(sample.rtt_ms) || sample.rtt_ms <= 0.0) {
+      continue;
+    }
+    ++stats.sample_count;
+    stats.min_ms = std::min(stats.min_ms, sample.rtt_ms);
+    stats.max_ms = std::max(stats.max_ms, sample.rtt_ms);
+    sum_ms += sample.rtt_ms;
+  }
+  stats.valid = stats.sample_count > 0 && std::isfinite(sum_ms);
+  if (!stats.valid) {
+    stats.min_ms = 0.0;
+    stats.max_ms = 0.0;
+    return stats;
+  }
+  stats.mean_ms = sum_ms / static_cast<double>(stats.sample_count);
+  stats.valid = std::isfinite(stats.mean_ms) && stats.mean_ms > 0.0 &&
+                std::isfinite(stats.min_ms) && stats.min_ms > 0.0 &&
+                std::isfinite(stats.max_ms) && stats.max_ms > 0.0;
+  return stats;
 }
 
 std::vector<FBBRRttSample> FBBRSender::SelectRttSamples(

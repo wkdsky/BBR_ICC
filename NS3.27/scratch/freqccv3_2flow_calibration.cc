@@ -334,7 +334,7 @@ InstallProbeFlow(Ptr<Node> sender,
         send_app->SetUpPhaseTraceFuc(MakeCallback(&DqcTrace::OnUpPhase, trace));
         send_app->SetFreqAnalysisTraceFuc(MakeCallback(&DqcTrace::OnFreqAnalysis, trace));
         send_app->SetRttFreqAnalysisTraceFuc(MakeCallback(&DqcTrace::OnRttFreqAnalysis, trace));
-        send_app->SetFreqCCv4LoadTraceFuc(MakeCallback(&DqcTrace::OnFreqCCv4Load, trace));
+        send_app->SetFBBRLoadTraceFuc(MakeCallback(&DqcTrace::OnFBBRLoad, trace));
         send_app->SetLossRateTraceFuc(MakeCallback(&DqcTrace::OnLossRate, trace));
 
         recv_app->SetOwdTraceFuc(MakeCallback(&DqcTrace::OnOwd, trace));
@@ -496,7 +496,7 @@ RunCalibrationScenario()
                    DqcTraceEnable::E_DQC_BBR_MODE | DqcTraceEnable::E_DQC_UP_PHASE |
                    DqcTraceEnable::E_DQC_FREQ_ANALYSIS | DqcTraceEnable::E_DQC_LOSS_RATE |
                    DqcTraceEnable::E_DQC_QUEUE_DELAY |
-                   DqcTraceEnable::E_DQC_FREQCCV4_LOAD);
+                   DqcTraceEnable::E_DQC_FBBR_LOAD);
 
     InstallProbeFlow(nodes.Get(0),
                      nodes.Get(4),

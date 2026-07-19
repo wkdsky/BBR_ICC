@@ -1,0 +1,81 @@
+{
+  "name": "cellular_links_taxi_5cc_matrix",
+  "description": "Five congestion-control comparison on the project cellular taxi Mahimahi trace.",
+  "ccs": [
+    "FBBR",
+    "FBBR-adaptive",
+    "oBBR",
+    "BBRv2plus",
+    "BBRv2"
+  ],
+  "trace": {
+    "project_usage": "mm-delay 10 mm-link celluar_trace/trace_taxi 48mbps_data.trace --uplink-queue=droptail --uplink-queue-args=packets=100",
+    "upstream_repo": "https://github.com/Soheil-ab/Cellular-Traces-NYC",
+    "upstream_commit": "ac6717b5f113bf899344e91ffc57e472daf29954",
+    "upstream_file": "trace-2767958-taxi1",
+    "legacy_project_path": "/home/wkd/FreqBBR/GenericCC/scratch/celluar_trace/trace_taxi",
+    "project_capacity_converter": "/home/wkd/FreqBBR/GenericCC/scratch/PlotData/catCapacityTrace.sh",
+    "constant_downlink_trace": "/home/wkd/FreqBBR/GenericCC/scratch/48mbps_data.trace",
+    "duration_s": 170.818,
+    "default_sim_time_s": 60.0
+  },
+  "link": {
+    "access_rate": "1Gbps",
+    "nominal_service_rate": "48Mbps",
+    "native_trace_nominal_rate": "48Mbps",
+    "access_delay_ms": 0.0,
+    "service_delay_ms": 10.0,
+    "rtt_note": "Matches the legacy mm-delay 10 setup: approximately 20 ms RTT."
+  },
+  "rate_rationale": {
+    "policy": "Keep the project taxi Mahimahi trace timing and shape; scale only the generated ns-3 capacitySchedule per scenario so actual dynamic capacity and BDP-based buffers match the selected shared-cell rate.",
+    "references": [
+      "The legacy project command uses mm-delay 10 and mm-link with the taxi cellular trace plus wired48/48mbps_data.trace.",
+      "Verus-style cellular fairness experiments include multi-flow shared-link tests such as 6 flows over 60Mbps and dynamic cellular links in the 10-100Mbps range.",
+      "For 32 concurrent long flows, the configured rate is capped at 200Mbps to stay in a high-end cellular/5G-cell range rather than scaling linearly to hundreds of Mbps per flow."
+    ],
+    "chosen_rates": "4 flows: 48Mbps; 8 flows: 90Mbps; 16 flows: 128Mbps; 32 flows: 200Mbps."
+  },
+  "runner_defaults": {
+    "data_generator_batch": 64,
+    "stream_buffer_bytes": 0,
+    "queue_sample_interval_us": 1000,
+    "warmup_s": 5.0,
+    "enable_queue_trace": false,
+    "direct_binary": true
+  },
+  "scenarios": [
+    {
+      "name": "cellular_taxi_4flows_0p5BDP",
+      "n_flows": 4,
+      "switch_buffer_bdp": 0.5,
+      "seed": 1,
+      "service_rate": "48Mbps",
+      "capacity_scale": 1.0
+    },
+    {
+      "name": "cellular_taxi_8flows_2BDP",
+      "n_flows": 8,
+      "switch_buffer_bdp": 2.0,
+      "seed": 2,
+      "service_rate": "90Mbps",
+      "capacity_scale": 1.875
+    },
+    {
+      "name": "cellular_taxi_16flows_5BDP",
+      "n_flows": 16,
+      "switch_buffer_bdp": 5.0,
+      "seed": 3,
+      "service_rate": "128Mbps",
+      "capacity_scale": 2.666666667
+    },
+    {
+      "name": "cellular_taxi_32flows_10BDP",
+      "n_flows": 32,
+      "switch_buffer_bdp": 10.0,
+      "seed": 4,
+      "service_rate": "200Mbps",
+      "capacity_scale": 4.166666667
+    }
+  ]
+}

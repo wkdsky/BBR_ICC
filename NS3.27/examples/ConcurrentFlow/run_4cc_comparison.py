@@ -8,7 +8,7 @@ Directory layout:
     BBRv2/
     oBBR/
     BBRv2plus/
-    F-BBR/
+    FBBR/
     compare/
 """
 
@@ -27,16 +27,13 @@ from typing import Dict, Iterable, List, Optional
 
 NS3_ROOT = Path(__file__).resolve().parents[2]
 SCENARIO = "generic_p2p_switch_flows"
-DEFAULT_FREQCCV4_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "freqccv4_default.conf"
+DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
-CCS = ("BBRv2", "oBBR", "BBRv2plus", "F-BBR")
-SELECTABLE_CCS = (
-    *CCS,
-    "FreqCCv4",
-    "FreqCCv4-adaptive",
-    "FreqCCv4-hybrid",
-)
+CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
+OPTIONAL_CCS = ("FBBR-adaptive", "FreqCCv3")
+SELECTABLE_CCS = (*CCS, *OPTIONAL_CCS)
+
 PLOT_SCRIPT = Path(__file__).with_name("plot_4cc_comparison.py")
 
 
@@ -49,7 +46,8 @@ class RunnerConfig:
     stop_times: str = ""
     initial_rates: str = "0"
     rate_schedules: str = ""
-    freqccv4_cruise_base_caps: str = "0"
+    fbbr_cruise_base_caps: str = "0"
+    capacity_schedule: str = ""
     access_rate: str = "1Gbps"
     service_rate: str = "20Mbps"
     access_delay_ms: float = 1.0
@@ -76,7 +74,7 @@ class RunnerConfig:
     gate_trace_sample_interval_us: int = 10000
     interval_win_rtt_mult: float = 1.0
     config_paths: str = ""
-    freqccv4_config: str = str(DEFAULT_FREQCCV4_CONFIG)
+    fbbr_config: str = str(DEFAULT_FBBR_CONFIG)
     obbr_config: str = ""
     bbrv2plus_config: str = ""
     bbrv2_config: str = ""
@@ -142,7 +140,8 @@ def build_ns3_args(cfg: RunnerConfig) -> List[str]:
         "flowStopTimes": cfg.stop_times,
         "initialRates": cfg.initial_rates,
         "rateSchedules": cfg.rate_schedules,
-        "freqccv4CruiseBaseCaps": cfg.freqccv4_cruise_base_caps,
+        "fbbrCruiseBaseCaps": cfg.fbbr_cruise_base_caps,
+        "capacitySchedule": cfg.capacity_schedule,
         "accessRate": cfg.access_rate,
         "serviceRate": cfg.service_rate,
         "accessDelayMs": cfg.access_delay_ms,
@@ -169,7 +168,7 @@ def build_ns3_args(cfg: RunnerConfig) -> List[str]:
         "gateTraceSampleIntervalUs": cfg.gate_trace_sample_interval_us,
         "intervalWinRttMult": cfg.interval_win_rtt_mult,
         "configPaths": cfg.config_paths,
-        "freqccv4Config": cfg.freqccv4_config,
+        "fbbrConfig": cfg.fbbr_config,
         "obbrConfig": cfg.obbr_config,
         "bbrv2plusConfig": cfg.bbrv2plus_config,
         "bbrv2Config": cfg.bbrv2_config,
@@ -200,8 +199,13 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
     print(f"发送速率上限 initialRates：{cfg.initial_rates}")
     if cfg.rate_schedules:
         print(f"分阶段发送速率上限 rateSchedules：{cfg.rate_schedules}")
-    if cfg.freqccv4_cruise_base_caps != "0":
-        print(f"FreqCCv4 CRUISE 基线上限：{cfg.freqccv4_cruise_base_caps}")
+    if cfg.capacity_schedule:
+        schedule_entries = split_csv(cfg.capacity_schedule)
+        preview = ", ".join(schedule_entries[:3])
+        suffix = " ..." if len(schedule_entries) > 3 else ""
+        print(f"动态 bottleneck 容量：{len(schedule_entries)} 个采样点；{preview}{suffix}")
+    if cfg.fbbr_cruise_base_caps != "0":
+        print(f"FBBR CRUISE 基线上限：{cfg.fbbr_cruise_base_caps}")
     print(f"sender/receiver access 链路：{cfg.access_rate}, {cfg.access_delay_ms} ms")
     print(f"共享 bottleneck 链路：{cfg.service_rate}, {cfg.service_delay_ms} ms")
     print(f"共享 bottleneck 出口 buffer：{cfg.switch_buffer_bytes} bytes；0 表示按 {cfg.switch_buffer_bdp} BDP 自动计算")
@@ -213,11 +217,11 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
         f"逐事件={cfg.enable_queue_trace}, 固定采样={cfg.emit_bottleneck_queue_trace}, "
         f"间隔={cfg.queue_sample_interval_us} us"
     )
-    print(f"FreqCCv4 gate trace：{cfg.enable_convergence_gate_trace}, mode={cfg.gate_trace_mode}")
+    print(f"FBBR gate trace：{cfg.enable_convergence_gate_trace}, mode={cfg.gate_trace_mode}")
     print(f"log 根目录：{cfg.log_root}")
     print(f"本次实验目录：{cfg.trace_path}")
     print("本次实验目录内会保存：run.log、command.txt、config.json、ns-3 trace 文件")
-    print(f"freqccv4 config：{cfg.freqccv4_config}")
+    print(f"FBBR config：{cfg.fbbr_config}")
     print("-" * 88)
     if cfg.direct_binary:
         binary = NS3_ROOT / "build" / "scratch" / SCENARIO
@@ -373,36 +377,41 @@ ALGORITHM_PARAMS = {
         },
         "notes": "采用本地 BBRv2plus 代码内置参数，贴近论文的 delay-guided probing 与 jitter BDP compensation。",
     },
-    "F-BBR": {
-        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
-        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
-        "algorithm": "F-BBR",
-        "operating_point_identifier": "OPIv2",
-        "notes": "F-BBR 的兼容源文件名仍为 freqccv4_sender.cc；默认使用 coded-sine OPIv2。",
+    "FreqCCv3": {
+        "source": "src/dqc/model/thirdparty/congestion/freqccv3_sender.h",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FreqCCv3",
+        "notes": "承载原纯净 FreqCCv3（三角波 + STFT）算法。",
     },
-    "FreqCCv4": {
-        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
-        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
-        "algorithm": "FreqCCv4",
-        "notes": "FreqCCv4 原版使用固定 Δ 上升/下降基线。",
+    "FBBR-adaptive": {
+        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FBBR-adaptive",
+        "notes": "FBBR 的 Adaptive Guard 分支使用窗口边界、过载确认和队列守卫。",
     },
-    "FreqCCv4-adaptive": {
-        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
-        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
-        "algorithm": "FreqCCv4-adaptive",
-        "notes": "Adaptive Guard 分支使用平滑 Δ、窗口边界、过载确认和队列守卫。",
-    },
-    "FreqCCv4-hybrid": {
-        "source": "src/dqc/model/thirdparty/congestion/freqccv4_sender.cc",
-        "config_file": str(DEFAULT_FREQCCV4_CONFIG),
-        "algorithm": "FreqCCv4-hybrid",
-        "notes": "Hybrid 分支使用窗口极值调整基线，并平滑 FULL_LOAD 窗口均值。",
+    "FBBR": {
+        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FBBR",
+        "notes": "FBBR 主分支，使用窗口极值调整基线，并平滑 FULL_LOAD 窗口均值。",
     },
 }
 
 
 def split_csv(text: str) -> List[str]:
     return [part.strip() for part in str(text).split(",") if part.strip()]
+
+
+def summarize_capacity_schedule(text: str) -> Dict[str, object]:
+    entries = split_csv(text)
+    summary: Dict[str, object] = {
+        "enabled": bool(entries),
+        "entry_count": len(entries),
+    }
+    if entries:
+        summary["first"] = entries[0]
+        summary["last"] = entries[-1]
+    return summary
 
 
 def default_experiment_name(seed: int, run_id: int) -> str:
@@ -437,7 +446,8 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.stop_times = args.stop_times
     cfg.initial_rates = args.initial_rates
     cfg.rate_schedules = args.rate_schedules
-    cfg.freqccv4_cruise_base_caps = args.freqccv4_cruise_base_caps
+    cfg.fbbr_cruise_base_caps = args.fbbr_cruise_base_caps
+    cfg.capacity_schedule = args.capacity_schedule
     cfg.access_rate = args.access_rate
     cfg.service_rate = args.service_rate
     cfg.access_delay_ms = args.access_delay_ms
@@ -459,7 +469,7 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.gate_trace_mode = args.gate_trace_mode
     cfg.data_generator_batch = args.data_generator_batch
     cfg.stream_buffer_bytes = args.stream_buffer_bytes
-    cfg.freqccv4_config = args.freqccv4_config
+    cfg.fbbr_config = args.fbbr_config
     cfg.log_root = str(root)
     cfg.trace_path = str(root / cc)
     cfg.trace_name = cc
@@ -479,7 +489,8 @@ def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str,
         "stop_times_s": args.stop_times or str(args.sim_time),
         "initial_rates": args.initial_rates,
         "rate_schedules": args.rate_schedules,
-        "freqccv4_cruise_base_caps": args.freqccv4_cruise_base_caps,
+        "fbbr_cruise_base_caps": args.fbbr_cruise_base_caps,
+        "capacity_schedule": summarize_capacity_schedule(args.capacity_schedule),
         "data_generator_batch": args.data_generator_batch,
         "stream_buffer_bytes": args.stream_buffer_bytes,
         "enable_convergence_gate_trace": args.enable_convergence_gate_trace,
@@ -499,7 +510,7 @@ def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str,
         "metrics": [
             "aggregate throughput over time from *_good.txt",
             "mean per-flow throughput over time from *_good.txt",
-            "shared bottleneck queueing delay over time from queue bytes / bottleneck service rate",
+            "shared bottleneck queueing delay over time from queue bytes / current bottleneck service rate when bottleneck_queue.csv exposes capacity_bps",
             "P95 queueing delay after warmup",
         ],
         "notes": [
@@ -516,14 +527,9 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         cc: dict(ALGORITHM_PARAMS.get(cc, {"algorithm": cc}))
         for cc in selected
     }
-    for cc in (
-        "F-BBR",
-        "FreqCCv4",
-        "FreqCCv4-adaptive",
-        "FreqCCv4-hybrid",
-    ):
+    for cc in ("FBBR", "FBBR-adaptive", "FreqCCv3"):
         if cc in params:
-            params[cc]["config_file"] = args.freqccv4_config
+            params[cc]["config_file"] = args.fbbr_config
 
     (root / "comparison_config.json").write_text(
         json.dumps(scenario_metadata(args, selected), ensure_ascii=False, indent=2) + "\n",
@@ -551,6 +557,7 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         f"- RTT 设计：约 `2 * (2 * {args.access_delay_ms}ms + {args.service_delay_ms}ms)`",
         f"- 共享 bottleneck 出口 buffer：{args.switch_buffer_bdp} BDP（若 `switch_buffer_bytes=0`）",
         f"- 发送侧填充批量：每次可写填充 {args.data_generator_batch} 个 1500B 包",
+        f"- 动态 bottleneck 容量：{summarize_capacity_schedule(args.capacity_schedule)['entry_count']} 个采样点",
         f"- 仿真时长：{args.sim_time}s",
         "",
         "## 参考依据",
@@ -651,7 +658,7 @@ def make_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "默认方案：\n"
-            "  - 四个子实验：BBRv2、oBBR、BBRv2plus、F-BBR\n"
+            "  - 四个子实验：BBRv2、oBBR、BBRv2plus、FBBR\n"
             "  - 每个子实验 4 条同算法长流，n 个发送端对 n 个接收端，构成 dumbbell\n"
             "  - 所有流共享一条 left-switch -> right-switch 瓶颈链路，默认 100Mbps\n"
             "  - 共享瓶颈出口 buffer 为 0.5BDP，端侧/access 队列为 1GiB\n"
@@ -675,8 +682,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--only-cc",
         default="",
         help=(
-            "只运行指定 CC，可用逗号分隔。额外支持 FreqCCv4、"
-            "FreqCCv4-adaptive 和 FreqCCv4-hybrid。"
+            "只运行指定 CC，可用逗号分隔。支持 FBBR、FBBR-adaptive 和 FreqCCv3。"
         ),
     )
 
@@ -694,11 +700,20 @@ def make_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--freqccv4-cruise-base-caps",
+        "--fbbr-cruise-base-caps",
+        dest="fbbr_cruise_base_caps",
         default="0",
         help=(
-            "每流 FreqCCv4 CRUISE 原生 pacing 基线上限；0 关闭。"
+            "每流 FBBR CRUISE 原生 pacing 基线上限；0 关闭。"
             "该上限在加扰动前应用，用于给完整波形留出余量。"
+        ),
+    )
+    parser.add_argument(
+        "--capacity-schedule",
+        default="",
+        help=(
+            "共享 bottleneck 容量时间序列，格式 time:rate,time:rate；"
+            "传给 ns-3 capacitySchedule，用于 cellular/mobile trace。"
         ),
     )
     parser.add_argument("--access-rate", default="1Gbps", help="sender/receiver access 链路速率。默认 1Gbps。")
@@ -717,9 +732,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-heavy-trace", action=argparse.BooleanOptionalAction, default=False, help="是否开启 RTT/BW/sendrate 等重 trace。默认关闭。")
     parser.add_argument("--enable-queue-trace", action=argparse.BooleanOptionalAction, default=True, help="是否输出逐事件共享队列 trace；长实验可关闭并保留固定间隔 bottleneck_queue.csv。")
     parser.add_argument("--queue-sample-interval-us", type=int, default=200, help="bottleneck_queue.csv 固定采样间隔 us。默认 200。")
-    parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FreqCCv4 gate trace；绘制 Delivery Rate/TrustedBw 细节图时应开启。")
-    parser.add_argument("--gate-trace-mode", choices=("off", "round_only", "sampled_pacing", "full"), default="round_only", help="FreqCCv4 gate trace 粒度。细节图建议 sampled_pacing。")
-    parser.add_argument("--freqccv4-config", default=str(DEFAULT_FREQCCV4_CONFIG), help="freqccv4 配置文件路径；默认保持现有 freqccv4_default.conf。")
+    parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FBBR gate trace；绘制 Delivery Rate/TrustedBw 细节图时应开启。")
+    parser.add_argument("--gate-trace-mode", choices=("off", "round_only", "sampled_pacing", "full"), default="round_only", help="FBBR gate trace 粒度。细节图建议 sampled_pacing。")
+    parser.add_argument("--fbbr-config", dest="fbbr_config", default=str(DEFAULT_FBBR_CONFIG), help="FBBR 配置文件路径；默认使用 fbbr_default.conf。")
     parser.add_argument("--seed", type=int, default=1, help="ns-3 RNG seed。默认 1。")
     parser.add_argument("--run-id", type=int, default=1, help="ns-3 RNG run id。默认 1。")
     parser.add_argument("--sample-step-s", type=float, default=0.1, help="画图重采样时间步长。默认 0.1s。")

@@ -17,7 +17,6 @@
 #include "ns3/core-module.h"
 #include "ns3/dqc-module.h"
 #include "ns3/fbbr_sender.h"
-#include "ns3/freqccv4_sender.h"
 #include "ns3/internet-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
 #include "ns3/network-module.h"
@@ -51,10 +50,8 @@ NS_LOG_COMPONENT_DEFINE("generic-p2p-switch-flows");
 
 namespace {
 
-const char kDefaultFreqCCv4Config[] =
-    "/home/wkd/BBR_ICC/NS3.27/examples/CCconfig/freqccv4_default.conf";
 const char kDefaultFBBRConfig[] =
-    "/home/wkd/BBR_ICC/NS3.27/examples/CCconfig/fbbr_default.conf";
+    "/home/wkd/FreqBBR/NS3.27/examples/CCconfig/fbbr_default.conf";
 const uint32_t kDefaultEndpointQueueBytes = 1024u * 1024u * 1024u;
 
 struct AlgorithmSpec
@@ -62,7 +59,6 @@ struct AlgorithmSpec
     dqc::CongestionControlType cc;
     std::string display_name;
     bool ecn;
-    bool is_freqccv4;
     bool is_fbbr;
 };
 
@@ -123,9 +119,8 @@ struct FlowConfig
     double stop_time_s;
     uint64_t sender_rate_cap_bps;
     std::vector<RateStep> rate_cap_schedule;
-    uint64_t freqccv4_cruise_baseline_cap_bps;
+    uint64_t fbbr_cruise_baseline_cap_bps;
     std::string config_path;
-    dqc::FreqBbrConfig freqccv4_config;
     dqc::FBBRConfig fbbr_config;
 };
 
@@ -211,23 +206,6 @@ ToLower(std::string value)
     return value;
 }
 
-std::string
-NormalizeAlgoName(const std::string& value)
-{
-    std::string out;
-    const std::string lower = ToLower(Trim(value));
-    for (size_t i = 0; i < lower.size(); ++i)
-    {
-        const char c = lower[i];
-        if (c == '-' || c == '_' || c == ' ')
-        {
-            continue;
-        }
-        out.push_back(c);
-    }
-    return out;
-}
-
 bool
 ParseBoolValue(const std::string& value, bool* out)
 {
@@ -307,7 +285,7 @@ WarnConfigLine(const std::string& path,
                uint32_t line_no,
                const std::string& message)
 {
-    std::cerr << "[freqccv4-config warning] " << path << ":" << line_no << ": "
+    std::cerr << "[fbbr-config warning] " << path << ":" << line_no << ": "
               << message << std::endl;
 }
 
@@ -476,21 +454,6 @@ SetCommonFrequencyConfigValue(Config* config,
 
 bool
 SetFBBRConfigValue(dqc::FBBRConfig* config,
-                   const std::string& key,
-                   const std::string& value,
-                   const std::string& path,
-                   uint32_t line_no)
-{
-    if (dqc::SetFBBRFrequencySearchConfigValue(&config->frequency_search, key, value))
-    {
-        return true;
-    }
-    return SetCommonFrequencyConfigValue(
-        config, key, value, path, line_no);
-}
-
-bool
-SetFreqBbrConfigValue(dqc::FreqBbrConfig* config,
                       const std::string& key,
                       const std::string& value,
                       const std::string& path,
@@ -716,56 +679,6 @@ LoadFBBRConfig(const std::string& path, dqc::FBBRConfig* config)
     return true;
 }
 
-bool
-LoadFreqBbrConfig(const std::string& path, dqc::FreqBbrConfig* config)
-{
-    if (path.empty())
-    {
-        return false;
-    }
-
-    std::ifstream in(path.c_str());
-    if (!in.is_open())
-    {
-        std::cerr << "[freqccv4-config warning] unable to open config: " << path
-                  << "; using built-in defaults" << std::endl;
-        return false;
-    }
-
-    std::string line;
-    uint32_t line_no = 0;
-    while (std::getline(in, line))
-    {
-        ++line_no;
-        const size_t comment = line.find('#');
-        if (comment != std::string::npos)
-        {
-            line = line.substr(0, comment);
-        }
-        line = Trim(line);
-        if (line.empty())
-        {
-            continue;
-        }
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos)
-        {
-            WarnConfigLine(path, line_no, "expected key=value");
-            continue;
-        }
-        const std::string key = Trim(line.substr(0, eq));
-        const std::string value = Trim(line.substr(eq + 1));
-        if (key.empty())
-        {
-            WarnConfigLine(path, line_no, "empty key");
-            continue;
-        }
-        SetFreqBbrConfigValue(config, key, value, path, line_no);
-    }
-    std::cout << "[freqccv4-config] loaded " << path << std::endl;
-    return true;
-}
-
 std::vector<std::string>
 SplitCommaList(const std::string& input)
 {
@@ -981,10 +894,10 @@ class ValidationBottleneckTracer
         const double interval_s = m_scenario.queue_sample_interval_us / 1e6;
         const uint64_t capacity_bps = RateAt(m_scenario.capacity_schedule, now_s);
         const uint64_t background_bps = RateAt(m_scenario.background_schedule, now_s);
-        uint32_t active = 0;
-        for (const auto& flow : m_flows)
-        {
-            if ((flow.algo.is_freqccv4 || flow.algo.is_fbbr) &&
+    uint32_t active = 0;
+    for (const auto& flow : m_flows)
+    {
+            if (flow.algo.is_fbbr &&
                 flow.start_time_s <= now_s &&
                 now_s < flow.stop_time_s)
             {
@@ -1069,12 +982,9 @@ EmitRunMeta(const ScenarioConfig& scenario, const std::vector<FlowConfig>& flows
     if (!out.is_open()) return;
     const std::string algorithm = flows.empty()
         ? "unknown" : flows.front().algo.display_name;
-    std::string freqccv4_config_path;
     std::string fbbr_config_path;
     for (const auto& flow : flows)
     {
-        if (flow.algo.is_freqccv4 && freqccv4_config_path.empty())
-            freqccv4_config_path = flow.config_path;
         if (flow.algo.is_fbbr && fbbr_config_path.empty())
             fbbr_config_path = flow.config_path;
     }
@@ -1127,10 +1037,10 @@ EmitRunMeta(const ScenarioConfig& scenario, const std::vector<FlowConfig>& flows
         }
         out << "]";
     }
-    out << "],\n  \"freqccv4_cruise_baseline_caps_bps\": [";
+    out << "],\n  \"fbbr_cruise_baseline_caps_bps\": [";
     for (size_t i = 0; i < flows.size(); ++i)
         out << (i ? ", " : "")
-            << flows[i].freqccv4_cruise_baseline_cap_bps;
+            << flows[i].fbbr_cruise_baseline_cap_bps;
     out << "],\n  \"background_schedule\": [";
     for (size_t i = 0; i < scenario.background_schedule.size(); ++i)
         out << (i ? "," : "") << "{\"time_s\":"
@@ -1141,9 +1051,7 @@ EmitRunMeta(const ScenarioConfig& scenario, const std::vector<FlowConfig>& flows
         out << (i ? "," : "") << "{\"time_s\":"
             << scenario.capacity_schedule[i].time_s << ",\"rate_bps\":"
             << scenario.capacity_schedule[i].rate_bps << "}";
-    out << "],\n  \"freqccv4_config\": \""
-        << JsonEscape(freqccv4_config_path) << "\",\n"
-        << "  \"fbbr_config\": \""
+    out << "],\n  \"fbbr_config\": \""
         << JsonEscape(fbbr_config_path) << "\",\n"
         << "  \"git_commit\": \"" << JsonEscape(commit) << "\",\n"
         << "  \"dirty_worktree\": " << (dirty ? "true" : "false") << "\n}\n";
@@ -1185,7 +1093,7 @@ UpdateSenderFairShares(std::vector<Ptr<DqcSender>>* senders,
     uint32_t active = 0;
     for (const auto& flow : *flows)
     {
-        active += (flow.algo.is_freqccv4 || flow.algo.is_fbbr) &&
+        active += flow.algo.is_fbbr &&
                   flow.start_time_s <= time_s &&
                   time_s < flow.stop_time_s;
     }
@@ -1195,7 +1103,7 @@ UpdateSenderFairShares(std::vector<Ptr<DqcSender>>* senders,
         ? (capacity - background) / active : 0;
     for (size_t i = 0; i < senders->size(); ++i)
     {
-        if ((*flows)[i].algo.is_freqccv4 || (*flows)[i].algo.is_fbbr)
+        if ((*flows)[i].algo.is_fbbr)
             (*senders)[i]->SetFreqCCFairShareBandwidth(fair);
     }
 }
@@ -1203,44 +1111,39 @@ UpdateSenderFairShares(std::vector<Ptr<DqcSender>>* senders,
 AlgorithmSpec
 ParseAlgorithm(const std::string& name)
 {
-    const std::string key = NormalizeAlgoName(name);
-    if (key == "obbr")
+    const std::string key = Trim(name);
+    if (key == "oBBR")
     {
-        return {dqc::kOBBR, "oBBR", false, false, false};
+        return {dqc::kOBBR, "oBBR", false, false};
     }
-    if (key == "bbrv2plus" || key == "bbr2plus")
+    if (key == "BBRv2plus")
     {
-        return {dqc::kBBRv2Plus, "BBRv2plus", false, false, false};
+        return {dqc::kBBRv2Plus, "BBRv2plus", false, false};
     }
-    if (key == "bbrv2plusecn" || key == "bbr2plusecn")
+    if (key == "BBRv2plusEcn")
     {
-        return {dqc::kBBRv2PlusEcn, "BBRv2plusEcn", true, false, false};
+        return {dqc::kBBRv2PlusEcn, "BBRv2plusEcn", true, false};
     }
-    if (key == "freqccv4")
+    if (key == "FBBR")
     {
-        return {dqc::kFreqCCv4, "FreqCCv4", false, true, false};
+        return {dqc::kFBBR, "FBBR", false, true};
     }
-    if (key == "freqccv4adaptive")
+    if (key == "FBBR-adaptive")
     {
-        return {dqc::kFreqCCv4Adaptive, "FreqCCv4-adaptive", false, true, false};
+        return {dqc::kFBBRAdaptive, "FBBR-adaptive", false, true};
     }
-    if (key == "freqccv4hybrid")
+    if (key == "FreqCCv3")
     {
-        return {dqc::kFreqCCv4Hybrid, "FreqCCv4-hybrid", false, true, false};
+        return {dqc::kFreqCCv3, "FreqCCv3", false, true};
     }
-    if (key == "fbbr")
+    if (key == "BBRv2")
     {
-        return {dqc::kFBBR, "F-BBR", false, false, true};
-    }
-    if (key == "bbrv2" || key == "bbr2")
-    {
-        return {dqc::kBBRv2, "BBRv2", false, false, false};
+        return {dqc::kBBRv2, "BBRv2", false, false};
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: oBBR, BBRv2plus, "
-                                              "FreqCCv4, FreqCCv4-adaptive, "
-                                              "FreqCCv4-hybrid, "
-                                              "F-BBR, BBRv2)");
+                                              "FBBR, FBBR-adaptive, "
+                                              "FreqCCv3, BBRv2)");
 }
 
 std::string
@@ -1339,13 +1242,6 @@ AttachTraceCallbacks(Ptr<DqcSender> send_app,
             MakeCallback(&DqcTrace::OnRttFreqAnalysis, trace));
     }
     if (trace_enable &
-        (DqcTraceEnable::E_DQC_FREQCCV4_LOAD |
-         DqcTraceEnable::E_DQC_FREQCCV4_GATE))
-    {
-        send_app->SetFreqCCv4LoadTraceFuc(
-            MakeCallback(&DqcTrace::OnFreqCCv4Load, trace));
-    }
-    if (trace_enable &
         (DqcTraceEnable::E_DQC_FBBR_LOAD |
          DqcTraceEnable::E_DQC_FBBR_GATE))
     {
@@ -1386,14 +1282,6 @@ BuildTraceEnableMask(const ScenarioConfig& scenario,
     }
     for (size_t i = 0; i < flows.size(); ++i)
     {
-        if (flows[i].algo.is_freqccv4)
-        {
-            trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_LOAD;
-            if (scenario.enable_convergence_gate_trace)
-            {
-                trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_GATE;
-            }
-        }
         if (flows[i].algo.is_fbbr)
         {
             trace_enable |= DqcTraceEnable::E_DQC_FBBR_LOAD;
@@ -1453,23 +1341,7 @@ InstallDqcFlow(const FlowConfig& flow,
             ClampToU32(flow.sender_rate_cap_bps, "initialRates"));
     }
 
-    if (flow.algo.is_freqccv4)
-    {
-        const uint64_t fair_share_bps =
-            std::max<uint64_t>(1, scenario.service_rate_bps / scenario.n_flows);
-        send_app->ConfigureFreqBbr(flow.freqccv4_config, flow.index);
-        send_app->ConfigureFreqCCv4ConvergenceGate(
-            scenario.enable_convergence_gate_trace,
-            scenario.enable_convergence_gate_control,
-            scenario.gate_trace_mode,
-            scenario.gate_trace_sample_interval_us);
-        send_app->SetFreqCCIntervalWindowMultiplier(
-            scenario.interval_window_rtt_mult);
-        send_app->SetFreqCCFairShareBandwidth(fair_share_bps);
-        send_app->SetFreqCCv4CruiseBaselineCap(
-            flow.freqccv4_cruise_baseline_cap_bps);
-    }
-    else if (flow.algo.is_fbbr)
+    if (flow.algo.is_fbbr)
     {
         const uint64_t fair_share_bps =
             std::max<uint64_t>(1, scenario.service_rate_bps / scenario.n_flows);
@@ -1479,13 +1351,11 @@ InstallDqcFlow(const FlowConfig& flow,
             scenario.enable_convergence_gate_control,
             scenario.gate_trace_mode,
             scenario.gate_trace_sample_interval_us);
+        send_app->SetFreqCCIntervalWindowMultiplier(
+            scenario.interval_window_rtt_mult);
         send_app->SetFreqCCFairShareBandwidth(fair_share_bps);
-        if (scenario.enable_equivalence_audit)
-        {
-            std::ostringstream prefix;
-            prefix << scenario.trace_path << "flow" << (flow.index + 1);
-            send_app->SetEquivalenceAuditTracePrefix(prefix.str());
-        }
+        send_app->SetFBBRCruiseBaselineCap(
+            flow.fbbr_cruise_baseline_cap_bps);
     }
 
     AttachTraceCallbacks(send_app, recv_app, trace, stat, trace_enable);
@@ -1505,9 +1375,8 @@ BuildFlowConfigs(uint32_t n_flows,
                  const std::string& stop_times,
                  const std::string& initial_rates,
                  const std::string& rate_schedules,
-                 const std::string& freqccv4_cruise_base_caps,
+                 const std::string& fbbr_cruise_base_caps,
                  const std::string& config_paths,
-                 const std::string& freqccv4_config_path,
                  const std::string& fbbr_config_path,
                  const std::string& obbr_config_path,
                  const std::string& bbrv2plus_config_path,
@@ -1525,8 +1394,8 @@ BuildFlowConfigs(uint32_t n_flows,
     const std::vector<std::vector<RateStep>> expanded_rate_schedules =
         ExpandRateScheduleList(rate_schedules, n_flows, rate_caps);
     const std::vector<uint64_t> cruise_baseline_caps =
-        ExpandRateList(freqccv4_cruise_base_caps, n_flows, "0",
-                       "freqccv4CruiseBaseCaps");
+        ExpandRateList(fbbr_cruise_base_caps, n_flows, "0",
+                       "fbbrCruiseBaseCaps");
     const std::vector<std::string> config_values =
         ExpandStringList(config_paths, n_flows, "", "configPaths");
 
@@ -1541,15 +1410,11 @@ BuildFlowConfigs(uint32_t n_flows,
         flow.stop_time_s = stop_values[i];
         flow.rate_cap_schedule = expanded_rate_schedules[i];
         flow.sender_rate_cap_bps = RateAt(flow.rate_cap_schedule, 0.0);
-        flow.freqccv4_cruise_baseline_cap_bps = cruise_baseline_caps[i];
+        flow.fbbr_cruise_baseline_cap_bps = cruise_baseline_caps[i];
 
         if (!config_values[i].empty())
         {
             flow.config_path = config_values[i];
-        }
-        else if (flow.algo.is_freqccv4)
-        {
-            flow.config_path = freqccv4_config_path;
         }
         else if (flow.algo.is_fbbr)
         {
@@ -1569,11 +1434,7 @@ BuildFlowConfigs(uint32_t n_flows,
             flow.config_path = bbrv2_config_path;
         }
 
-        if (flow.algo.is_freqccv4)
-        {
-            LoadFreqBbrConfig(flow.config_path, &flow.freqccv4_config);
-        }
-        else if (flow.algo.is_fbbr)
+        if (flow.algo.is_fbbr)
         {
             LoadFBBRConfig(flow.config_path, &flow.fbbr_config);
         }
@@ -1790,16 +1651,8 @@ RunScenario(const ScenarioConfig& scenario,
     for (uint32_t i = 0; i < scenario.n_flows; ++i)
     {
         uint32_t flow_trace_enable = trace_enable &
-            ~(DqcTraceEnable::E_DQC_FREQCCV4_LOAD |
-              DqcTraceEnable::E_DQC_FREQCCV4_GATE |
-              DqcTraceEnable::E_DQC_FBBR_LOAD |
+            ~(DqcTraceEnable::E_DQC_FBBR_LOAD |
               DqcTraceEnable::E_DQC_FBBR_GATE);
-        if (flows[i].algo.is_freqccv4)
-        {
-            flow_trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_LOAD;
-            if (scenario.enable_convergence_gate_trace)
-                flow_trace_enable |= DqcTraceEnable::E_DQC_FREQCCV4_GATE;
-        }
         if (flows[i].algo.is_fbbr)
         {
             flow_trace_enable |= DqcTraceEnable::E_DQC_FBBR_LOAD;
@@ -1929,10 +1782,10 @@ PrintConfiguration(const ScenarioConfig& scenario,
                           << step.rate_bps;
             }
         }
-        if (flows[i].freqccv4_cruise_baseline_cap_bps > 0)
+        if (flows[i].fbbr_cruise_baseline_cap_bps > 0)
         {
             std::cout << ", cruise_baseline_cap_bps="
-                      << flows[i].freqccv4_cruise_baseline_cap_bps;
+                      << flows[i].fbbr_cruise_baseline_cap_bps;
         }
         if (!flows[i].config_path.empty())
         {
@@ -1955,7 +1808,7 @@ main(int argc, char* argv[])
     std::string stop_times = "";
     std::string initial_rates = "0";
     std::string rate_schedules = "";
-    std::string freqccv4_cruise_base_caps = "0";
+    std::string fbbr_cruise_base_caps = "0";
     std::string per_flow_app_rate_limits = "";
     std::string background_rate_schedule = "";
     std::string capacity_schedule = "";
@@ -1994,7 +1847,6 @@ main(int argc, char* argv[])
     uint64_t gate_trace_sample_interval_us = 10000;
     double interval_window_rtt_mult = 1.0;
 
-    std::string freqccv4_config = kDefaultFreqCCv4Config;
     std::string fbbr_config = kDefaultFBBRConfig;
     std::string obbr_config = "";
     std::string bbrv2plus_config = "";
@@ -2011,7 +1863,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FreqCCv4, FreqCCv4-adaptive, FreqCCv4-hybrid, F-BBR, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",
@@ -2033,9 +1885,9 @@ main(int argc, char* argv[])
                  "Per-flow time:rate steps; separate flows with @, e.g. "
                  "0:20Mbps,6:55Mbps@0:20Mbps,6:55Mbps",
                  rate_schedules);
-    cmd.AddValue("freqccv4CruiseBaseCaps",
-                 "Per-flow FreqCCv4 CRUISE baseline caps; 0 disables",
-                 freqccv4_cruise_base_caps);
+    cmd.AddValue("fbbrCruiseBaseCaps",
+                 "Per-flow FBBR CRUISE baseline caps; 0 disables",
+                 fbbr_cruise_base_caps);
     cmd.AddValue("backgroundRateSchedule",
                  "Comma list of time:rate steps for fixed UDP background",
                  background_rate_schedule);
@@ -2043,7 +1895,7 @@ main(int argc, char* argv[])
                  "Comma list of time:rate bottleneck capacity steps",
                  capacity_schedule);
     cmd.AddValue("configPaths",
-                 "Comma list of per-flow config paths; FreqCCv4 paths are loaded",
+                 "Comma list of per-flow config paths; FBBR/FreqCCv3 paths are loaded",
                  config_paths);
     cmd.AddValue("accessRate",
                  "Sender/receiver access link data rate",
@@ -2117,25 +1969,24 @@ main(int argc, char* argv[])
                  "Optional DQC stream send buffer size; 0 keeps default",
                  stream_buffer_bytes);
     cmd.AddValue("enableConvergenceGateTrace",
-                 "Enable FreqCCv4 convergence gate CSV trace",
+                 "Enable FBBR convergence gate CSV trace",
                  enable_convergence_gate_trace);
     cmd.AddValue("enableConvergenceGateControl",
-                 "Gate FreqCCv4 CRUISE modulation by BBR stability",
+                 "Gate FBBR CRUISE modulation by BBR stability",
                  enable_convergence_gate_control);
     cmd.AddValue("gateTraceMode",
-                 "FreqCCv4 gate trace mode: off, round_only, sampled_pacing, full",
+                 "FBBR gate trace mode: off, round_only, sampled_pacing, full",
                  gate_trace_mode);
     cmd.AddValue("gateTraceSampleIntervalUs",
-                 "Minimum interval for sampled FreqCCv4 gate trace rows",
+                 "Minimum interval for sampled FBBR gate trace rows",
                  gate_trace_sample_interval_us);
     cmd.AddValue("intervalWinRttMult",
-                 "FreqCCv4 interval STFT window multiplier on min_rtt",
+                 "FBBR/FreqCCv3 interval STFT window multiplier on min_rtt",
                  interval_window_rtt_mult);
     cmd.AddValue("interval_win_rtt_mult",
                  "Alias of intervalWinRttMult",
                  interval_window_rtt_mult);
-    cmd.AddValue("freqccv4Config", "Default FreqCCv4 config path", freqccv4_config);
-    cmd.AddValue("fbbrConfig", "Default F-BBR config path", fbbr_config);
+    cmd.AddValue("fbbrConfig", "Default FBBR config path", fbbr_config);
     cmd.AddValue("obbrConfig", "oBBR config path metadata", obbr_config);
     cmd.AddValue("bbrv2plusConfig",
                  "BBRv2plus config path metadata",
@@ -2261,9 +2112,8 @@ main(int argc, char* argv[])
                          stop_times,
                          initial_rates,
                          rate_schedules,
-                         freqccv4_cruise_base_caps,
+                         fbbr_cruise_base_caps,
                          config_paths,
-                         freqccv4_config,
                          fbbr_config,
                          obbr_config,
                          bbrv2plus_config,
