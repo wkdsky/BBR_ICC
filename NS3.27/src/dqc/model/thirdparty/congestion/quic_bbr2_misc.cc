@@ -4,6 +4,8 @@
 
 #include "quic_bbr2_misc.h"
 
+#include <cmath>
+
 #include "quic_bandwidth_sampler.h"
 #include "proto_bandwidth.h"
 #include "quic_logging.h"
@@ -81,6 +83,14 @@ Bbr2NetworkModel::Bbr2NetworkModel(const Bbr2Params* params,
       cwnd_gain_(cwnd_gain),
       pacing_gain_(pacing_gain) {}
 
+void Bbr2NetworkModel::SetMaxBandwidthSampleAttenuation(double factor) {
+  if (!std::isfinite(factor) || factor <= 0.0 || factor > 1.0) {
+    max_bandwidth_sample_attenuation_ = 1.0;
+    return;
+  }
+  max_bandwidth_sample_attenuation_ = factor;
+}
+
 void Bbr2NetworkModel::OnPacketSent(QuicTime sent_time,
                                     QuicByteCount bytes_in_flight,
                                     QuicPacketNumber packet_number,
@@ -129,6 +139,20 @@ void Bbr2NetworkModel::OnCongestionEventStart(
   congestion_event->sample_is_app_limited = sample.sample_is_app_limited;
   congestion_event->sample_max_bandwidth = sample.sample_max_bandwidth;
 
+  max_bandwidth_filter_input_ = QuicBandwidth::Zero();
+  if (!sample.sample_max_bandwidth.IsZero()) {
+    const long double attenuated_bps =
+        static_cast<long double>(
+            sample.sample_max_bandwidth.ToBitsPerSecond()) *
+        static_cast<long double>(max_bandwidth_sample_attenuation_);
+    const int64_t filter_input_bps = static_cast<int64_t>(std::llround(
+        std::max<long double>(1.0L, std::min<long double>(
+            attenuated_bps,
+            static_cast<long double>(std::numeric_limits<int64_t>::max())))));
+    max_bandwidth_filter_input_ =
+        QuicBandwidth::FromBitsPerSecond(filter_input_bps);
+  }
+
   if (sample.last_packet_send_state.is_valid) {
     congestion_event->last_packet_send_state = sample.last_packet_send_state;
     congestion_event->last_sample_is_app_limited =
@@ -144,8 +168,8 @@ void Bbr2NetworkModel::OnCongestionEventStart(
         << acked_packets.size()
         << " packets have been acked, but sample_max_bandwidth is zero.";
     if (!sample.sample_is_app_limited ||
-        sample.sample_max_bandwidth > MaxBandwidth()) {
-      max_bandwidth_filter_.Update(congestion_event->sample_max_bandwidth);
+        max_bandwidth_filter_input_ > MaxBandwidth()) {
+      max_bandwidth_filter_.Update(max_bandwidth_filter_input_);
     }
   }
 

@@ -411,25 +411,62 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
     max_bandwidth_filter_.ForceSet(bandwidth);
   }
 
+  // Scale only the delivery-rate sample that enters the max-bandwidth
+  // filter.  The sampler output, congestion-event sample, and latest-rate
+  // signals remain raw so measurement users do not observe a modified
+  // delivery rate.  The default factor is 1, preserving native BBRv2.
+  void SetMaxBandwidthSampleAttenuation(double factor);
+  double max_bandwidth_sample_attenuation() const {
+    return max_bandwidth_sample_attenuation_;
+  }
+  QuicBandwidth max_bandwidth_filter_input() const {
+    return max_bandwidth_filter_input_;
+  }
+
   void OnApplicationLimited() { bandwidth_sampler_.OnAppLimited(); }
   void OnEcnUpdate();
 
-  // Calculates BDP using the current MaxBandwidth.
+  // Calculates BDP using an opt-in per-sender bandwidth override when present,
+  // otherwise using the bandwidth supplied by the caller. The override is
+  // unset by default, so native BBRv2-family senders keep their old behavior.
   QuicByteCount BDP() const {
     return BDP(MaxBandwidth());
   }
 
   QuicByteCount BDP(QuicBandwidth bandwidth) const {
-    return bandwidth * MinRtt();
+    return BdpBandwidth(bandwidth) * MinRtt();
   }
 
   QuicByteCount BDP(QuicBandwidth bandwidth, float gain) const {
-    return bandwidth * MinRtt() * gain;
+    return BdpBandwidth(bandwidth) * MinRtt() * gain;
+  }
+
+  void SetBdpBandwidthOverride(QuicBandwidth bandwidth) {
+    bdp_bandwidth_override_ = bandwidth;
+  }
+
+  void ClearBdpBandwidthOverride() {
+    bdp_bandwidth_override_ = QuicBandwidth::Zero();
+  }
+
+  bool HasBdpBandwidthOverride() const {
+    return !bdp_bandwidth_override_.IsZero() &&
+           !bdp_bandwidth_override_.IsInfinite();
+  }
+
+  QuicBandwidth BdpBandwidth() const {
+    return BdpBandwidth(MaxBandwidth());
   }
 
   TimeDelta MinRtt() const { return min_rtt_filter_.Get(); }
 
   QuicTime MinRttTimestamp() const { return min_rtt_filter_.GetTimestamp(); }
+
+  // Replace RTprop and restart its PROBE_RTT expiry interval at |now|.
+  // Callers must provide an independently validated empty-queue RTT sample.
+  void ForceUpdateMinRtt(TimeDelta min_rtt, QuicTime now) {
+    min_rtt_filter_.ForceUpdate(min_rtt, now);
+  }
 
   // TODO(wub): If we do this too frequently, we can potentailly postpone
   // PROBE_RTT indefinitely. Observe how it works in production and improve it.
@@ -582,6 +619,10 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   }
 
  private:
+  QuicBandwidth BdpBandwidth(QuicBandwidth fallback) const {
+    return HasBdpBandwidthOverride() ? bdp_bandwidth_override_ : fallback;
+  }
+
   // Called when a new round trip starts.
   void OnNewRound();
 
@@ -595,6 +636,9 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   // The filter that tracks the maximum bandwidth over multiple recent round
   // trips.
   Bbr2MaxBandwidthFilter max_bandwidth_filter_;
+  double max_bandwidth_sample_attenuation_ = 1.0;
+  QuicBandwidth max_bandwidth_filter_input_ = QuicBandwidth::Zero();
+  QuicBandwidth bdp_bandwidth_override_ = QuicBandwidth::Zero();
   MinRttFilter min_rtt_filter_;
 
   // Bytes lost in the current round. Updated once per congestion event.

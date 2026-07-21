@@ -179,6 +179,76 @@ struct FBBRConfig {
   double waveform_max_app_limited_sample_ratio = 0.25;
   double waveform_max_interpolation_gap_period_ratio = 0.10;
 
+  // FBBR-hybrid only: quantified regime classifier and actuator.  The
+  // legacy FBBR and FBBR-adaptive pipelines intentionally do not read these
+  // fields.
+  double fbbr_regime_long_top_horizontal_duration_ratio = 0.20;
+  double fbbr_regime_long_bottom_horizontal_duration_ratio = 0.30;
+  double fbbr_regime_actuator_midpoint_trigger_ratio = 0.50;
+  uint32_t fbbr_wave_fidelity_no_wave_trigger_windows = 2;
+  bool fbbr_wave_fidelity_stop_on_either_wave = true;
+  uint32_t fbbr_wave_fidelity_retry_window_advance_periods = 1;
+
+  double waveform_activity_amplitude_noise_multiplier = 6.0;
+  double waveform_activity_min_level_ratio = 0.02;
+  double waveform_activity_step_noise_multiplier = 3.0;
+  double waveform_activity_min_normalized_step_slope = 3.5;
+  uint32_t waveform_activity_min_active_steps = 4;
+  double waveform_activity_min_active_step_ratio = 0.10;
+  double waveform_activity_min_directional_change_ratio = 0.20;
+  double waveform_activity_min_significant_path_ratio = 0.80;
+  uint32_t waveform_activity_min_slope_reversals = 1;
+
+  double waveform_horizontal_continuous_min_duration_ratio = 0.15;
+  double waveform_horizontal_min_valid_coverage_ratio = 0.85;
+  double waveform_horizontal_min_flat_fraction = 0.90;
+  double waveform_horizontal_max_local_slope_ratio = 0.10;
+  double waveform_horizontal_min_side_slope_ratio = 0.25;
+  double waveform_horizontal_min_boundary_kink_ratio = 0.25;
+  double waveform_horizontal_max_level_span_ratio = 0.10;
+  double waveform_horizontal_max_total_drift_ratio = 0.05;
+  double waveform_horizontal_min_side_change_ratio = 0.10;
+  double waveform_horizontal_amplitude_noise_multiplier = 6.0;
+  double waveform_horizontal_level_span_noise_multiplier = 4.0;
+  double waveform_horizontal_slope_noise_multiplier = 3.0;
+  double waveform_horizontal_extreme_distance_ratio = 0.10;
+
+  double waveform_repeated_clip_max_period_error_ratio = 0.15;
+  double waveform_repeated_clip_max_level_delta_ratio = 0.05;
+  double waveform_repeated_clip_contact_level_tolerance_ratio = 0.05;
+  uint32_t waveform_repeated_clip_min_contact_samples_per_cycle = 2;
+  uint32_t waveform_repeated_clip_min_total_contact_samples = 4;
+  double waveform_repeated_clip_min_contact_sample_ratio = 0.05;
+  double waveform_repeated_clip_min_contact_span_ratio_of_window = 0.50;
+  double waveform_repeated_clip_min_pooled_flat_fraction = 0.90;
+  double waveform_repeated_clip_min_verified_boundary_fraction = 0.75;
+  double waveform_repeated_clip_min_outside_excursion_ratio = 0.10;
+  double waveform_repeated_clip_min_extrapolated_overshoot_ratio = 0.05;
+  double waveform_repeated_clip_merge_gap_ratio = 0.025;
+  double waveform_repeated_clip_max_missing_gap_ratio = 0.05;
+
+  double waveform_shoulder_min_half_overlap_ratio = 0.75;
+  double waveform_shoulder_min_side_change_ratio = 0.15;
+  double waveform_shoulder_max_residual_cycle_period_error_ratio = 0.20;
+  double waveform_shoulder_min_residual_cycle_leg_duration_ratio = 0.15;
+
+  double waveform_middle_min_duration_ratio = 0.05;
+  double waveform_middle_max_duration_ratio = 0.35;
+  double waveform_middle_context_duration_ratio = 0.10;
+  double waveform_middle_min_trend_slope_ratio = 0.20;
+  double waveform_middle_max_context_slope_delta_ratio = 0.75;
+  double waveform_middle_min_slope_mismatch_ratio = 0.50;
+  double waveform_middle_min_mismatching_sample_ratio = 0.25;
+  uint32_t waveform_middle_min_mismatching_samples = 2;
+  uint32_t waveform_middle_min_consecutive_mismatching_samples = 2;
+  double waveform_middle_min_bridge_deviation_ratio = 0.05;
+  double waveform_middle_noise_multiplier = 3.0;
+  double waveform_middle_max_mask_ratio_per_cycle = 0.35;
+
+  double fbbr_regime_period_tolerance_ratio = 0.20;
+  double fbbr_regime_min_periodicity_correlation = 0.50;
+  bool fbbr_regime_periodic_upper_clip_is_hard_veto = true;
+
   std::string trace_gate_trace_mode = "round_only";
   uint64_t trace_gate_trace_sample_interval_us = 10000;
   bool trace_enable_cruise_window_trace = true;
@@ -219,6 +289,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static bool RunTrustedBwPacingSelfTest(std::ostream& os);
   static bool RunWaveformCruiseSelfTest(std::ostream& os);
   static bool RunFbbrBaselineSelfTest(std::ostream& os);
+  static bool RunFbbrHybridSelfTest(std::ostream& os);
   static bool RunHybridBaselineSelfTest(std::ostream& os) {
     return RunFbbrBaselineSelfTest(os);
   }
@@ -476,6 +547,194 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     std::string invalid_reason = "not_analyzed";
   };
 
+  struct BicClippingDetectionResult {
+    bool valid = false;
+    bool top_clip = false;
+    bool bottom_clip = false;
+    bool both_clipped = false;
+    size_t top_motif_count = 0;
+    size_t bottom_motif_count = 0;
+    size_t selected_segment_count = 0;
+    double selected_score = std::numeric_limits<double>::infinity();
+    double top_clip_min_rounded_bic_margin = 0.0;
+    double bottom_clip_min_rounded_bic_margin = 0.0;
+    double top_clip_combined_rounded_bic_margin = 0.0;
+    double bottom_clip_combined_rounded_bic_margin = 0.0;
+    size_t top_clip_pair_sharp_motif_count = 0;
+    size_t bottom_clip_pair_sharp_motif_count = 0;
+    std::string invalid_reason = "not_analyzed";
+  };
+
+  enum class PeriodicSimilarityResult {
+    kMatch,
+    kNoMatch,
+    kInvalidInput,
+  };
+
+  enum class SrttClipCase {
+    kNone,
+    kU1PositiveShoulder,
+    kU2LongTopLine,
+    kU3RepeatedTopClip,
+    kL1NegativeShoulder,
+    kL2LongBottomLine,
+    kL3RepeatedBottomClip,
+  };
+
+  struct ContinuousHorizontalEvidence {
+    bool valid = false;
+    bool is_upper = false;
+    bool is_lower = false;
+    bool touches_left_edge = false;
+    bool touches_right_edge = false;
+    bool left_boundary_verified = false;
+    bool right_boundary_verified = false;
+    size_t start_index = 0;
+    size_t end_index = 0;
+    double start_s = 0.0;
+    double end_s = 0.0;
+    double duration_ratio_of_period = 0.0;
+    double level = 0.0;
+    double flat_fraction = 0.0;
+    double level_span_ratio = 0.0;
+    double robust_slope = 0.0;
+    double left_context_slope = 0.0;
+    double right_context_slope = 0.0;
+    double bic_linear_minus_constant = 0.0;
+  };
+
+  struct RepeatedClipLineEvidence {
+    bool valid = false;
+    bool is_upper = false;
+    double clip_level = 0.0;
+    uint32_t contact_fragment_count = 0;
+    uint32_t contact_sample_count = 0;
+    uint8_t contact_cycle_mask = 0;
+    double contact_sample_ratio = 0.0;
+    double contact_time_span_ratio_of_window = 0.0;
+    double pooled_flat_fraction = 0.0;
+    double contact_level_span_ratio = 0.0;
+    double cross_cycle_level_delta_ratio = 0.0;
+    double event_period_error_ratio =
+        std::numeric_limits<double>::infinity();
+    double verified_boundary_fraction = 0.0;
+    double extrapolated_overshoot_ratio = 0.0;
+  };
+
+  struct MiddleSequentialEvidence {
+    bool valid = false;
+    size_t start_index = 0;
+    size_t end_index = 0;
+    double duration_ratio_of_period = 0.0;
+    double left_context_slope = 0.0;
+    double right_context_slope = 0.0;
+    double reference_slope = 0.0;
+    double slope_mismatch_ratio = 0.0;
+    double bridge_deviation_ratio = 0.0;
+    double score = 0.0;
+  };
+
+  struct WaveActivityFeatures {
+    bool input_valid = false;
+    bool has_wave = false;
+    double amplitude = 0.0;
+    double noise_sigma = 0.0;
+    double amplitude_to_level_ratio = 0.0;
+    double step_threshold = 0.0;
+    double active_step_ratio = 0.0;
+    double up_change_ratio = 0.0;
+    double down_change_ratio = 0.0;
+    double significant_path_ratio = 0.0;
+    uint32_t slope_reversals = 0;
+    uint8_t active_cycle_mask = 0;
+    const char* failure_reason = "INVALID_INPUT";
+  };
+
+  struct SignalRegimeFeatures {
+    bool input_valid = false;
+    bool ordinary_wave_uses_raw_valid_view = false;
+    WaveActivityFeatures wave;
+    PeriodicSimilarityResult periodic =
+        PeriodicSimilarityResult::kInvalidInput;
+    bool periodic_similarity_input_valid = false;
+    bool periodic_similar = false;
+    bool upper_clip_periodic_veto = false;
+    bool lower_clip_ignored_for_periodic = false;
+    bool suspected_top_candidate = false;
+    bool suspected_bottom_candidate = false;
+    bool positive_shoulder = false;
+    bool negative_shoulder = false;
+    bool positive_shoulder_cycle_input_valid = false;
+    bool negative_shoulder_cycle_input_valid = false;
+    bool positive_shoulder_cycle_recognizable = false;
+    bool negative_shoulder_cycle_recognizable = false;
+    bool long_top_line = false;
+    bool long_bottom_line = false;
+    bool repeated_top_clip = false;
+    bool repeated_bottom_clip = false;
+    bool left_edge_line_masked = false;
+    bool right_edge_line_masked = false;
+    bool middle_sequential_masked = false;
+    uint32_t continuous_horizontal_count = 0;
+    double longest_top_line_ratio_of_period = 0.0;
+    double longest_bottom_line_ratio_of_period = 0.0;
+    double edge_mask_ratio = 0.0;
+    double middle_mask_ratio = 0.0;
+    double middle_best_slope_mismatch_ratio = 0.0;
+    double middle_best_bridge_deviation_ratio = 0.0;
+    double estimated_period_s = 0.0;
+    double estimated_srate_period_s = 0.0;
+    double response_srate_period_error_ratio =
+        std::numeric_limits<double>::infinity();
+    double periodicity_correlation = -1.0;
+    RepeatedClipLineEvidence top_repeated_clip;
+    RepeatedClipLineEvidence bottom_repeated_clip;
+  };
+
+  struct FbbrHybridRegimeFeatures {
+    bool input_valid = false;
+    SignalRegimeFeatures srtt;
+    SignalRegimeFeatures drate;
+    SrttClipCase selected_clip_case = SrttClipCase::kNone;
+    bool both_clip_directions = false;
+    bool clip_candidate_rejected_to_wave_fallback = false;
+    bool fallback_entered = false;
+    bool srtt_stats_valid = false;
+    double srtt_min_ms = 0.0;
+    double srtt_max_ms = 0.0;
+    bool drate_stats_valid = false;
+    double mindrate_bps = 0.0;
+    double maxdrate_bps = 0.0;
+    double meandrate_bps = 0.0;
+    double estimated_srate_period_s = 0.0;
+  };
+
+  struct FbbrRegimeContext {
+    bool max_rtt_valid = false;
+    double max_rtt_ms = 0.0;
+    bool rtprop_valid = false;
+    double rtprop_ms = 0.0;
+  };
+
+  struct FbbrHybridDecision {
+    WaveformClassification classification =
+        WaveformClassification::kInconclusive;
+    const char* rule_id = "";
+    bool update_max_rtt = false;
+    bool refresh_rtprop = false;
+    bool update_rtprop_drate = false;
+  };
+
+  struct FbbrHybridActuatorResult {
+    bool valid = false;
+    double next_baseline_bps = 0.0;
+    bool update_probed_bw = false;
+    double probed_bw_bps = 0.0;
+    double swing_bps = 0.0;
+    double reference_gap_bps = 0.0;
+    bool midpoint_triggered = false;
+  };
+
   struct WaveformWindowAnalysis {
     QuicTime probe_epoch_start = QuicTime::Zero();
     TimeDelta probe_epoch_rtt = TimeDelta::Zero();
@@ -542,7 +801,36 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool srtt_only_negative_half = false;
     bool srtt_only_positive_half = false;
     bool srtt_clip_ambiguous = false;
+    BicClippingDetectionResult bic_clipping;
+    bool true_bottom_clip_rtprop_refresh_applied = false;
+    double true_bottom_clip_rtprop_before_ms = 0.0;
+    double true_bottom_clip_rtprop_after_ms = 0.0;
+    double true_bottom_clip_min_rtt_timestamp_before_s = 0.0;
+    double true_bottom_clip_min_rtt_timestamp_after_s = 0.0;
+    double true_bottom_clip_probe_rtt_deadline_after_s = 0.0;
     bool srtt_match = false;
+    bool fbbr_hybrid_pipeline = false;
+    FbbrHybridRegimeFeatures hybrid_features;
+    FbbrHybridDecision hybrid_decision;
+    WaveformClassification unsuppressed_classification =
+        WaveformClassification::kInconclusive;
+    bool no_wave_triggered = false;
+    bool wave_fidelity_just_entered = false;
+    bool wave_fidelity_enhancement_active = false;
+    bool classification_suppressed_for_retry = false;
+    bool state_updates_suppressed_for_retry = false;
+    uint8_t retry_reason_mask = 0;
+    uint8_t srtt_no_wave_streak = 0;
+    uint8_t drate_no_wave_streak = 0;
+    uint64_t window_first_cycle_id = 0;
+    uint64_t window_second_cycle_id = 0;
+    double max_rtt_before_ms = 0.0;
+    double max_rtt_after_ms = 0.0;
+    double rtprop_drate_before_bps = 0.0;
+    double rtprop_drate_after_bps = 0.0;
+    double hybrid_swing_bps = 0.0;
+    double hybrid_reference_gap_bps = 0.0;
+    bool hybrid_midpoint_triggered = false;
     PlateauDetectionResult plateau;
     CycleCompletenessResult drate_without_middle_completeness;
     CycleCompletenessResult srtt_without_middle_completeness;
@@ -570,6 +858,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   void OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                              QuicTime now) override;
+  bool HasCustomProbeDownLogic() const override;
+  bool ShouldExitCustomProbeDown(QuicByteCount bytes_in_flight,
+                                 QuicByteCount bdp) const override;
+  float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
+                             float pacing_gain) const override;
   float GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase phase,
                            float cwnd_gain) const override;
   void OnCongestionEventStarted(
@@ -583,6 +876,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   void EnterCruise(QuicTime now);
   void LeaveCruise(QuicTime now);
+  static bool ShouldEnableRtpropProbeDown(
+      bool previous_cruise_rtprop_updated,
+      QuicByteCount bytes_in_flight,
+      QuicByteCount bdp);
+  static bool ShouldExitRtpropProbeDown(QuicByteCount bytes_in_flight,
+                                        QuicByteCount bdp);
   void ResetCruiseWindowState();
   void RunDueCruiseWindowAnalysis(QuicTime now);
   void AnalyzeCruiseWindow(QuicTime window_start,
@@ -597,6 +896,21 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void FinalizeCruise(QuicTime now);
   void ResetWaveformCruiseState(QuicTime now);
   void RunWaveformCruiseStateMachine(QuicTime now);
+  bool IsFbbrHybrid() const;
+  WaveformWindowAnalysis AnalyzeFbbrHybridWindow(
+      QuicTime window_start,
+      QuicTime window_end,
+      double window_periods,
+      bool extended_window) const;
+  void ApplyFbbrHybridClassification(
+      const WaveformWindowAnalysis& analysis,
+      QuicTime now);
+  void UpdateFbbrHybridRetryState(WaveformWindowAnalysis* analysis);
+  void ApplyFbbrHybridRegimeStateUpdates(
+      WaveformWindowAnalysis* trace_analysis,
+      QuicTime now);
+  void RefreshRtpropFromTrueBottomClip(WaveformWindowAnalysis* analysis,
+                                      QuicTime now);
   void ScheduleWaveformCollectionAfterSettle(QuicTime now,
                                              bool initial_settle);
   void StartWaveformCollectionAt(QuicTime cycle_start,
@@ -611,6 +925,21 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                                                QuicTime window_end,
                                                double window_periods,
                                                bool extended_window) const;
+  static double ComputeMaxBwAttenuationFactor(
+      double delivery_center_bps,
+      double actual_fluctuation_amplitude_bps);
+  uint64_t CurrentEmittedProbeAmplitudeBps() const;
+  double CurrentActualDeliveryFluctuationAmplitudeBps() const;
+  double CurrentMaxBwAttenuationFactor() const;
+  void ResetMaxBwAttenuationEstimator();
+  void UpdateMaxBwAttenuationEstimator(
+      double delivery_center_bps,
+      double actual_fluctuation_amplitude_bps,
+      double emitted_fluctuation_amplitude_bps);
+  void UpdateMaxBwAttenuationFromWaveform(
+      const WaveformWindowAnalysis& analysis);
+  void UpdateMaxBwAttenuationFromLegacyWindow(
+      const CruiseWindowResult& result);
   void EmitWaveformSearchTrace(const WaveformWindowAnalysis& analysis,
                                const std::string& action,
                                double baseline_before_bps,
@@ -842,6 +1171,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool srtt_negative_half_clipped = false;
     bool srtt_only_negative_half = false;
     bool srtt_only_positive_half = false;
+    bool bic_srtt_top_clip = false;
+    bool bic_srtt_bottom_clip = false;
     bool drate_positive_half_clipped = false;
     bool drate_only_negative_half = false;
     bool positive_half_clips_simultaneous = false;
@@ -851,6 +1182,63 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static WaveformClassification ClassifyWaveformState(
       const WaveformDecisionInputs& inputs,
       const char** decision_rule = nullptr);
+  static FbbrHybridDecision ClassifyFbbrHybridRegime(
+      const FbbrHybridRegimeFeatures& features,
+      const FbbrRegimeContext& context);
+  static FbbrHybridActuatorResult ComputeFbbrHybridInjectionBaseline(
+      WaveformClassification classification,
+      double mindrate_bps,
+      double maxdrate_bps,
+      double meandrate_bps,
+      bool rtprop_drate_valid,
+      double rtprop_drate_bps,
+      double midpoint_trigger_ratio,
+      double minimum_rate_bps);
+  WaveActivityFeatures DetectOrdinaryWaveActivity(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double period_s) const;
+  std::vector<ContinuousHorizontalEvidence>
+  DetectContinuousHorizontalSegments(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double period_s) const;
+  RepeatedClipLineEvidence DetectRepeatedClipLineContacts(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double period_s,
+      bool upper) const;
+  std::vector<MiddleSequentialEvidence>
+  DetectMiddleSequentialDisturbances(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      const std::vector<bool>& protected_mask,
+      double sample_step_s,
+      double period_s) const;
+  PeriodicSimilarityResult AnalyzeFbbrHybridPeriodicSimilarity(
+      const std::vector<double>& values,
+      const std::vector<bool>& original_valid,
+      const std::vector<bool>& periodic_valid,
+      double sample_step_s,
+      double period_s,
+      double srate_period_s,
+      bool verified_upper_clip,
+      SignalRegimeFeatures* features) const;
+  static double EstimateActualSignalPeriod(
+      const std::vector<double>& values,
+      const std::vector<bool>& valid,
+      double sample_step_s,
+      double nominal_period_s,
+      double* correlation);
+  static bool ShouldRefreshRtpropForTrueClip(bool top_clip,
+                                             bool bottom_clip);
+  static BicClippingDetectionResult DetectBicSrttClipping(
+      const std::vector<double>& srtt,
+      const std::vector<bool>& valid,
+      double noise_sigma);
   static const char* CruiseDetectorModeName(
       FBBRCruiseDetectorMode mode);
 
@@ -897,6 +1285,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   uint64_t minimum_pacing_rate_bps_;
   bool drain_completed_;
   bool in_cruise_;
+  bool current_cruise_rtprop_updated_;
+  bool previous_cruise_rtprop_updated_;
+  bool rtprop_probe_down_active_;
+  TimeDelta cruise_rtprop_at_entry_;
+  QuicByteCount latest_congestion_event_prior_inflight_;
   double cruise_modulation_freq_hz_;
   QuicTime cruise_start_time_;
   QuicTime next_cruise_window_start_;
@@ -911,6 +1304,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   QuicBandwidth current_injection_baseline_bw_;
   uint64_t current_probe_amplitude_bps_;
   uint64_t waveform_initial_probe_amplitude_bps_;
+  bool max_bw_response_observed_;
+  double max_bw_delivery_response_gain_;
+  double max_bw_observation_center_bps_;
+  double max_bw_observation_baseline_bps_;
+  double max_bw_actual_fluctuation_amplitude_bps_;
+  double max_bw_attenuation_factor_;
   mutable double current_probe_bw_phase_gain_;
   QuicTime probe_epoch_start_time_;
   TimeDelta probe_epoch_rtt_;
@@ -945,6 +1344,20 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   uint32_t baseline_adjustment_count_;
   uint32_t inconclusive_extension_count_;
   uint32_t waveform_inconclusive_amplification_count_;
+  bool fbbr_hybrid_max_rtt_valid_;
+  double fbbr_hybrid_max_rtt_ms_;
+  uint64_t fbbr_hybrid_max_rtt_source_cruise_id_;
+  bool fbbr_hybrid_rtprop_drate_valid_;
+  QuicBandwidth fbbr_hybrid_rtprop_drate_;
+  uint64_t fbbr_hybrid_rtprop_drate_source_cruise_id_;
+  uint8_t fbbr_hybrid_srtt_no_wave_streak_;
+  uint8_t fbbr_hybrid_drate_no_wave_streak_;
+  bool fbbr_hybrid_wave_fidelity_enhancement_active_;
+  uint8_t fbbr_hybrid_retry_reason_mask_;
+  uint64_t fbbr_hybrid_last_counted_window_second_cycle_id_;
+  uint32_t fbbr_hybrid_rolling_retry_count_;
+  bool fbbr_hybrid_regime_ii_seen_this_cruise_;
+  QuicBandwidth fbbr_hybrid_probed_bw_;
   uint32_t floor_clip_confirmation_count_;
   int waveform_last_clip_direction_;
   uint32_t waveform_decision_count_;
@@ -1008,6 +1421,67 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double waveform_inconclusive_signal_amplification_max_ratio_;
   double waveform_max_app_limited_sample_ratio_;
   double waveform_max_interpolation_gap_period_ratio_;
+
+  double fbbr_regime_long_top_horizontal_duration_ratio_;
+  double fbbr_regime_long_bottom_horizontal_duration_ratio_;
+  double fbbr_regime_actuator_midpoint_trigger_ratio_;
+  uint32_t fbbr_wave_fidelity_no_wave_trigger_windows_;
+  bool fbbr_wave_fidelity_stop_on_either_wave_;
+  uint32_t fbbr_wave_fidelity_retry_window_advance_periods_;
+  double waveform_activity_amplitude_noise_multiplier_;
+  double waveform_activity_min_level_ratio_;
+  double waveform_activity_step_noise_multiplier_;
+  double waveform_activity_min_normalized_step_slope_;
+  uint32_t waveform_activity_min_active_steps_;
+  double waveform_activity_min_active_step_ratio_;
+  double waveform_activity_min_directional_change_ratio_;
+  double waveform_activity_min_significant_path_ratio_;
+  uint32_t waveform_activity_min_slope_reversals_;
+  double waveform_horizontal_continuous_min_duration_ratio_;
+  double waveform_horizontal_min_valid_coverage_ratio_;
+  double waveform_horizontal_min_flat_fraction_;
+  double waveform_horizontal_max_local_slope_ratio_;
+  double waveform_horizontal_min_side_slope_ratio_;
+  double waveform_horizontal_min_boundary_kink_ratio_;
+  double waveform_horizontal_max_level_span_ratio_;
+  double waveform_horizontal_max_total_drift_ratio_;
+  double waveform_horizontal_min_side_change_ratio_;
+  double waveform_horizontal_amplitude_noise_multiplier_;
+  double waveform_horizontal_level_span_noise_multiplier_;
+  double waveform_horizontal_slope_noise_multiplier_;
+  double waveform_horizontal_extreme_distance_ratio_;
+  double waveform_repeated_clip_max_period_error_ratio_;
+  double waveform_repeated_clip_max_level_delta_ratio_;
+  double waveform_repeated_clip_contact_level_tolerance_ratio_;
+  uint32_t waveform_repeated_clip_min_contact_samples_per_cycle_;
+  uint32_t waveform_repeated_clip_min_total_contact_samples_;
+  double waveform_repeated_clip_min_contact_sample_ratio_;
+  double waveform_repeated_clip_min_contact_span_ratio_of_window_;
+  double waveform_repeated_clip_min_pooled_flat_fraction_;
+  double waveform_repeated_clip_min_verified_boundary_fraction_;
+  double waveform_repeated_clip_min_outside_excursion_ratio_;
+  double waveform_repeated_clip_min_extrapolated_overshoot_ratio_;
+  double waveform_repeated_clip_merge_gap_ratio_;
+  double waveform_repeated_clip_max_missing_gap_ratio_;
+  double waveform_shoulder_min_half_overlap_ratio_;
+  double waveform_shoulder_min_side_change_ratio_;
+  double waveform_shoulder_max_residual_cycle_period_error_ratio_;
+  double waveform_shoulder_min_residual_cycle_leg_duration_ratio_;
+  double waveform_middle_min_duration_ratio_;
+  double waveform_middle_max_duration_ratio_;
+  double waveform_middle_context_duration_ratio_;
+  double waveform_middle_min_trend_slope_ratio_;
+  double waveform_middle_max_context_slope_delta_ratio_;
+  double waveform_middle_min_slope_mismatch_ratio_;
+  double waveform_middle_min_mismatching_sample_ratio_;
+  uint32_t waveform_middle_min_mismatching_samples_;
+  uint32_t waveform_middle_min_consecutive_mismatching_samples_;
+  double waveform_middle_min_bridge_deviation_ratio_;
+  double waveform_middle_noise_multiplier_;
+  double waveform_middle_max_mask_ratio_per_cycle_;
+  double fbbr_regime_period_tolerance_ratio_;
+  double fbbr_regime_min_periodicity_correlation_;
+  bool fbbr_regime_periodic_upper_clip_is_hard_veto_;
 
   double min_cruise_cycles_per_window_;
   double cruise_window_step_ratio_;

@@ -526,6 +526,17 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
         config->FIELD = u32;                                                  \
         return true;                                                          \
     }
+#define SET_WAVEFORM_BOOL(KEY, FIELD)                                          \
+    if (key == KEY)                                                           \
+    {                                                                         \
+        if (!ParseBoolValue(value, &b))                                       \
+        {                                                                     \
+            WarnConfigLine(path, line_no, "invalid bool for " + key);         \
+            return false;                                                     \
+        }                                                                     \
+        config->FIELD = b;                                                    \
+        return true;                                                          \
+    }
 
     SET_WAVEFORM_DOUBLE("waveform.initial_settle_rtt_mult",
                         waveform_initial_settle_rtt_mult)
@@ -621,9 +632,70 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
                         waveform_max_app_limited_sample_ratio)
     SET_WAVEFORM_DOUBLE("waveform.max_interpolation_gap_period_ratio",
                         waveform_max_interpolation_gap_period_ratio)
+    SET_WAVEFORM_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
+    SET_WAVEFORM_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
+    SET_WAVEFORM_DOUBLE("fbbr.regime.actuator.midpoint_trigger_ratio", fbbr_regime_actuator_midpoint_trigger_ratio)
+    SET_WAVEFORM_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
+    SET_WAVEFORM_BOOL("fbbr.wave_fidelity.stop_on_either_wave", fbbr_wave_fidelity_stop_on_either_wave)
+    SET_WAVEFORM_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
+    SET_WAVEFORM_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.activity.min_level_ratio", waveform_activity_min_level_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.activity.step_noise_multiplier", waveform_activity_step_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.activity.min_normalized_step_slope", waveform_activity_min_normalized_step_slope)
+    SET_WAVEFORM_U32("waveform.activity.min_active_steps", waveform_activity_min_active_steps)
+    SET_WAVEFORM_DOUBLE("waveform.activity.min_active_step_ratio", waveform_activity_min_active_step_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.activity.min_directional_change_ratio", waveform_activity_min_directional_change_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.activity.min_significant_path_ratio", waveform_activity_min_significant_path_ratio)
+    SET_WAVEFORM_U32("waveform.activity.min_slope_reversals", waveform_activity_min_slope_reversals)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.continuous_min_duration_ratio", waveform_horizontal_continuous_min_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_valid_coverage_ratio", waveform_horizontal_min_valid_coverage_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_flat_fraction", waveform_horizontal_min_flat_fraction)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_local_slope_ratio", waveform_horizontal_max_local_slope_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_side_slope_ratio", waveform_horizontal_min_side_slope_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_boundary_kink_ratio", waveform_horizontal_min_boundary_kink_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_level_span_ratio", waveform_horizontal_max_level_span_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_total_drift_ratio", waveform_horizontal_max_total_drift_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_side_change_ratio", waveform_horizontal_min_side_change_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.amplitude_noise_multiplier", waveform_horizontal_amplitude_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.level_span_noise_multiplier", waveform_horizontal_level_span_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.slope_noise_multiplier", waveform_horizontal_slope_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.horizontal.extreme_distance_ratio", waveform_horizontal_extreme_distance_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_period_error_ratio", waveform_repeated_clip_max_period_error_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_level_delta_ratio", waveform_repeated_clip_max_level_delta_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_contact_level_tolerance_ratio", waveform_repeated_clip_contact_level_tolerance_ratio)
+    SET_WAVEFORM_U32("waveform.repeated_clip_min_contact_samples_per_cycle", waveform_repeated_clip_min_contact_samples_per_cycle)
+    SET_WAVEFORM_U32("waveform.repeated_clip_min_total_contact_samples", waveform_repeated_clip_min_total_contact_samples)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_contact_sample_ratio", waveform_repeated_clip_min_contact_sample_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_contact_span_ratio_of_window", waveform_repeated_clip_min_contact_span_ratio_of_window)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_pooled_flat_fraction", waveform_repeated_clip_min_pooled_flat_fraction)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_verified_boundary_fraction", waveform_repeated_clip_min_verified_boundary_fraction)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_outside_excursion_ratio", waveform_repeated_clip_min_outside_excursion_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_extrapolated_overshoot_ratio", waveform_repeated_clip_min_extrapolated_overshoot_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_merge_gap_ratio", waveform_repeated_clip_merge_gap_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_missing_gap_ratio", waveform_repeated_clip_max_missing_gap_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_half_overlap_ratio", waveform_shoulder_min_half_overlap_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_side_change_ratio", waveform_shoulder_min_side_change_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.shoulder.max_residual_cycle_period_error_ratio", waveform_shoulder_max_residual_cycle_period_error_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_residual_cycle_leg_duration_ratio", waveform_shoulder_min_residual_cycle_leg_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.min_duration_ratio", waveform_middle_min_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.max_duration_ratio", waveform_middle_max_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.context_duration_ratio", waveform_middle_context_duration_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.min_trend_slope_ratio", waveform_middle_min_trend_slope_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.max_context_slope_delta_ratio", waveform_middle_max_context_slope_delta_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.min_slope_mismatch_ratio", waveform_middle_min_slope_mismatch_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.min_mismatching_sample_ratio", waveform_middle_min_mismatching_sample_ratio)
+    SET_WAVEFORM_U32("waveform.middle.min_mismatching_samples", waveform_middle_min_mismatching_samples)
+    SET_WAVEFORM_U32("waveform.middle.min_consecutive_mismatching_samples", waveform_middle_min_consecutive_mismatching_samples)
+    SET_WAVEFORM_DOUBLE("waveform.middle.min_bridge_deviation_ratio", waveform_middle_min_bridge_deviation_ratio)
+    SET_WAVEFORM_DOUBLE("waveform.middle.noise_multiplier", waveform_middle_noise_multiplier)
+    SET_WAVEFORM_DOUBLE("waveform.middle.max_mask_ratio_per_cycle", waveform_middle_max_mask_ratio_per_cycle)
+    SET_WAVEFORM_DOUBLE("fbbr.regime.period_tolerance_ratio", fbbr_regime_period_tolerance_ratio)
+    SET_WAVEFORM_DOUBLE("fbbr.regime.min_periodicity_correlation", fbbr_regime_min_periodicity_correlation)
+    SET_WAVEFORM_BOOL("fbbr.regime.periodic_upper_clip_is_hard_veto", fbbr_regime_periodic_upper_clip_is_hard_veto)
 
 #undef SET_WAVEFORM_DOUBLE
 #undef SET_WAVEFORM_U32
+#undef SET_WAVEFORM_BOOL
 
     return SetCommonFrequencyConfigValue(
         config, key, value, path, line_no);
@@ -1141,6 +1213,10 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFBBRAdaptive, "FBBR-adaptive", false, true};
     }
+    if (key == "FBBR-hybrid")
+    {
+        return {dqc::kFBBRHybrid, "FBBR-hybrid", false, true};
+    }
     if (key == "FreqCCv3")
     {
         return {dqc::kFreqCCv3, "FreqCCv3", false, true};
@@ -1151,7 +1227,7 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
-                                              "FBBR, FBBR-adaptive, "
+                                              "FBBR, FBBR-adaptive, FBBR-hybrid, "
                                               "FreqCCv3, BBRv2)");
 }
 
@@ -1872,7 +1948,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FreqCCv3, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",

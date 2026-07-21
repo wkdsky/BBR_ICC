@@ -50,13 +50,13 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
            type == kFreqCCv3 || type == kFBBR ||
-           type == kFBBRAdaptive;
+           type == kFBBRAdaptive || type == kFBBRHybrid;
 }
 
 bool
 IsFBBRAlgorithm(CongestionControlType type)
 {
-    return type == kFBBR || type == kFBBRAdaptive;
+    return type == kFBBR || type == kFBBRAdaptive || type == kFBBRHybrid;
 }
 
 std::string

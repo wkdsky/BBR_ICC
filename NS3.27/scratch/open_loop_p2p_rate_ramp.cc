@@ -1,15 +1,19 @@
 /**
- * Open-loop P2P rate-ramp experiment without congestion control.
+ * Open-loop triangle-probe experiment with a TCP CUBIC cross flow.
  *
- * Sender target rate:
- *   linear baseline: 220 Mbps -> 450 Mbps over 5 s
+ * The active interval is split into three equal load regimes:
+ *   Regime I:   180 Mbps probe baseline, no CUBIC cross traffic
+ *   Regime II:  180 Mbps probe baseline plus a 220 Mbps CUBIC application
+ *   Regime III: 520 Mbps probe baseline plus the CUBIC application
+ *
+ * Probe target rate:
  *   triangle modulation: same waveform as FreqCCv3 CalculateOscillationOffset()
  *   modulation frequency: 5 Hz
  *   modulation peak amplitude: 80 Mbps
  *
  * Topology:
- *   n0 ---- 350 Mbps, 20 ms one-way delay ---- n1
- *   device queue on n0 is one BDP by default, using RTT = 2 * one-way delay.
+ *   n0 ---- 400 Mbps, 20 ms one-way delay ---- n1
+ *   device queue on n0 is four BDP by default, using RTT = 2 * one-way delay.
  */
 
 #include "ns3/applications-module.h"
@@ -39,22 +43,26 @@ NS_LOG_COMPONENT_DEFINE("open-loop-p2p-rate-ramp");
 namespace {
 
 double g_sender_start_time_s = 0.0;
-double g_sender_duration_s = 5.0;
+double g_sender_duration_s = 9.0;
 double g_drain_time_s = 0.5;
 
-double g_link_bw_mbps = 350.0;
+double g_link_bw_mbps = 400.0;
 double g_one_way_delay_ms = 20.0;
-double g_buffer_bdp = 1.0;
+double g_buffer_bdp = 4.0;
 bool g_bdp_uses_rtt = true;
 
-double g_start_rate_mbps = 220.0;
-double g_end_rate_mbps = 450.0;
+double g_start_rate_mbps = 180.0;
+double g_end_rate_mbps = 520.0;
 double g_triangle_freq_hz = 5.0;
 double g_triangle_amp_mbps = 80.0;
+
+double g_cubic_app_rate_mbps = 220.0;
+uint32_t g_cubic_packet_size_bytes = 1448;
 
 uint32_t g_packet_size_bytes = 1200;
 uint32_t g_flow_id = 1;
 uint16_t g_udp_port = 5000;
+uint16_t g_cubic_port = 5001;
 
 double g_trace_interval_ms = 10.0;
 std::string g_trace_path = "traces/open_loop_p2p_rate_ramp";
@@ -146,13 +154,9 @@ class OpenLoopRampSender : public Application
         {
             return 0.0;
         }
-        if (m_durationS <= 0.0)
-        {
-            return m_endRateMbps;
-        }
+        const double regime_duration_s = m_durationS / 3.0;
         const double elapsed_s = std::min(GetElapsedSeconds(now_s), m_durationS);
-        const double progress = elapsed_s / m_durationS;
-        return m_startRateMbps + (m_endRateMbps - m_startRateMbps) * progress;
+        return elapsed_s < 2.0 * regime_duration_s ? m_startRateMbps : m_endRateMbps;
     }
 
     double GetTriangleValueAt(double now_s) const
@@ -282,13 +286,15 @@ class OpenLoopRateTracer
 {
   public:
     OpenLoopRateTracer(Ptr<OpenLoopRampSender> sender,
-                       Ptr<PacketSink> sink,
+                       Ptr<PacketSink> probe_sink,
+                       Ptr<PacketSink> cubic_sink,
                        const std::string& folder,
                        const std::string& trace_name,
                        double interval_s,
                        double stop_time_s)
         : m_sender(sender),
-          m_sink(sink),
+          m_probeSink(probe_sink),
+          m_cubicSink(cubic_sink),
           m_intervalS(interval_s),
           m_stopTimeS(stop_time_s)
     {
@@ -297,7 +303,9 @@ class OpenLoopRateTracer
         if (m_stream.is_open())
         {
             m_stream << "#time_s\tbaseline_mbps\ttriangle_value\ttarget_mbps"
-                     << "\ttx_mbps\trx_mbps\ttotal_tx_bytes\ttotal_rx_bytes" << std::endl;
+                     << "\ttx_mbps\trx_mbps\ttotal_tx_bytes\ttotal_rx_bytes"
+                     << "\tcubic_rx_mbps\taggregate_rx_mbps\ttotal_cubic_rx_bytes"
+                     << std::endl;
         }
     }
 
@@ -305,26 +313,33 @@ class OpenLoopRateTracer
     {
         m_lastSampleS = Simulator::Now().GetSeconds();
         m_lastTxBytes = m_sender != nullptr ? m_sender->GetTotalTxBytes() : 0;
-        m_lastRxBytes = m_sink != nullptr ? m_sink->GetTotalRx() : 0;
+        m_lastProbeRxBytes = m_probeSink != nullptr ? m_probeSink->GetTotalRx() : 0;
+        m_lastCubicRxBytes = m_cubicSink != nullptr ? m_cubicSink->GetTotalRx() : 0;
         WriteSample();
     }
 
   private:
     void WriteSample()
     {
-        if (!m_stream.is_open() || m_sender == nullptr || m_sink == nullptr)
+        if (!m_stream.is_open() || m_sender == nullptr || m_probeSink == nullptr ||
+            m_cubicSink == nullptr)
         {
             return;
         }
 
         const double now_s = Simulator::Now().GetSeconds();
         const uint64_t total_tx_bytes = m_sender->GetTotalTxBytes();
-        const uint64_t total_rx_bytes = m_sink->GetTotalRx();
+        const uint64_t total_probe_rx_bytes = m_probeSink->GetTotalRx();
+        const uint64_t total_cubic_rx_bytes = m_cubicSink->GetTotalRx();
         const double delta_s = std::max(1e-9, now_s - m_lastSampleS);
         const double tx_mbps =
             static_cast<double>(total_tx_bytes - m_lastTxBytes) * 8.0 / delta_s / 1000000.0;
-        const double rx_mbps =
-            static_cast<double>(total_rx_bytes - m_lastRxBytes) * 8.0 / delta_s / 1000000.0;
+        const double probe_rx_mbps =
+            static_cast<double>(total_probe_rx_bytes - m_lastProbeRxBytes) * 8.0 /
+            delta_s / 1000000.0;
+        const double cubic_rx_mbps =
+            static_cast<double>(total_cubic_rx_bytes - m_lastCubicRxBytes) * 8.0 /
+            delta_s / 1000000.0;
 
         m_stream << std::fixed << std::setprecision(6)
                  << now_s << "\t"
@@ -332,13 +347,17 @@ class OpenLoopRateTracer
                  << m_sender->GetTriangleValueAt(now_s) << "\t"
                  << m_sender->GetTargetRateMbpsAt(now_s) << "\t"
                  << tx_mbps << "\t"
-                 << rx_mbps << "\t"
+                 << probe_rx_mbps << "\t"
                  << total_tx_bytes << "\t"
-                 << total_rx_bytes << std::endl;
+                 << total_probe_rx_bytes << "\t"
+                 << cubic_rx_mbps << "\t"
+                 << (probe_rx_mbps + cubic_rx_mbps) << "\t"
+                 << total_cubic_rx_bytes << std::endl;
 
         m_lastSampleS = now_s;
         m_lastTxBytes = total_tx_bytes;
-        m_lastRxBytes = total_rx_bytes;
+        m_lastProbeRxBytes = total_probe_rx_bytes;
+        m_lastCubicRxBytes = total_cubic_rx_bytes;
 
         if (now_s + m_intervalS <= m_stopTimeS)
         {
@@ -347,13 +366,15 @@ class OpenLoopRateTracer
     }
 
     Ptr<OpenLoopRampSender> m_sender;
-    Ptr<PacketSink> m_sink;
+    Ptr<PacketSink> m_probeSink;
+    Ptr<PacketSink> m_cubicSink;
     std::fstream m_stream;
     double m_intervalS{0.01};
     double m_stopTimeS{30.0};
     double m_lastSampleS{0.0};
     uint64_t m_lastTxBytes{0};
-    uint64_t m_lastRxBytes{0};
+    uint64_t m_lastProbeRxBytes{0};
+    uint64_t m_lastCubicRxBytes{0};
 };
 
 class QueueDropTracer
@@ -454,10 +475,15 @@ WriteScenarioConfig(const std::string& folder,
            << "buffer_bdp\t" << g_buffer_bdp << std::endl
            << "bdp_uses_rtt\t" << (g_bdp_uses_rtt ? 1 : 0) << std::endl
            << "queue_bytes\t" << queue_bytes << std::endl
+           << "regime_duration_s\t" << (g_sender_duration_s / 3.0) << std::endl
            << "start_rate_mbps\t" << g_start_rate_mbps << std::endl
            << "end_rate_mbps\t" << g_end_rate_mbps << std::endl
            << "triangle_freq_hz\t" << g_triangle_freq_hz << std::endl
            << "triangle_amp_mbps\t" << g_triangle_amp_mbps << std::endl
+           << "cubic_start_time_s\t"
+           << (g_sender_start_time_s + g_sender_duration_s / 3.0) << std::endl
+           << "cubic_app_rate_mbps\t" << g_cubic_app_rate_mbps << std::endl
+           << "cubic_packet_size_bytes\t" << g_cubic_packet_size_bytes << std::endl
            << "packet_size_bytes\t" << g_packet_size_bytes << std::endl
            << "trace_interval_ms\t" << g_trace_interval_ms << std::endl;
 }
@@ -469,6 +495,9 @@ RunScenario()
     const uint32_t queue_bytes =
         ComputeBdpQueueBytes(link_bps, g_one_way_delay_ms, g_buffer_bdp, g_bdp_uses_rtt);
     const double sim_stop_s = g_sender_start_time_s + g_sender_duration_s + g_drain_time_s;
+    const double regime_duration_s = g_sender_duration_s / 3.0;
+    const double cubic_start_s = g_sender_start_time_s + regime_duration_s;
+    const double active_stop_s = g_sender_start_time_s + g_sender_duration_s;
 
     SetQueueOccupancyTraceFolder(g_trace_path);
     const std::string trace_folder = GetQueueOccupancyTraceFolder();
@@ -476,6 +505,13 @@ RunScenario()
 
     NodeContainer nodes;
     nodes.Create(2);
+
+    Config::SetDefault("ns3::TcpL4Protocol::SocketType",
+                       TypeIdValue(TcpCubic::GetTypeId()));
+    Config::SetDefault("ns3::TcpSocket::SegmentSize",
+                       UintegerValue(g_cubic_packet_size_bytes));
+    Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(32 * 1024 * 1024));
+    Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(32 * 1024 * 1024));
 
     InternetStackHelper internet;
     internet.Install(nodes);
@@ -510,6 +546,28 @@ RunScenario()
     sink_apps.Stop(Seconds(sim_stop_s));
     Ptr<PacketSink> sink = DynamicCast<PacketSink>(sink_apps.Get(0));
 
+    PacketSinkHelper cubic_sink_helper(
+        "ns3::TcpSocketFactory",
+        InetSocketAddress(Ipv4Address::GetAny(), g_cubic_port));
+    ApplicationContainer cubic_sink_apps = cubic_sink_helper.Install(nodes.Get(1));
+    cubic_sink_apps.Start(Seconds(0.0));
+    cubic_sink_apps.Stop(Seconds(sim_stop_s));
+    Ptr<PacketSink> cubic_sink = DynamicCast<PacketSink>(cubic_sink_apps.Get(0));
+
+    OnOffHelper cubic_source(
+        "ns3::TcpSocketFactory",
+        InetSocketAddress(interfaces.GetAddress(1), g_cubic_port));
+    cubic_source.SetAttribute("PacketSize", UintegerValue(g_cubic_packet_size_bytes));
+    cubic_source.SetAttribute("DataRate",
+                              DataRateValue(DataRate(ToBps(g_cubic_app_rate_mbps))));
+    cubic_source.SetAttribute("OnTime",
+                              StringValue("ns3::ConstantRandomVariable[Constant=1]"));
+    cubic_source.SetAttribute("OffTime",
+                              StringValue("ns3::ConstantRandomVariable[Constant=0]"));
+    ApplicationContainer cubic_source_apps = cubic_source.Install(nodes.Get(0));
+    cubic_source_apps.Start(Seconds(cubic_start_s));
+    cubic_source_apps.Stop(Seconds(active_stop_s));
+
     Ptr<OpenLoopRampSender> sender = CreateObject<OpenLoopRampSender>();
     sender->Configure(InetSocketAddress(interfaces.GetAddress(1), g_udp_port),
                       g_packet_size_bytes,
@@ -527,22 +585,30 @@ RunScenario()
     std::shared_ptr<OpenLoopRateTracer> rate_tracer =
         std::make_shared<OpenLoopRateTracer>(sender,
                                              sink,
+                                             cubic_sink,
                                              trace_folder,
                                              g_trace_name,
                                              g_trace_interval_ms / 1000.0,
                                              sim_stop_s);
     Simulator::Schedule(Seconds(g_sender_start_time_s), &OpenLoopRateTracer::Start, rate_tracer.get());
 
-    std::cout << "=== Open-loop P2P rate-ramp experiment ===" << std::endl;
+    std::cout << "=== Open-loop triangle probe plus TCP CUBIC experiment ===" << std::endl;
     std::cout << "sender_duration=" << g_sender_duration_s << "s, sim_stop=" << sim_stop_s
               << "s" << std::endl;
     std::cout << "link=" << g_link_bw_mbps << "Mbps, one_way_delay=" << g_one_way_delay_ms
               << "ms" << std::endl;
     std::cout << "queue=" << queue_bytes << " bytes (" << g_buffer_bdp
               << " BDP, basis=" << (g_bdp_uses_rtt ? "RTT" : "one-way") << ")" << std::endl;
-    std::cout << "baseline=" << g_start_rate_mbps << "->" << g_end_rate_mbps
+    std::cout << "regimes=[0," << regime_duration_s << "),[" << regime_duration_s
+              << "," << 2.0 * regime_duration_s << "),["
+              << 2.0 * regime_duration_s << "," << g_sender_duration_s << ")s"
+              << std::endl;
+    std::cout << "probe_baseline=" << g_start_rate_mbps << "," << g_start_rate_mbps
+              << "," << g_end_rate_mbps
               << "Mbps, triangle_freq=" << g_triangle_freq_hz
               << "Hz, triangle_amp=" << g_triangle_amp_mbps << "Mbps" << std::endl;
+    std::cout << "cubic_start=" << cubic_start_s
+              << "s, cubic_app_rate=" << g_cubic_app_rate_mbps << "Mbps" << std::endl;
     std::cout << "packet_size=" << g_packet_size_bytes << " bytes" << std::endl;
     std::cout << "trace_folder=" << trace_folder << std::endl;
     std::cout << "=========================================" << std::endl;
@@ -555,7 +621,8 @@ RunScenario()
     std::cout << "drop_packets=" << drop_tracer->GetDropPackets()
               << ", drop_bytes=" << drop_tracer->GetDropBytes() << std::endl;
     std::cout << "total_tx_bytes=" << sender->GetTotalTxBytes()
-              << ", total_rx_bytes=" << sink->GetTotalRx() << std::endl;
+              << ", total_rx_bytes=" << sink->GetTotalRx()
+              << ", total_cubic_rx_bytes=" << cubic_sink->GetTotalRx() << std::endl;
 }
 
 } // namespace
@@ -565,7 +632,9 @@ main(int argc, char* argv[])
 {
     CommandLine cmd;
     cmd.AddValue("sender_start_time_s", "Sender start time in seconds", g_sender_start_time_s);
-    cmd.AddValue("sender_duration_s", "Open-loop sender duration in seconds", g_sender_duration_s);
+    cmd.AddValue("sender_duration_s",
+                 "Active duration in seconds, split equally across three regimes",
+                 g_sender_duration_s);
     cmd.AddValue("drain_time_s", "Extra simulation time after sender stops", g_drain_time_s);
 
     cmd.AddValue("link_bw_mbps", "P2P link bandwidth in Mbps", g_link_bw_mbps);
@@ -573,10 +642,22 @@ main(int argc, char* argv[])
     cmd.AddValue("buffer_bdp", "Sender-side device queue size in BDP units", g_buffer_bdp);
     cmd.AddValue("bdp_uses_rtt", "Use RTT rather than one-way delay for BDP queue sizing", g_bdp_uses_rtt);
 
-    cmd.AddValue("start_rate_mbps", "Linear baseline start rate in Mbps", g_start_rate_mbps);
-    cmd.AddValue("end_rate_mbps", "Linear baseline end rate in Mbps", g_end_rate_mbps);
+    cmd.AddValue("start_rate_mbps",
+                 "Triangle-probe baseline in Regimes I and II",
+                 g_start_rate_mbps);
+    cmd.AddValue("end_rate_mbps",
+                 "Triangle-probe baseline in Regime III",
+                 g_end_rate_mbps);
     cmd.AddValue("triangle_freq_hz", "Triangle modulation frequency in Hz", g_triangle_freq_hz);
     cmd.AddValue("triangle_amp_mbps", "Triangle modulation peak amplitude in Mbps", g_triangle_amp_mbps);
+
+    cmd.AddValue("cubic_app_rate_mbps",
+                 "TCP CUBIC application rate from Regime II onward",
+                 g_cubic_app_rate_mbps);
+    cmd.AddValue("cubic_packet_size_bytes",
+                 "TCP CUBIC application packet size",
+                 g_cubic_packet_size_bytes);
+    cmd.AddValue("cubic_port", "TCP CUBIC sink port", g_cubic_port);
 
     cmd.AddValue("packet_size_bytes", "UDP payload size in bytes", g_packet_size_bytes);
     cmd.AddValue("flow_id", "FlowIdTag used by queue occupancy trace", g_flow_id);

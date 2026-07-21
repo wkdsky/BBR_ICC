@@ -1,6 +1,7 @@
 #include "fbbr_sender.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -47,6 +48,7 @@ constexpr double kAdaptiveMaxBwInheritanceTolerance = 0.25;
 constexpr uint64_t kDefaultMinimumPacingRateBps = 1000000;
 constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
 constexpr float kFBBRCruiseCwndGain = 1.25f;
+constexpr float kFBBRRtpropProbeDownPacingGain = 0.75f;
 constexpr const char* kLimitingSpectralSignalDrate = "DRATE";
 constexpr const char* kLimitingSpectralSignalSrtt = "SRTT";
 constexpr const char* kLimitingSpectralSignalEqual = "EQUAL";
@@ -311,6 +313,107 @@ double Median(std::vector<double> values) {
   return MedianOfSorted(values);
 }
 
+double Quantile(std::vector<double> values, double q) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  std::sort(values.begin(), values.end());
+  q = ClampValue(q, 0.0, 1.0);
+  const double position = q * static_cast<double>(values.size() - 1);
+  const size_t lower = static_cast<size_t>(std::floor(position));
+  const size_t upper = static_cast<size_t>(std::ceil(position));
+  if (lower == upper) {
+    return values[lower];
+  }
+  const double fraction = position - static_cast<double>(lower);
+  return values[lower] + fraction * (values[upper] - values[lower]);
+}
+
+double RobustSigma(const std::vector<double>& values) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  const double center = Median(values);
+  std::vector<double> deviations;
+  deviations.reserve(values.size());
+  for (double value : values) {
+    if (std::isfinite(value)) {
+      deviations.push_back(std::abs(value - center));
+    }
+  }
+  return 1.4826 * Median(deviations);
+}
+
+double TheilSenSlope(const std::vector<double>& values,
+                     const std::vector<bool>& valid,
+                     size_t begin,
+                     size_t end,
+                     double sample_step_s) {
+  if (values.size() != valid.size() || begin >= end ||
+      end > values.size() || sample_step_s <= 0.0) {
+    return 0.0;
+  }
+  std::vector<double> slopes;
+  for (size_t i = begin; i < end; ++i) {
+    if (!valid[i] || !std::isfinite(values[i])) {
+      continue;
+    }
+    for (size_t j = i + 1; j < end; ++j) {
+      if (!valid[j] || !std::isfinite(values[j])) {
+        continue;
+      }
+      slopes.push_back((values[j] - values[i]) /
+                       (static_cast<double>(j - i) * sample_step_s));
+    }
+  }
+  return Median(slopes);
+}
+
+double ValidLagCorrelation(const std::vector<double>& values,
+                           const std::vector<bool>& valid,
+                           size_t lag,
+                           size_t* pair_count) {
+  if (pair_count != nullptr) {
+    *pair_count = 0;
+  }
+  if (values.size() != valid.size() || lag == 0 || lag >= values.size()) {
+    return -1.0;
+  }
+  std::vector<double> lhs;
+  std::vector<double> rhs;
+  for (size_t i = 0; i + lag < values.size(); ++i) {
+    if (valid[i] && valid[i + lag] && std::isfinite(values[i]) &&
+        std::isfinite(values[i + lag])) {
+      lhs.push_back(values[i]);
+      rhs.push_back(values[i + lag]);
+    }
+  }
+  if (pair_count != nullptr) {
+    *pair_count = lhs.size();
+  }
+  if (lhs.size() < 4) {
+    return -1.0;
+  }
+  const double lhs_mean =
+      std::accumulate(lhs.begin(), lhs.end(), 0.0) / lhs.size();
+  const double rhs_mean =
+      std::accumulate(rhs.begin(), rhs.end(), 0.0) / rhs.size();
+  double numerator = 0.0;
+  double lhs_energy = 0.0;
+  double rhs_energy = 0.0;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    const double a = lhs[i] - lhs_mean;
+    const double b = rhs[i] - rhs_mean;
+    numerator += a * b;
+    lhs_energy += a * a;
+    rhs_energy += b * b;
+  }
+  if (lhs_energy <= 0.0 || rhs_energy <= 0.0) {
+    return -1.0;
+  }
+  return numerator / std::sqrt(lhs_energy * rhs_energy);
+}
+
 std::string AppendReason(const std::string& current, const char* reason) {
   if (current.empty() || current == "none") {
     return reason;
@@ -420,7 +523,12 @@ FBBRSender::FBBRSender(
       minimum_pacing_rate_bps_(kDefaultMinimumPacingRateBps),
       drain_completed_(false),
       in_cruise_(false),
-	      cruise_modulation_freq_hz_(5.0),
+      current_cruise_rtprop_updated_(false),
+      previous_cruise_rtprop_updated_(false),
+      rtprop_probe_down_active_(false),
+      cruise_rtprop_at_entry_(TimeDelta::Zero()),
+      latest_congestion_event_prior_inflight_(0),
+      cruise_modulation_freq_hz_(5.0),
       cruise_start_time_(QuicTime::Zero()),
       next_cruise_window_start_(QuicTime::Zero()),
       current_time_(now),
@@ -434,6 +542,12 @@ FBBRSender::FBBRSender(
       current_injection_baseline_bw_(QuicBandwidth::Zero()),
       current_probe_amplitude_bps_(0),
       waveform_initial_probe_amplitude_bps_(0),
+      max_bw_response_observed_(false),
+      max_bw_delivery_response_gain_(1.0),
+      max_bw_observation_center_bps_(0.0),
+      max_bw_observation_baseline_bps_(0.0),
+      max_bw_actual_fluctuation_amplitude_bps_(0.0),
+      max_bw_attenuation_factor_(1.0),
       current_probe_bw_phase_gain_(1.0),
       probe_epoch_start_time_(QuicTime::Zero()),
       probe_epoch_rtt_(TimeDelta::Zero()),
@@ -468,6 +582,20 @@ FBBRSender::FBBRSender(
       baseline_adjustment_count_(0),
       inconclusive_extension_count_(0),
       waveform_inconclusive_amplification_count_(0),
+      fbbr_hybrid_max_rtt_valid_(false),
+      fbbr_hybrid_max_rtt_ms_(0.0),
+      fbbr_hybrid_max_rtt_source_cruise_id_(0),
+      fbbr_hybrid_rtprop_drate_valid_(false),
+      fbbr_hybrid_rtprop_drate_(QuicBandwidth::Zero()),
+      fbbr_hybrid_rtprop_drate_source_cruise_id_(0),
+      fbbr_hybrid_srtt_no_wave_streak_(0),
+      fbbr_hybrid_drate_no_wave_streak_(0),
+      fbbr_hybrid_wave_fidelity_enhancement_active_(false),
+      fbbr_hybrid_retry_reason_mask_(0),
+      fbbr_hybrid_last_counted_window_second_cycle_id_(0),
+      fbbr_hybrid_rolling_retry_count_(0),
+      fbbr_hybrid_regime_ii_seen_this_cruise_(false),
+      fbbr_hybrid_probed_bw_(QuicBandwidth::Zero()),
       floor_clip_confirmation_count_(0),
       waveform_last_clip_direction_(0),
       waveform_decision_count_(0),
@@ -530,6 +658,66 @@ FBBRSender::FBBRSender(
       waveform_inconclusive_signal_amplification_max_ratio_(2.0),
       waveform_max_app_limited_sample_ratio_(0.25),
       waveform_max_interpolation_gap_period_ratio_(0.10),
+      fbbr_regime_long_top_horizontal_duration_ratio_(0.20),
+      fbbr_regime_long_bottom_horizontal_duration_ratio_(0.30),
+      fbbr_regime_actuator_midpoint_trigger_ratio_(0.50),
+      fbbr_wave_fidelity_no_wave_trigger_windows_(2),
+      fbbr_wave_fidelity_stop_on_either_wave_(true),
+      fbbr_wave_fidelity_retry_window_advance_periods_(1),
+      waveform_activity_amplitude_noise_multiplier_(6.0),
+      waveform_activity_min_level_ratio_(0.02),
+      waveform_activity_step_noise_multiplier_(3.0),
+      waveform_activity_min_normalized_step_slope_(3.5),
+      waveform_activity_min_active_steps_(4),
+      waveform_activity_min_active_step_ratio_(0.10),
+      waveform_activity_min_directional_change_ratio_(0.20),
+      waveform_activity_min_significant_path_ratio_(0.80),
+      waveform_activity_min_slope_reversals_(1),
+      waveform_horizontal_continuous_min_duration_ratio_(0.15),
+      waveform_horizontal_min_valid_coverage_ratio_(0.85),
+      waveform_horizontal_min_flat_fraction_(0.90),
+      waveform_horizontal_max_local_slope_ratio_(0.10),
+      waveform_horizontal_min_side_slope_ratio_(0.25),
+      waveform_horizontal_min_boundary_kink_ratio_(0.25),
+      waveform_horizontal_max_level_span_ratio_(0.10),
+      waveform_horizontal_max_total_drift_ratio_(0.05),
+      waveform_horizontal_min_side_change_ratio_(0.10),
+      waveform_horizontal_amplitude_noise_multiplier_(6.0),
+      waveform_horizontal_level_span_noise_multiplier_(4.0),
+      waveform_horizontal_slope_noise_multiplier_(3.0),
+      waveform_horizontal_extreme_distance_ratio_(0.10),
+      waveform_repeated_clip_max_period_error_ratio_(0.15),
+      waveform_repeated_clip_max_level_delta_ratio_(0.05),
+      waveform_repeated_clip_contact_level_tolerance_ratio_(0.05),
+      waveform_repeated_clip_min_contact_samples_per_cycle_(2),
+      waveform_repeated_clip_min_total_contact_samples_(4),
+      waveform_repeated_clip_min_contact_sample_ratio_(0.05),
+      waveform_repeated_clip_min_contact_span_ratio_of_window_(0.50),
+      waveform_repeated_clip_min_pooled_flat_fraction_(0.90),
+      waveform_repeated_clip_min_verified_boundary_fraction_(0.75),
+      waveform_repeated_clip_min_outside_excursion_ratio_(0.10),
+      waveform_repeated_clip_min_extrapolated_overshoot_ratio_(0.05),
+      waveform_repeated_clip_merge_gap_ratio_(0.025),
+      waveform_repeated_clip_max_missing_gap_ratio_(0.05),
+      waveform_shoulder_min_half_overlap_ratio_(0.75),
+      waveform_shoulder_min_side_change_ratio_(0.15),
+      waveform_shoulder_max_residual_cycle_period_error_ratio_(0.20),
+      waveform_shoulder_min_residual_cycle_leg_duration_ratio_(0.15),
+      waveform_middle_min_duration_ratio_(0.05),
+      waveform_middle_max_duration_ratio_(0.35),
+      waveform_middle_context_duration_ratio_(0.10),
+      waveform_middle_min_trend_slope_ratio_(0.20),
+      waveform_middle_max_context_slope_delta_ratio_(0.75),
+      waveform_middle_min_slope_mismatch_ratio_(0.50),
+      waveform_middle_min_mismatching_sample_ratio_(0.25),
+      waveform_middle_min_mismatching_samples_(2),
+      waveform_middle_min_consecutive_mismatching_samples_(2),
+      waveform_middle_min_bridge_deviation_ratio_(0.05),
+      waveform_middle_noise_multiplier_(3.0),
+      waveform_middle_max_mask_ratio_per_cycle_(0.35),
+      fbbr_regime_period_tolerance_ratio_(0.20),
+      fbbr_regime_min_periodicity_correlation_(0.50),
+      fbbr_regime_periodic_upper_clip_is_hard_veto_(true),
       min_cruise_cycles_per_window_(4.0),
       cruise_window_step_ratio_(0.25),
       freq_tolerance_ratio_(0.20),
@@ -753,6 +941,10 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
       FBBRCruiseDetectorMode::kLegacySpectral) {
     // This selector only controls the time-domain detector history.
     use_delivery_rate_latest_for_signal_history_ = false;
+  } else if (IsFbbrHybrid()) {
+    // The PDF-defined classifier requires delivery_rate_latest; the legacy
+    // bandwidth_latest selector is intentionally ignored for this owner.
+    use_delivery_rate_latest_for_signal_history_ = true;
   } else if (!waveform_recv_mode_valid ||
              config.waveform_recv_signal_mode == "delivery_rate_latest") {
     use_delivery_rate_latest_for_signal_history_ = true;
@@ -979,6 +1171,164 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   waveform_max_interpolation_gap_period_ratio_ = range_or(
       config.waveform_max_interpolation_gap_period_ratio, 0.0, 1.0, 0.10,
       "waveform.max_interpolation_gap_period_ratio");
+
+  fbbr_regime_long_top_horizontal_duration_ratio_ = range_or(
+      config.fbbr_regime_long_top_horizontal_duration_ratio,
+      0.01, 0.99, 0.20,
+      "fbbr.regime.long_top_horizontal_duration_ratio");
+  fbbr_regime_long_bottom_horizontal_duration_ratio_ = range_or(
+      config.fbbr_regime_long_bottom_horizontal_duration_ratio,
+      0.01, 0.99, 0.30,
+      "fbbr.regime.long_bottom_horizontal_duration_ratio");
+  fbbr_regime_actuator_midpoint_trigger_ratio_ = range_or(
+      config.fbbr_regime_actuator_midpoint_trigger_ratio,
+      0.0, 1.0, 0.50,
+      "fbbr.regime.actuator.midpoint_trigger_ratio");
+  // These are PDF semantics rather than tuning knobs.
+  fbbr_wave_fidelity_no_wave_trigger_windows_ = 2;
+  fbbr_wave_fidelity_stop_on_either_wave_ = true;
+  fbbr_wave_fidelity_retry_window_advance_periods_ = 1;
+
+  waveform_activity_amplitude_noise_multiplier_ = range_or(
+      config.waveform_activity_amplitude_noise_multiplier,
+      0.0, 100.0, 6.0,
+      "waveform.activity.amplitude_noise_multiplier");
+  waveform_activity_min_level_ratio_ = range_or(
+      config.waveform_activity_min_level_ratio, 0.0, 1.0, 0.02,
+      "waveform.activity.min_level_ratio");
+  waveform_activity_step_noise_multiplier_ = range_or(
+      config.waveform_activity_step_noise_multiplier,
+      0.0, 100.0, 3.0,
+      "waveform.activity.step_noise_multiplier");
+  waveform_activity_min_normalized_step_slope_ = range_or(
+      config.waveform_activity_min_normalized_step_slope,
+      0.0, 100.0, 3.5,
+      "waveform.activity.min_normalized_step_slope");
+  waveform_activity_min_active_steps_ = std::max<uint32_t>(
+      1, config.waveform_activity_min_active_steps);
+  waveform_activity_min_active_step_ratio_ = Clamp01(
+      config.waveform_activity_min_active_step_ratio);
+  waveform_activity_min_directional_change_ratio_ = Clamp01(
+      config.waveform_activity_min_directional_change_ratio);
+  waveform_activity_min_significant_path_ratio_ = range_or(
+      config.waveform_activity_min_significant_path_ratio,
+      0.0, 10.0, 0.80,
+      "waveform.activity.min_significant_path_ratio");
+  waveform_activity_min_slope_reversals_ = std::max<uint32_t>(
+      1, config.waveform_activity_min_slope_reversals);
+
+  waveform_horizontal_continuous_min_duration_ratio_ = range_or(
+      config.waveform_horizontal_continuous_min_duration_ratio,
+      0.01, 1.0, 0.15,
+      "waveform.horizontal.continuous_min_duration_ratio");
+  waveform_horizontal_min_valid_coverage_ratio_ = Clamp01(
+      config.waveform_horizontal_min_valid_coverage_ratio);
+  waveform_horizontal_min_flat_fraction_ = Clamp01(
+      config.waveform_horizontal_min_flat_fraction);
+  waveform_horizontal_max_local_slope_ratio_ = range_or(
+      config.waveform_horizontal_max_local_slope_ratio,
+      0.0, 10.0, 0.10,
+      "waveform.horizontal.max_local_slope_ratio");
+  waveform_horizontal_min_side_slope_ratio_ = range_or(
+      config.waveform_horizontal_min_side_slope_ratio,
+      0.0, 10.0, 0.25,
+      "waveform.horizontal.min_side_slope_ratio");
+  waveform_horizontal_min_boundary_kink_ratio_ = range_or(
+      config.waveform_horizontal_min_boundary_kink_ratio,
+      0.0, 10.0, 0.25,
+      "waveform.horizontal.min_boundary_kink_ratio");
+  waveform_horizontal_max_level_span_ratio_ = Clamp01(
+      config.waveform_horizontal_max_level_span_ratio);
+  waveform_horizontal_max_total_drift_ratio_ = Clamp01(
+      config.waveform_horizontal_max_total_drift_ratio);
+  waveform_horizontal_min_side_change_ratio_ = Clamp01(
+      config.waveform_horizontal_min_side_change_ratio);
+  waveform_horizontal_amplitude_noise_multiplier_ = std::max(
+      0.0, config.waveform_horizontal_amplitude_noise_multiplier);
+  waveform_horizontal_level_span_noise_multiplier_ = std::max(
+      0.0, config.waveform_horizontal_level_span_noise_multiplier);
+  waveform_horizontal_slope_noise_multiplier_ = std::max(
+      0.0, config.waveform_horizontal_slope_noise_multiplier);
+  waveform_horizontal_extreme_distance_ratio_ = Clamp01(
+      config.waveform_horizontal_extreme_distance_ratio);
+
+  waveform_repeated_clip_max_period_error_ratio_ = Clamp01(
+      config.waveform_repeated_clip_max_period_error_ratio);
+  waveform_repeated_clip_max_level_delta_ratio_ = Clamp01(
+      config.waveform_repeated_clip_max_level_delta_ratio);
+  waveform_repeated_clip_contact_level_tolerance_ratio_ = Clamp01(
+      config.waveform_repeated_clip_contact_level_tolerance_ratio);
+  waveform_repeated_clip_min_contact_samples_per_cycle_ =
+      std::max<uint32_t>(2,
+          config.waveform_repeated_clip_min_contact_samples_per_cycle);
+  waveform_repeated_clip_min_total_contact_samples_ =
+      std::max<uint32_t>(4,
+          config.waveform_repeated_clip_min_total_contact_samples);
+  waveform_repeated_clip_min_contact_sample_ratio_ = Clamp01(
+      config.waveform_repeated_clip_min_contact_sample_ratio);
+  waveform_repeated_clip_min_contact_span_ratio_of_window_ = 0.50;
+  waveform_repeated_clip_min_pooled_flat_fraction_ = Clamp01(
+      config.waveform_repeated_clip_min_pooled_flat_fraction);
+  waveform_repeated_clip_min_verified_boundary_fraction_ = Clamp01(
+      config.waveform_repeated_clip_min_verified_boundary_fraction);
+  waveform_repeated_clip_min_outside_excursion_ratio_ = Clamp01(
+      config.waveform_repeated_clip_min_outside_excursion_ratio);
+  waveform_repeated_clip_min_extrapolated_overshoot_ratio_ = Clamp01(
+      config.waveform_repeated_clip_min_extrapolated_overshoot_ratio);
+  waveform_repeated_clip_merge_gap_ratio_ = Clamp01(
+      config.waveform_repeated_clip_merge_gap_ratio);
+  waveform_repeated_clip_max_missing_gap_ratio_ = Clamp01(
+      config.waveform_repeated_clip_max_missing_gap_ratio);
+
+  waveform_shoulder_min_half_overlap_ratio_ = Clamp01(
+      config.waveform_shoulder_min_half_overlap_ratio);
+  waveform_shoulder_min_side_change_ratio_ = Clamp01(
+      config.waveform_shoulder_min_side_change_ratio);
+  waveform_shoulder_max_residual_cycle_period_error_ratio_ = Clamp01(
+      config.waveform_shoulder_max_residual_cycle_period_error_ratio);
+  waveform_shoulder_min_residual_cycle_leg_duration_ratio_ = Clamp01(
+      config.waveform_shoulder_min_residual_cycle_leg_duration_ratio);
+
+  waveform_middle_min_duration_ratio_ = Clamp01(
+      config.waveform_middle_min_duration_ratio);
+  waveform_middle_max_duration_ratio_ = Clamp01(
+      config.waveform_middle_max_duration_ratio);
+  waveform_middle_context_duration_ratio_ = Clamp01(
+      config.waveform_middle_context_duration_ratio);
+  waveform_middle_min_trend_slope_ratio_ = std::max(
+      0.0, config.waveform_middle_min_trend_slope_ratio);
+  waveform_middle_max_context_slope_delta_ratio_ = std::max(
+      0.0, config.waveform_middle_max_context_slope_delta_ratio);
+  waveform_middle_min_slope_mismatch_ratio_ = std::max(
+      0.0, config.waveform_middle_min_slope_mismatch_ratio);
+  waveform_middle_min_mismatching_sample_ratio_ = Clamp01(
+      config.waveform_middle_min_mismatching_sample_ratio);
+  waveform_middle_min_mismatching_samples_ = std::max<uint32_t>(
+      2, config.waveform_middle_min_mismatching_samples);
+  waveform_middle_min_consecutive_mismatching_samples_ =
+      std::max<uint32_t>(
+          2, config.waveform_middle_min_consecutive_mismatching_samples);
+  waveform_middle_min_bridge_deviation_ratio_ = Clamp01(
+      config.waveform_middle_min_bridge_deviation_ratio);
+  waveform_middle_noise_multiplier_ = std::max(
+      0.0, config.waveform_middle_noise_multiplier);
+  waveform_middle_max_mask_ratio_per_cycle_ = Clamp01(
+      config.waveform_middle_max_mask_ratio_per_cycle);
+  if (waveform_middle_max_duration_ratio_ <
+      waveform_middle_min_duration_ratio_) {
+    waveform_middle_min_duration_ratio_ = 0.05;
+    waveform_middle_max_duration_ratio_ = 0.35;
+  }
+
+  fbbr_regime_period_tolerance_ratio_ = range_or(
+      config.fbbr_regime_period_tolerance_ratio,
+      0.0, 1.0, 0.20,
+      "fbbr.regime.period_tolerance_ratio");
+  fbbr_regime_min_periodicity_correlation_ = range_or(
+      config.fbbr_regime_min_periodicity_correlation,
+      -1.0, 1.0, 0.50,
+      "fbbr.regime.min_periodicity_correlation");
+  fbbr_regime_periodic_upper_clip_is_hard_veto_ = true;
   fbbr_latest_trusted_bw_ = QuicBandwidth::Zero();
   fbbr_smoothed_trusted_bw_ = QuicBandwidth::Zero();
   fbbr_smoothed_trusted_bw_valid_ = false;
@@ -994,6 +1344,13 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   adaptive_previous_cruise_max_bw_ = QuicBandwidth::Zero();
   adaptive_cruise_start_max_bw_ = QuicBandwidth::Zero();
   adaptive_bounds_inherited_this_cruise_ = false;
+  max_bw_response_observed_ = false;
+  max_bw_delivery_response_gain_ = 1.0;
+  max_bw_observation_center_bps_ = 0.0;
+  max_bw_observation_baseline_bps_ = 0.0;
+  max_bw_actual_fluctuation_amplitude_bps_ = 0.0;
+  max_bw_attenuation_factor_ = 1.0;
+  model_.SetMaxBandwidthSampleAttenuation(1.0);
   ClearTrustedBw("configuration_changed");
 }
 
@@ -1531,6 +1888,46 @@ bool FBBRSender::RunWaveformCruiseSelfTest(std::ostream& os) {
                  "test 8e: positive SRTT clip with invalid Drate is INCONCLUSIVE");
   decision.drate_input_valid = true;
 
+  WaveformDecisionInputs bic_decision;
+  bic_decision.prechecks_valid = true;
+  bic_decision.adaptive_guard_enabled = true;
+  bic_decision.srtt_input_valid = true;
+  bic_decision.drate_input_valid = true;
+  bic_decision.drate_similar = true;
+  bic_decision.bic_srtt_bottom_clip = true;
+  check_decision(bic_decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 8f: BIC bottom clip enters the existing UNDERLOAD path without waveform similarity");
+  bic_decision.bic_srtt_bottom_clip = false;
+  bic_decision.bic_srtt_top_clip = true;
+  check_decision(bic_decision, WaveformClassification::kFullLoad, "R2.2",
+                 "test 8g: BIC top clip enters the existing top-clip path without waveform similarity");
+  bic_decision.bic_srtt_bottom_clip = true;
+  check_decision(bic_decision, WaveformClassification::kUnderload, "R4.1",
+                 "test 8h: simultaneous BIC top and bottom clips enter BOTH_CLIPPED");
+  bic_decision.bic_srtt_top_clip = false;
+  bic_decision.srtt_positive_half_clipped = true;
+  check_decision(bic_decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 8i: true bottom clipping has priority over a similarity-shoulder top clip");
+  bic_decision.bic_srtt_bottom_clip = false;
+  bic_decision.bic_srtt_top_clip = true;
+  bic_decision.srtt_positive_half_clipped = false;
+  bic_decision.srtt_negative_half_clipped = true;
+  check_decision(bic_decision, WaveformClassification::kFullLoad, "R2.2",
+                 "test 8j: true top clipping has priority over a similarity-shoulder bottom clip");
+  bic_decision.bic_srtt_top_clip = false;
+  bic_decision.bic_srtt_bottom_clip = true;
+  bic_decision.srtt_negative_half_clipped = false;
+  bic_decision.prechecks_valid = false;
+  check_decision(bic_decision, WaveformClassification::kUnderload, "R3.1",
+                 "test 8k: true clipping is evaluated before similarity-path prechecks");
+
+  require(!ShouldRefreshRtpropForTrueClip(false, false) &&
+              !ShouldRefreshRtpropForTrueClip(true, false) &&
+              ShouldRefreshRtpropForTrueClip(false, true) &&
+              ShouldRefreshRtpropForTrueClip(true, true),
+          "test 8l: every true-clipping result containing a bottom clip "
+          "refreshes RTprop and ProbeRTT");
+
   require(std::abs(ComputeAdaptiveNextBaseline(
                        WaveformClassification::kOverload,
                        true, 80.0, true, 100.0,
@@ -1634,6 +2031,56 @@ bool FBBRSender::RunWaveformCruiseSelfTest(std::ostream& os) {
       nullptr);
   require(small_periodicity > 0.99,
           "test 16: periodicity is independent of response amplitude");
+
+  std::vector<double> smooth_two_cycle(periodic_count, 0.0);
+  std::vector<double> bic_bottom_clipped(periodic_count, 0.0);
+  std::vector<double> bic_top_clipped(periodic_count, 0.0);
+  std::vector<double> bic_both_clipped(periodic_count, 0.0);
+  std::vector<double> quantized_triangle(periodic_count, 0.0);
+  std::vector<double> quantized_rounded_turn(periodic_count, 0.0);
+  for (size_t i = 0; i < periodic_count; ++i) {
+    smooth_two_cycle[i] = 50.0 + 8.0 * sine_response[i];
+    bic_bottom_clipped[i] = std::max(46.0, smooth_two_cycle[i]);
+    bic_top_clipped[i] = std::min(54.0, smooth_two_cycle[i]);
+    bic_both_clipped[i] = ClampValue(smooth_two_cycle[i], 46.0, 54.0);
+    quantized_triangle[i] =
+        std::round(50.0 + 8.0 * triangle_response[i]);
+    quantized_rounded_turn[i] =
+        0.5 * std::round(2.0 * smooth_two_cycle[i]);
+  }
+  const BicClippingDetectionResult smooth_bic =
+      DetectBicSrttClipping(smooth_two_cycle, periodic_valid, 0.05);
+  const BicClippingDetectionResult bottom_bic =
+      DetectBicSrttClipping(bic_bottom_clipped, periodic_valid, 0.05);
+  const BicClippingDetectionResult top_bic =
+      DetectBicSrttClipping(bic_top_clipped, periodic_valid, 0.05);
+  const BicClippingDetectionResult both_bic =
+      DetectBicSrttClipping(bic_both_clipped, periodic_valid, 0.05);
+  const BicClippingDetectionResult quantized_triangle_bic =
+      DetectBicSrttClipping(quantized_triangle, periodic_valid, 0.05);
+  const BicClippingDetectionResult quantized_rounded_turn_bic =
+      DetectBicSrttClipping(
+          quantized_rounded_turn, periodic_valid, 0.05);
+  require(smooth_bic.valid && !smooth_bic.bottom_clip &&
+              !smooth_bic.top_clip,
+          "test 16a: smooth extrema do not create a BIC clipping decision");
+  require(bottom_bic.valid && bottom_bic.bottom_clip &&
+              !bottom_bic.top_clip,
+          "test 16a2: two shared-floor BIC motifs detect bottom clipping");
+  require(top_bic.valid && top_bic.top_clip &&
+              !top_bic.bottom_clip,
+          "test 16a3: two shared-ceiling BIC motifs detect top clipping");
+  require(both_bic.valid && both_bic.top_clip &&
+              both_bic.bottom_clip && both_bic.both_clipped,
+          "test 16a4: independent BIC directions preserve BOTH_CLIPPED");
+  require(quantized_triangle_bic.valid &&
+              !quantized_triangle_bic.top_clip &&
+              !quantized_triangle_bic.bottom_clip,
+          "test 16a5: a quantized V-shaped turn is not horizontal clipping");
+  require(quantized_rounded_turn_bic.valid &&
+              !quantized_rounded_turn_bic.top_clip &&
+              !quantized_rounded_turn_bic.bottom_clip,
+          "test 16a6: a quantized rounded turn is not horizontal clipping");
   std::vector<bool> masked_periodic_valid = periodic_valid;
   for (size_t cycle = 0; cycle < 2; ++cycle) {
     const size_t begin = cycle * expected_period_samples + 70;
@@ -1804,6 +2251,66 @@ bool FBBRSender::RunWaveformCruiseSelfTest(std::ostream& os) {
               new_cruise_clears_fresh && native_state_untouched,
           "test 19: lifecycle confines TrustedBw to post-CRUISE pacing only");
 
+  const QuicByteCount probe_down_test_bdp = 20000;
+  require(!ShouldEnableRtpropProbeDown(
+              false, 25000, probe_down_test_bdp) &&
+              !ShouldEnableRtpropProbeDown(
+                  true, 24999, probe_down_test_bdp) &&
+              ShouldEnableRtpropProbeDown(
+                  true, 25000, probe_down_test_bdp) &&
+              !ShouldEnableRtpropProbeDown(true, 25000, 0),
+          "test 20: RTprop PROBE_DOWN requires a previous CRUISE refresh "
+          "and inflight >= 1.25 BDP");
+  require(ShouldExitRtpropProbeDown(20999, probe_down_test_bdp) &&
+              !ShouldExitRtpropProbeDown(21000, probe_down_test_bdp) &&
+              !ShouldExitRtpropProbeDown(0, 0) &&
+              std::abs(kFBBRRtpropProbeDownPacingGain - 0.75f) < 1e-6f,
+          "test 21: RTprop PROBE_DOWN uses gain 0.75 and exits strictly "
+          "below 1.05 BDP");
+
+  Bbr2Params bdp_test_params(4 * kDefaultTCPMSS,
+                             1000 * kDefaultTCPMSS);
+  Bbr2NetworkModel bdp_test_model(
+      &bdp_test_params, TimeDelta::FromMilliseconds(40), QuicTime::Zero(),
+      2.0f, 1.0f, nullptr);
+  const QuicBandwidth native_bdp_bw =
+      QuicBandwidth::FromBitsPerSecond(10000000);
+  const QuicBandwidth trusted_bdp_bw =
+      QuicBandwidth::FromBitsPerSecond(20000000);
+  bdp_test_model.ForceSetMaxBandwidth(native_bdp_bw);
+  require(bdp_test_model.BDP() == 50000,
+          "test 22: native BDP uses MaxBandwidth before TrustedBw exists");
+  bdp_test_model.SetBdpBandwidthOverride(trusted_bdp_bw);
+  require(bdp_test_model.BDP() == 100000 &&
+              bdp_test_model.BDP(native_bdp_bw) == 100000 &&
+              bdp_test_model.BDP(native_bdp_bw, 1.25f) == 125000 &&
+              bdp_test_model.BdpBandwidth() == trusted_bdp_bw,
+          "test 23: every BDP overload uses TrustedBw while it is valid");
+  bdp_test_model.ClearBdpBandwidthOverride();
+  require(bdp_test_model.BDP() == 50000 &&
+              bdp_test_model.BdpBandwidth() == native_bdp_bw,
+          "test 24: clearing TrustedBw restores native BDP bandwidth");
+
+  const double mild_factor =
+      ComputeMaxBwAttenuationFactor(10000000.0, 2000000.0);
+  const double strong_factor =
+      ComputeMaxBwAttenuationFactor(10000000.0, 5000000.0);
+  require(std::abs(mild_factor - 10.0 / 12.0) < 1e-12 &&
+              std::abs(mild_factor * 12000000.0 - 10000000.0) < 1e-6 &&
+              strong_factor < mild_factor &&
+              ComputeMaxBwAttenuationFactor(10000000.0, 0.0) == 1.0 &&
+              ComputeMaxBwAttenuationFactor(0.0, 2000000.0) == 1.0,
+          "test 25: maxbw factor removes the observed positive excursion "
+          "and strengthens monotonically with fluctuation amplitude");
+  bdp_test_model.SetMaxBandwidthSampleAttenuation(mild_factor);
+  const bool accepts_valid_attenuation =
+      std::abs(bdp_test_model.max_bandwidth_sample_attenuation() -
+               mild_factor) < 1e-12;
+  bdp_test_model.SetMaxBandwidthSampleAttenuation(0.0);
+  require(accepts_valid_attenuation &&
+              bdp_test_model.max_bandwidth_sample_attenuation() == 1.0,
+          "test 26: network model accepts only finite factors in (0, 1]");
+
   os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
@@ -1838,12 +2345,408 @@ bool FBBRSender::RunFbbrBaselineSelfTest(std::ostream& os) {
   os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
   return pass;
 }
+
+bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
+  bool pass = true;
+  auto require = [&pass, &os](bool condition, const std::string& message) {
+    os << (condition ? "PASS: " : "FAIL: ") << message << "\n";
+    pass = pass && condition;
+  };
+  os << "# FBBR-hybrid quantified-regime self-test\n";
+  FbbrRegimeContext context;
+  context.max_rtt_valid = true;
+  context.max_rtt_ms = 100.0;
+  context.rtprop_valid = true;
+  context.rtprop_ms = 50.0;
+  auto base = []() {
+    FbbrHybridRegimeFeatures features;
+    features.input_valid = true;
+    features.srtt.wave.input_valid = true;
+    features.drate.wave.input_valid = true;
+    features.srtt_stats_valid = true;
+    features.srtt_min_ms = 70.0;
+    features.srtt_max_ms = 90.0;
+    features.drate_stats_valid = true;
+    features.mindrate_bps = 80.0;
+    features.maxdrate_bps = 120.0;
+    features.meandrate_bps = 100.0;
+    features.drate.periodic = PeriodicSimilarityResult::kMatch;
+    return features;
+  };
+  auto check = [&](FbbrHybridRegimeFeatures features,
+                   const char* rule,
+                   WaveformClassification classification,
+                   bool max_rtt,
+                   bool rtprop,
+                   bool rtprop_drate) {
+    const FbbrHybridDecision decision =
+        ClassifyFbbrHybridRegime(features, context);
+    const bool ok = std::string(decision.rule_id) == rule &&
+        decision.classification == classification &&
+        decision.update_max_rtt == max_rtt &&
+        decision.refresh_rtprop == rtprop &&
+        decision.update_rtprop_drate == rtprop_drate;
+    require(ok, std::string(rule) + " exact classification and side effects");
+  };
+
+  FbbrHybridRegimeFeatures f = base();
+  f.selected_clip_case = SrttClipCase::kU1PositiveShoulder;
+  check(f, "N01", WaveformClassification::kFullLoad,
+        false, false, false);
+  f.drate.periodic = PeriodicSimilarityResult::kNoMatch;
+  check(f, "N02", WaveformClassification::kOverload,
+        true, false, false);
+  f = base();
+  f.selected_clip_case = SrttClipCase::kU2LongTopLine;
+  check(f, "N03", WaveformClassification::kFullLoad,
+        false, false, false);
+  f.drate.periodic = PeriodicSimilarityResult::kNoMatch;
+  check(f, "N04", WaveformClassification::kOverload,
+        true, false, false);
+  f = base();
+  f.selected_clip_case = SrttClipCase::kU3RepeatedTopClip;
+  check(f, "N05", WaveformClassification::kOverload,
+        true, false, false);
+  f = base();
+  f.selected_clip_case = SrttClipCase::kL1NegativeShoulder;
+  f.drate.wave.has_wave = true;
+  check(f, "N06", WaveformClassification::kUnderload,
+        false, true, true);
+  f.drate.wave.has_wave = false;
+  f.srtt_max_ms = 100.0001;
+  check(f, "N07", WaveformClassification::kOverload,
+        false, false, false);
+  f.srtt_max_ms = 100.0;
+  f.srtt_min_ms = 49.9999;
+  check(f, "N08", WaveformClassification::kUnderload,
+        false, false, false);
+  f.srtt_min_ms = 50.0;
+  check(f, "N09", WaveformClassification::kFullLoad,
+        false, false, false);
+  f = base();
+  f.selected_clip_case = SrttClipCase::kL2LongBottomLine;
+  check(f, "N10", WaveformClassification::kUnderload,
+        false, true, true);
+  f.selected_clip_case = SrttClipCase::kL3RepeatedBottomClip;
+  check(f, "N11", WaveformClassification::kUnderload,
+        false, true, true);
+  f = base();
+  f.srtt.wave.has_wave = true;
+  f.srtt_max_ms = 100.0001;
+  check(f, "N12", WaveformClassification::kOverload,
+        false, false, false);
+  f.srtt_max_ms = 100.0;
+  f.srtt_min_ms = 49.9999;
+  check(f, "N13", WaveformClassification::kUnderload,
+        false, false, false);
+  f.srtt_min_ms = 50.0;
+  check(f, "N14", WaveformClassification::kFullLoad,
+        false, false, false);
+  f = base();
+  f.srtt.wave.has_wave = false;
+  f.drate.wave.has_wave = true;
+  check(f, "N15", WaveformClassification::kUnderload,
+        false, false, false);
+  f.drate.wave.has_wave = false;
+  f.srtt_max_ms = 100.0001;
+  check(f, "N16", WaveformClassification::kOverload,
+        false, false, false);
+  f.srtt_max_ms = 100.0;
+  f.srtt_min_ms = 49.9999;
+  check(f, "N17", WaveformClassification::kUnderload,
+        false, false, false);
+  f.srtt_min_ms = 50.0;
+  check(f, "N18", WaveformClassification::kFullLoad,
+        false, false, false);
+
+  f = base();
+  f.selected_clip_case = SrttClipCase::kU1PositiveShoulder;
+  f.drate.periodic = PeriodicSimilarityResult::kInvalidInput;
+  FbbrHybridDecision invalid = ClassifyFbbrHybridRegime(f, context);
+  require(invalid.classification == WaveformClassification::kInconclusive &&
+              std::string(invalid.rule_id).empty(),
+          "U1/U2 INVALID periodic input cannot fall through as NO_MATCH");
+  f = base();
+  f.selected_clip_case = SrttClipCase::kL1NegativeShoulder;
+  f.drate.wave.input_valid = false;
+  invalid = ClassifyFbbrHybridRegime(f, context);
+  require(invalid.classification == WaveformClassification::kInconclusive,
+          "L1 invalid ordinary-wave input is inconclusive");
+
+  const FbbrHybridActuatorResult i_mid =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kUnderload,
+          80.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult i_equal =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kUnderload,
+          90.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult iii_mid =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kOverload,
+          80.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult iii_equal =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kOverload,
+          90.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+  require(i_mid.valid && i_mid.midpoint_triggered &&
+              std::abs(i_mid.next_baseline_bps - 100.0) < 1e-12 &&
+              i_equal.valid && !i_equal.midpoint_triggered &&
+              std::abs(i_equal.next_baseline_bps - 120.0) < 1e-12,
+          "Regime I uses strict 50 percent midpoint boundary");
+  require(iii_mid.valid && iii_mid.midpoint_triggered &&
+              std::abs(iii_mid.next_baseline_bps - 100.0) < 1e-12 &&
+              iii_equal.valid && !iii_equal.midpoint_triggered &&
+              std::abs(iii_equal.next_baseline_bps - 90.0) < 1e-12,
+          "Regime III uses strict 50 percent midpoint boundary");
+  const FbbrHybridActuatorResult ii =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kFullLoad,
+          80.0, 120.0, 101.0, false, 0.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult no_ref_i =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kUnderload,
+          80.0, 120.0, 100.0, false, 0.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult no_ref_iii =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kOverload,
+          80.0, 120.0, 100.0, false, 0.0, 0.50, 90.0);
+  require(ii.valid && ii.update_probed_bw &&
+              std::abs(ii.next_baseline_bps - 101.0) < 1e-12 &&
+              std::abs(ii.probed_bw_bps - 101.0) < 1e-12,
+          "Regime II updates baseline and ProbedBw to time mean");
+  require(no_ref_i.valid && no_ref_i.next_baseline_bps == 120.0 &&
+              no_ref_iii.valid && no_ref_iii.next_baseline_bps == 90.0,
+          "invalid RTpropDRate selects max/min and pacing floor");
+
+  require(!(0.20 > 0.20) && 0.2001 > 0.20 &&
+              !(0.30 > 0.30) && 0.3001 > 0.30,
+          "U2/L2 duration boundaries are strict");
+  require(0.4999 < 0.50 && 0.50 >= 0.50,
+          "U3/L3 contact span boundary is inclusive at 50 percent");
+  require(std::abs(1.20 - 1.0) / 1.0 <= 0.20 + 1e-15 &&
+              std::abs(1.201 - 1.0) / 1.0 > 0.20,
+          "period error accepts 20 percent and rejects 20.1 percent");
+  require(AmplifiedWaveformProbeAmplitude(100, 100, 1.25, 2.0) == 125 &&
+              AmplifiedWaveformProbeAmplitude(125, 100, 1.25, 2.0) == 157 &&
+              AmplifiedWaveformProbeAmplitude(157, 100, 1.25, 2.0) == 197 &&
+              AmplifiedWaveformProbeAmplitude(197, 100, 1.25, 2.0) == 200 &&
+              AmplifiedWaveformProbeAmplitude(200, 100, 1.25, 2.0) == 200,
+          "retry amplitude uses ceil(1.25*A) and caps at 2*A");
+  require(kFBBRHybrid != kFBBR && kFBBRHybrid != kFBBRAdaptive,
+          "FBBR-hybrid owns an isolated congestion-control type");
+
+  RttStats detector_rtt;
+  detector_rtt.set_initial_rtt(TimeDelta::FromMilliseconds(40));
+  Random detector_random;
+  QuicConnectionStats detector_stats;
+  FBBRSender detector(QuicTime::Zero(), &detector_rtt, nullptr,
+                      10, 1000, &detector_random, &detector_stats,
+                      false, false, false, kFBBRHybrid);
+  detector.ConfigureFBBR(FBBRConfig());
+  WaveformWindowAnalysis retry_window;
+  retry_window.fbbr_hybrid_pipeline = true;
+  retry_window.classification = WaveformClassification::kFullLoad;
+  retry_window.unsuppressed_classification =
+      WaveformClassification::kFullLoad;
+  retry_window.hybrid_decision.rule_id = "N18";
+  retry_window.invalid_reason = "none";
+  retry_window.hybrid_features.srtt.wave.input_valid = true;
+  retry_window.hybrid_features.drate.wave.input_valid = true;
+  retry_window.hybrid_features.srtt.wave.has_wave = false;
+  retry_window.hybrid_features.drate.wave.has_wave = false;
+  retry_window.window_first_cycle_id = 1;
+  retry_window.window_second_cycle_id = 2;
+  detector.UpdateFbbrHybridRetryState(&retry_window);
+  require(!retry_window.no_wave_triggered &&
+              retry_window.srtt_no_wave_streak == 1 &&
+              retry_window.drate_no_wave_streak == 1 &&
+              !retry_window.classification_suppressed_for_retry,
+          "first no-wave window only increments independent streaks");
+  retry_window.classification = WaveformClassification::kFullLoad;
+  retry_window.invalid_reason = "none";
+  retry_window.window_first_cycle_id = 2;
+  retry_window.window_second_cycle_id = 3;
+  detector.UpdateFbbrHybridRetryState(&retry_window);
+  require(retry_window.no_wave_triggered &&
+              retry_window.wave_fidelity_just_entered &&
+              retry_window.classification_suppressed_for_retry &&
+              retry_window.state_updates_suppressed_for_retry &&
+              retry_window.classification ==
+                  WaveformClassification::kInconclusive,
+          "second no-wave window enters retry and freezes its N18 result");
+  retry_window.classification = WaveformClassification::kFullLoad;
+  retry_window.classification_suppressed_for_retry = false;
+  retry_window.state_updates_suppressed_for_retry = false;
+  retry_window.no_wave_triggered = false;
+  retry_window.wave_fidelity_just_entered = false;
+  retry_window.invalid_reason = "none";
+  retry_window.window_first_cycle_id = 3;
+  retry_window.window_second_cycle_id = 4;
+  detector.UpdateFbbrHybridRetryState(&retry_window);
+  require(retry_window.classification_suppressed_for_retry &&
+              retry_window.wave_fidelity_enhancement_active &&
+              retry_window.srtt_no_wave_streak == 3 &&
+              retry_window.drate_no_wave_streak == 3,
+          "continued no-wave rolling window remains suppressed");
+  retry_window.classification = WaveformClassification::kUnderload;
+  retry_window.classification_suppressed_for_retry = false;
+  retry_window.state_updates_suppressed_for_retry = false;
+  retry_window.invalid_reason = "none";
+  retry_window.hybrid_features.drate.wave.has_wave = true;
+  retry_window.window_first_cycle_id = 4;
+  retry_window.window_second_cycle_id = 5;
+  detector.UpdateFbbrHybridRetryState(&retry_window);
+  require(!retry_window.classification_suppressed_for_retry &&
+              !retry_window.wave_fidelity_enhancement_active &&
+              retry_window.srtt_no_wave_streak == 0 &&
+              retry_window.drate_no_wave_streak == 0,
+          "either signal recovering exits fidelity retry and clears streaks");
+  const double period_s = 0.20;
+  const double dt_s = 0.005;
+  const size_t sample_count = 80;
+  std::vector<bool> signal_valid(sample_count, true);
+  std::vector<double> smooth_sine(sample_count, 0.0);
+  std::vector<double> abrupt_jitter(sample_count, 0.0);
+  std::vector<double> one_way(sample_count, 0.0);
+  std::vector<double> single_spike(sample_count, 100.0);
+  for (size_t i = 0; i < sample_count; ++i) {
+    smooth_sine[i] = 100.0 + 10.0 * std::sin(
+        2.0 * M_PI * i * dt_s / period_s);
+    abrupt_jitter[i] = 100.0 +
+        (((i / 4) % 2 == 0) ? -10.0 : 10.0);
+    one_way[i] = 100.0 + static_cast<double>(i % 40);
+  }
+  single_spike[20] = 180.0;
+  const WaveActivityFeatures smooth_wave =
+      detector.DetectOrdinaryWaveActivity(
+          smooth_sine, signal_valid, dt_s, period_s);
+  const WaveActivityFeatures jitter_wave =
+      detector.DetectOrdinaryWaveActivity(
+          abrupt_jitter, signal_valid, dt_s, period_s);
+  const WaveActivityFeatures one_way_wave =
+      detector.DetectOrdinaryWaveActivity(
+          one_way, signal_valid, dt_s, period_s);
+  const WaveActivityFeatures spike_wave =
+      detector.DetectOrdinaryWaveActivity(
+          single_spike, signal_valid, dt_s, period_s);
+  require(smooth_wave.input_valid && !smooth_wave.has_wave &&
+              jitter_wave.input_valid && jitter_wave.has_wave,
+          "ordinary-wave detector separates smooth periodic motion from abrupt round trips");
+  require(!one_way_wave.has_wave && !spike_wave.has_wave,
+          "ordinary-wave return and robust-amplitude gates reject drift and one spike");
+
+  std::vector<double> top_clipped = smooth_sine;
+  for (double& value : top_clipped) {
+    value = std::min(value, 105.0);
+  }
+  const auto smooth_segments = detector.DetectContinuousHorizontalSegments(
+      smooth_sine, signal_valid, dt_s, period_s);
+  const auto top_segments = detector.DetectContinuousHorizontalSegments(
+      top_clipped, signal_valid, dt_s, period_s);
+  bool found_top_segment = false;
+  for (const auto& segment : top_segments) {
+    found_top_segment = found_top_segment ||
+        (segment.valid && segment.is_upper &&
+         segment.duration_ratio_of_period > 0.20);
+  }
+  require(smooth_segments.empty() && found_top_segment,
+          "continuous-horizontal detector rejects a round top and accepts hard clipping");
+
+  std::vector<double> repeated_top(sample_count, 90.0);
+  for (size_t cycle = 0; cycle < 2; ++cycle) {
+    const size_t offset = cycle * 40;
+    for (size_t center : {static_cast<size_t>(8),
+                          static_cast<size_t>(28)}) {
+      repeated_top[offset + center - 2] = 96.0;
+      repeated_top[offset + center - 1] = 104.0;
+      repeated_top[offset + center] = 110.0;
+      repeated_top[offset + center + 1] = 110.0;
+      repeated_top[offset + center + 2] = 110.0;
+      repeated_top[offset + center + 3] = 104.0;
+      repeated_top[offset + center + 4] = 96.0;
+    }
+  }
+  const RepeatedClipLineEvidence repeated =
+      detector.DetectRepeatedClipLineContacts(
+          repeated_top, signal_valid, dt_s, period_s, true);
+  require(repeated.valid && repeated.contact_cycle_mask == 0x3 &&
+              repeated.contact_time_span_ratio_of_window >= 0.50 &&
+              repeated.contact_fragment_count >= 2,
+          "repeated short contacts use cross-cycle same-level evidence and 50 percent span");
+
+  SignalRegimeFeatures periodic_features;
+  std::vector<bool> periodic_mask = signal_valid;
+  const PeriodicSimilarityResult periodic_match =
+      detector.AnalyzeFbbrHybridPeriodicSimilarity(
+          smooth_sine, signal_valid, periodic_mask, dt_s, period_s,
+          period_s, false, &periodic_features);
+  const PeriodicSimilarityResult upper_veto =
+      detector.AnalyzeFbbrHybridPeriodicSimilarity(
+          smooth_sine, signal_valid, periodic_mask, dt_s, period_s,
+          period_s, true, &periodic_features);
+  require(periodic_match == PeriodicSimilarityResult::kMatch &&
+              upper_veto == PeriodicSimilarityResult::kNoMatch,
+          "periodic similarity accepts waveform-shape independence and enforces upper-clip veto");
+
+  std::vector<bool> insufficient_valid = signal_valid;
+  for (size_t i = 0; i < 50; ++i) {
+    insufficient_valid[i] = false;
+  }
+  SignalRegimeFeatures invalid_periodic_features;
+  require(detector.AnalyzeFbbrHybridPeriodicSimilarity(
+              smooth_sine, signal_valid, insufficient_valid,
+              dt_s, period_s, period_s, false,
+              &invalid_periodic_features) ==
+              PeriodicSimilarityResult::kInvalidInput,
+          "periodic similarity preserves INVALID_INPUT instead of coercing false");
+  os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
+  return pass;
+}
 Bbr2ProbeBwMode::CyclePhase FBBRSender::GetCurrentProbeBwPhase() const {
   DebugState state = ExportDebugState();
   if (state.mode == Bbr2Mode::PROBE_BW) {
     return state.probe_bw.phase;
   }
   return Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED;
+}
+
+bool FBBRSender::ShouldEnableRtpropProbeDown(
+    bool previous_cruise_rtprop_updated,
+    QuicByteCount bytes_in_flight,
+    QuicByteCount bdp) {
+  return previous_cruise_rtprop_updated && bdp > 0 &&
+         static_cast<long double>(bytes_in_flight) >=
+             1.25L * static_cast<long double>(bdp);
+}
+
+bool FBBRSender::ShouldExitRtpropProbeDown(
+    QuicByteCount bytes_in_flight,
+    QuicByteCount bdp) {
+  return bdp > 0 &&
+         static_cast<long double>(bytes_in_flight) <
+             1.05L * static_cast<long double>(bdp);
+}
+
+bool FBBRSender::HasCustomProbeDownLogic() const {
+  return rtprop_probe_down_active_;
+}
+
+bool FBBRSender::ShouldExitCustomProbeDown(
+    QuicByteCount bytes_in_flight,
+    QuicByteCount bdp) const {
+  return rtprop_probe_down_active_ &&
+         ShouldExitRtpropProbeDown(bytes_in_flight, bdp);
+}
+
+float FBBRSender::GetProbeBwPacingGain(
+    Bbr2ProbeBwMode::CyclePhase phase,
+    float pacing_gain) const {
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN &&
+      rtprop_probe_down_active_) {
+    return kFBBRRtpropProbeDownPacingGain;
+  }
+  return pacing_gain;
 }
 
 float FBBRSender::GetProbeBwCwndGain(
@@ -1916,6 +2819,171 @@ uint64_t FBBRSender::GetCurrentAmplitudeBps() const {
   }
 }
 
+double FBBRSender::ComputeMaxBwAttenuationFactor(
+    double delivery_center_bps,
+    double actual_fluctuation_amplitude_bps) {
+  if (!std::isfinite(delivery_center_bps) || delivery_center_bps <= 0.0 ||
+      !std::isfinite(actual_fluctuation_amplitude_bps) ||
+      actual_fluctuation_amplitude_bps <= 0.0) {
+    return 1.0;
+  }
+  const long double center =
+      static_cast<long double>(delivery_center_bps);
+  const long double amplitude =
+      static_cast<long double>(actual_fluctuation_amplitude_bps);
+  const long double denominator = center + amplitude;
+  if (!std::isfinite(denominator) || denominator <= center) {
+    return 1.0;
+  }
+  return ClampValue(static_cast<double>(center / denominator),
+                    std::numeric_limits<double>::min(), 1.0);
+}
+
+uint64_t FBBRSender::CurrentEmittedProbeAmplitudeBps() const {
+  if (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
+    return current_probe_amplitude_bps_;
+  }
+  return GetCurrentAmplitudeBps();
+}
+
+double FBBRSender::CurrentActualDeliveryFluctuationAmplitudeBps() const {
+  const double emitted_amplitude_bps =
+      static_cast<double>(CurrentEmittedProbeAmplitudeBps());
+  if (!std::isfinite(emitted_amplitude_bps) ||
+      emitted_amplitude_bps <= 0.0 ||
+      !std::isfinite(max_bw_delivery_response_gain_) ||
+      max_bw_delivery_response_gain_ < 0.0) {
+    return 0.0;
+  }
+  return max_bw_delivery_response_gain_ * emitted_amplitude_bps;
+}
+
+double FBBRSender::CurrentMaxBwAttenuationFactor() const {
+  if (!ShouldOscillate()) {
+    return 1.0;
+  }
+
+  const double current_baseline_bps = static_cast<double>(
+      (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
+           ? current_injection_baseline_bw_
+           : BandwidthEstimate())
+          .ToBitsPerSecond());
+  if (!std::isfinite(current_baseline_bps) || current_baseline_bps <= 0.0) {
+    return 1.0;
+  }
+
+  // Once a response has been measured, predict how its center follows a
+  // baseline adjustment with the same measured delivery-response gain.  An
+  // underloaded path has gain near one and follows the new baseline; a
+  // clipped/full path has gain near zero and keeps the observed center.
+  double predicted_center_bps = current_baseline_bps;
+  if (max_bw_response_observed_ &&
+      std::isfinite(max_bw_observation_center_bps_) &&
+      std::isfinite(max_bw_observation_baseline_bps_)) {
+    predicted_center_bps = max_bw_observation_center_bps_ +
+        max_bw_delivery_response_gain_ *
+            (current_baseline_bps - max_bw_observation_baseline_bps_);
+  }
+  if (!std::isfinite(predicted_center_bps) || predicted_center_bps <= 0.0) {
+    predicted_center_bps = current_baseline_bps;
+  }
+  return ComputeMaxBwAttenuationFactor(
+      predicted_center_bps,
+      CurrentActualDeliveryFluctuationAmplitudeBps());
+}
+
+void FBBRSender::ResetMaxBwAttenuationEstimator() {
+  const double baseline_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  max_bw_response_observed_ = false;
+  // Before the first receiver window is available, use unit response gain as
+  // the causal bootstrap: it exactly removes a freely delivered pacing wave
+  // and is replaced by the measured response as soon as one window completes.
+  max_bw_delivery_response_gain_ = 1.0;
+  max_bw_observation_center_bps_ =
+      std::isfinite(baseline_bps) && baseline_bps > 0.0
+          ? baseline_bps
+          : 0.0;
+  max_bw_observation_baseline_bps_ = max_bw_observation_center_bps_;
+  max_bw_actual_fluctuation_amplitude_bps_ =
+      CurrentActualDeliveryFluctuationAmplitudeBps();
+  max_bw_attenuation_factor_ = ComputeMaxBwAttenuationFactor(
+      max_bw_observation_center_bps_,
+      max_bw_actual_fluctuation_amplitude_bps_);
+}
+
+void FBBRSender::UpdateMaxBwAttenuationEstimator(
+    double delivery_center_bps,
+    double actual_fluctuation_amplitude_bps,
+    double emitted_fluctuation_amplitude_bps) {
+  if (!std::isfinite(delivery_center_bps) || delivery_center_bps <= 0.0 ||
+      !std::isfinite(actual_fluctuation_amplitude_bps) ||
+      actual_fluctuation_amplitude_bps < 0.0 ||
+      !std::isfinite(emitted_fluctuation_amplitude_bps) ||
+      emitted_fluctuation_amplitude_bps <= 0.0) {
+    return;
+  }
+  const double baseline_bps = static_cast<double>(
+      (cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
+           ? current_injection_baseline_bw_
+           : BandwidthEstimate())
+          .ToBitsPerSecond());
+  if (!std::isfinite(baseline_bps) || baseline_bps <= 0.0) {
+    return;
+  }
+
+  max_bw_response_observed_ = true;
+  max_bw_delivery_response_gain_ =
+      actual_fluctuation_amplitude_bps /
+      emitted_fluctuation_amplitude_bps;
+  max_bw_observation_center_bps_ = delivery_center_bps;
+  max_bw_observation_baseline_bps_ = baseline_bps;
+  max_bw_actual_fluctuation_amplitude_bps_ =
+      CurrentActualDeliveryFluctuationAmplitudeBps();
+  max_bw_attenuation_factor_ = CurrentMaxBwAttenuationFactor();
+  QUIC_DVLOG(2)
+      << "FBBR: maxbw attenuation updated. observed_center_bps="
+      << delivery_center_bps
+      << ", observed_amplitude_bps="
+      << actual_fluctuation_amplitude_bps
+      << ", emitted_amplitude_bps="
+      << emitted_fluctuation_amplitude_bps
+      << ", response_gain=" << max_bw_delivery_response_gain_
+      << ", factor=" << max_bw_attenuation_factor_;
+}
+
+void FBBRSender::UpdateMaxBwAttenuationFromWaveform(
+    const WaveformWindowAnalysis& analysis) {
+  if (!analysis.delivery_rate_stats_valid || !analysis.drate_input_valid ||
+      !analysis.sender_waveform_valid || !analysis.drate_fit.valid) {
+    return;
+  }
+  UpdateMaxBwAttenuationEstimator(
+      analysis.delivery_rate_mean_bps,
+      analysis.current_drate_response_amplitude_bps,
+      static_cast<double>(current_probe_amplitude_bps_));
+}
+
+void FBBRSender::UpdateMaxBwAttenuationFromLegacyWindow(
+    const CruiseWindowResult& result) {
+  if (!result.drate_valid || !result.srate_valid ||
+      !std::isfinite(result.drate_mean_kbps) ||
+      !std::isfinite(result.drate_target_amp) ||
+      !std::isfinite(result.srate_target_amp) ||
+      result.drate_mean_kbps <= 0.0 || result.drate_target_amp < 0.0 ||
+      result.srate_target_amp <= 0.0) {
+    return;
+  }
+  const double emitted_amplitude_bps =
+      static_cast<double>(CurrentEmittedProbeAmplitudeBps());
+  const double response_gain =
+      result.drate_target_amp / result.srate_target_amp;
+  UpdateMaxBwAttenuationEstimator(
+      result.drate_mean_kbps * 1000.0,
+      response_gain * emitted_amplitude_bps,
+      emitted_amplitude_bps);
+}
+
 double FBBRSender::TriangleWave(QuicTime now) const {
   if (cruise_modulation_freq_hz_ <= 0.0 ||
       cruise_start_time_ == QuicTime::Zero()) {
@@ -1957,16 +3025,35 @@ double FBBRSender::TriangleWave(QuicTime now) const {
 void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                                            QuicTime now) {
   if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
+    rtprop_probe_down_active_ = false;
     EnterCruise(now);
     return;
   }
   if (in_cruise_) {
     LeaveCruise(now);
   }
+  if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN) {
+    const QuicByteCount bdp = model_.BDP();
+    rtprop_probe_down_active_ = ShouldEnableRtpropProbeDown(
+        previous_cruise_rtprop_updated_,
+        latest_congestion_event_prior_inflight_, bdp);
+    QUIC_DVLOG(2)
+        << "FBBR: Entering PROBE_DOWN. prior_inflight="
+        << latest_congestion_event_prior_inflight_ << ", bdp=" << bdp
+        << ", previous_cruise_rtprop_updated="
+        << previous_cruise_rtprop_updated_
+        << ", rtprop_probe_down_active=" << rtprop_probe_down_active_;
+    previous_cruise_rtprop_updated_ = false;
+  } else {
+    rtprop_probe_down_active_ = false;
+  }
 }
 
 void FBBRSender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
+  current_cruise_rtprop_updated_ = false;
+  previous_cruise_rtprop_updated_ = false;
+  cruise_rtprop_at_entry_ = model_.MinRtt();
   ++cruise_id_;
   cruise_start_time_ = now;
   trusted_bw_cleared_on_cruise_start_ = false;
@@ -2002,12 +3089,26 @@ void FBBRSender::EnterCruise(QuicTime now) {
         !adaptive_cruise_start_max_bw_.IsInfinite() &&
         std::isfinite(current_max_bw_bps) && current_max_bw_bps > 0.0;
   }
-  const QuicBandwidth current_native_max_bw = BandwidthEstimate();
+  QuicBandwidth current_native_max_bw = IsFbbrHybrid()
+      ? model_.MaxBandwidth() : BandwidthEstimate();
+  if (current_native_max_bw.IsZero() ||
+      current_native_max_bw.IsInfinite()) {
+    current_native_max_bw = BandwidthEstimate();
+  }
   initial_cruise_baseline_bw_ = current_native_max_bw;
   current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
   current_probe_amplitude_bps_ = GetCurrentAmplitudeBps();
   waveform_initial_probe_amplitude_bps_ = current_probe_amplitude_bps_;
+  ResetMaxBwAttenuationEstimator();
   waveform_inconclusive_amplification_count_ = 0;
+  fbbr_hybrid_srtt_no_wave_streak_ = 0;
+  fbbr_hybrid_drate_no_wave_streak_ = 0;
+  fbbr_hybrid_wave_fidelity_enhancement_active_ = false;
+  fbbr_hybrid_retry_reason_mask_ = 0;
+  fbbr_hybrid_last_counted_window_second_cycle_id_ = 0;
+  fbbr_hybrid_rolling_retry_count_ = 0;
+  fbbr_hybrid_regime_ii_seen_this_cruise_ = false;
+  fbbr_hybrid_probed_bw_ = QuicBandwidth::Zero();
   current_probe_bw_phase_gain_ =
       cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
           ? 1.0
@@ -2041,6 +3142,7 @@ void FBBRSender::EnterCruise(QuicTime now) {
 void FBBRSender::LeaveCruise(QuicTime now) {
   QUIC_DVLOG(2) << "FBBR: Leaving PROBE_CRUISE @ " << now;
   FinalizeCruise(now);
+  previous_cruise_rtprop_updated_ = current_cruise_rtprop_updated_;
   in_cruise_ = false;
   freq_tool_on_ = false;
   cruise_freq_tool_active_ = false;
@@ -2071,6 +3173,16 @@ void FBBRSender::ResetCruiseWindowState() {
 
 void FBBRSender::OnCongestionEventStarted(
     const Bbr2CongestionEvent& congestion_event) {
+  // PROBE_UP and the reference BBR-R logic judge the entry flight before the
+  // ACK/loss event that triggers the phase transition.
+  latest_congestion_event_prior_inflight_ =
+      congestion_event.prior_bytes_in_flight;
+  if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
+      GetCurrentProbeBwPhase() ==
+          Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
+      model_.MinRtt() != cruise_rtprop_at_entry_) {
+    current_cruise_rtprop_updated_ = true;
+  }
   UpdateRoundDeliveryRateSample(congestion_event);
   if (congestion_event.end_of_round_trip) {
     FinalizeCompletedRound(congestion_event);
@@ -2247,6 +3359,7 @@ void FBBRSender::UpdateFreqWeightAndToolState() {
 void FBBRSender::ClearTrustedBw(const char* reason) {
   trusted_bw_ = QuicBandwidth::Zero();
   trusted_bw_valid_ = false;
+  model_.ClearBdpBandwidthOverride();
   trusted_bw_conf_ = 0.0;
   trusted_bw_source_ = kTrustedBwSourceNone;
   trusted_bw_cruise_id_ = 0;
@@ -2341,6 +3454,7 @@ void FBBRSender::PublishTrustedBwSelection(
       selection.trusted_bw_valid &&
       (waveform_source || selection.dual_signal_spectral_gate_pass) &&
       !selection.trusted_bw.IsZero() &&
+      !selection.trusted_bw.IsInfinite() &&
       std::isfinite(static_cast<double>(
           selection.trusted_bw.ToBitsPerSecond()));
   if (!valid_selection) {
@@ -2351,6 +3465,9 @@ void FBBRSender::PublishTrustedBwSelection(
 
   trusted_bw_ = selection.trusted_bw;
   trusted_bw_valid_ = true;
+  // FBBR and FBBR-adaptive share this sender. No other congestion-control
+  // implementation opts into the BDP override.
+  model_.SetBdpBandwidthOverride(trusted_bw_);
   trusted_bw_conf_ = selection.trusted_bw_conf;
   trusted_bw_source_ = selection.trusted_bw_source;
   trusted_bw_cruise_id_ =
@@ -2619,6 +3736,11 @@ void FBBRSender::EmitFreqGateCsvRow(
       << modulation_amp_eff_bps << ","
       << triangle_wave << ","
       << current_delivery_rate.ToBitsPerSecond() << ","
+      << max_bw_attenuation_factor_ << ","
+      << model_.max_bandwidth_filter_input().ToBitsPerSecond() << ","
+      << max_bw_actual_fluctuation_amplitude_bps_ << ","
+      << max_bw_delivery_response_gain_ << ","
+      << (max_bw_response_observed_ ? "true" : "false") << ","
       << (sample_is_app_limited ? "true" : "false") << ","
       << (sample_valid ? "true" : "false") << ","
       << (merged_rescue_attempted_ ? "true" : "false") << ","
@@ -2668,6 +3790,16 @@ void FBBRSender::OnCongestionEvent(
   for (const auto& ack : acked_packets) {
     acked_bytes += ack.bytes_acked;
   }
+
+  // FBBR and FBBR-adaptive share this path. Keep the ACK-rate sample raw for
+  // waveform analysis, but remove the currently estimated positive waveform
+  // excursion from the sample that feeds BBR's max-bandwidth filter.
+  max_bw_actual_fluctuation_amplitude_bps_ =
+      ShouldOscillate()
+          ? CurrentActualDeliveryFluctuationAmplitudeBps()
+          : 0.0;
+  max_bw_attenuation_factor_ = CurrentMaxBwAttenuationFactor();
+  model_.SetMaxBandwidthSampleAttenuation(max_bw_attenuation_factor_);
 
   Bbr2Sender::OnCongestionEvent(rtt_updated,
                                 prior_in_flight,
@@ -2902,6 +4034,1205 @@ bool FBBRSender::UsesAdaptiveLoadJudgment() const {
   return adaptive_guard_enabled_ || fbbr_window_baseline_enabled_;
 }
 
+bool FBBRSender::IsFbbrHybrid() const {
+  return GetCongestionControlType() == kFBBRHybrid;
+}
+
+FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
+    const FbbrHybridRegimeFeatures& features,
+    const FbbrRegimeContext& context) {
+  FbbrHybridDecision decision;
+  auto decide = [&decision](WaveformClassification classification,
+                            const char* rule,
+                            bool update_max_rtt,
+                            bool refresh_rtprop,
+                            bool update_rtprop_drate) {
+    decision.classification = classification;
+    decision.rule_id = rule;
+    decision.update_max_rtt = update_max_rtt;
+    decision.refresh_rtprop = refresh_rtprop;
+    decision.update_rtprop_drate = update_rtprop_drate;
+    return decision;
+  };
+  auto max_exceeded = [&]() {
+    return features.srtt_stats_valid && context.max_rtt_valid &&
+        std::isfinite(features.srtt_max_ms) &&
+        features.srtt_max_ms > context.max_rtt_ms;
+  };
+  auto min_below_rtprop = [&]() {
+    return features.srtt_stats_valid && context.rtprop_valid &&
+        std::isfinite(features.srtt_min_ms) &&
+        features.srtt_min_ms < context.rtprop_ms;
+  };
+
+  switch (features.selected_clip_case) {
+    case SrttClipCase::kU1PositiveShoulder:
+      if (features.drate.periodic == PeriodicSimilarityResult::kInvalidInput) {
+        return decision;
+      }
+      return features.drate.periodic == PeriodicSimilarityResult::kMatch
+          ? decide(WaveformClassification::kFullLoad, "N01",
+                   false, false, false)
+          : decide(WaveformClassification::kOverload, "N02",
+                   true, false, false);
+    case SrttClipCase::kU2LongTopLine:
+      if (features.drate.periodic == PeriodicSimilarityResult::kInvalidInput) {
+        return decision;
+      }
+      return features.drate.periodic == PeriodicSimilarityResult::kMatch
+          ? decide(WaveformClassification::kFullLoad, "N03",
+                   false, false, false)
+          : decide(WaveformClassification::kOverload, "N04",
+                   true, false, false);
+    case SrttClipCase::kU3RepeatedTopClip:
+      return decide(WaveformClassification::kOverload, "N05",
+                    true, false, false);
+    case SrttClipCase::kL1NegativeShoulder:
+      if (!features.drate.wave.input_valid) {
+        return decision;
+      }
+      if (features.drate.wave.has_wave) {
+        return decide(WaveformClassification::kUnderload, "N06",
+                      false, true, true);
+      }
+      if (max_exceeded()) {
+        return decide(WaveformClassification::kOverload, "N07",
+                      false, false, false);
+      }
+      if (min_below_rtprop()) {
+        return decide(WaveformClassification::kUnderload, "N08",
+                      false, false, false);
+      }
+      return decide(WaveformClassification::kFullLoad, "N09",
+                    false, false, false);
+    case SrttClipCase::kL2LongBottomLine:
+      return decide(WaveformClassification::kUnderload, "N10",
+                    false, true, true);
+    case SrttClipCase::kL3RepeatedBottomClip:
+      return decide(WaveformClassification::kUnderload, "N11",
+                    false, true, true);
+    case SrttClipCase::kNone:
+      break;
+  }
+
+  if (!features.srtt.wave.input_valid) {
+    return decision;
+  }
+  if (features.srtt.wave.has_wave) {
+    if (max_exceeded()) {
+      return decide(WaveformClassification::kOverload, "N12",
+                    false, false, false);
+    }
+    if (min_below_rtprop()) {
+      return decide(WaveformClassification::kUnderload, "N13",
+                    false, false, false);
+    }
+    return decide(WaveformClassification::kFullLoad, "N14",
+                  false, false, false);
+  }
+  if (!features.drate.wave.input_valid) {
+    return decision;
+  }
+  if (features.drate.wave.has_wave) {
+    return decide(WaveformClassification::kUnderload, "N15",
+                  false, false, false);
+  }
+  if (max_exceeded()) {
+    return decide(WaveformClassification::kOverload, "N16",
+                  false, false, false);
+  }
+  if (min_below_rtprop()) {
+    return decide(WaveformClassification::kUnderload, "N17",
+                  false, false, false);
+  }
+  return decide(WaveformClassification::kFullLoad, "N18",
+                false, false, false);
+}
+
+FBBRSender::FbbrHybridActuatorResult
+FBBRSender::ComputeFbbrHybridInjectionBaseline(
+    WaveformClassification classification,
+    double mindrate_bps,
+    double maxdrate_bps,
+    double meandrate_bps,
+    bool rtprop_drate_valid,
+    double rtprop_drate_bps,
+    double midpoint_trigger_ratio,
+    double minimum_rate_bps) {
+  FbbrHybridActuatorResult result;
+  if (classification == WaveformClassification::kInconclusive ||
+      !std::isfinite(mindrate_bps) || mindrate_bps <= 0.0 ||
+      !std::isfinite(maxdrate_bps) || maxdrate_bps < mindrate_bps ||
+      !std::isfinite(meandrate_bps) || meandrate_bps <= 0.0 ||
+      !std::isfinite(minimum_rate_bps) || minimum_rate_bps <= 0.0 ||
+      !std::isfinite(midpoint_trigger_ratio) ||
+      midpoint_trigger_ratio < 0.0) {
+    return result;
+  }
+  result.swing_bps = maxdrate_bps - mindrate_bps;
+  const bool reference_valid = rtprop_drate_valid &&
+      std::isfinite(rtprop_drate_bps) && rtprop_drate_bps > 0.0 &&
+      rtprop_drate_bps <= maxdrate_bps;
+  result.reference_gap_bps = reference_valid
+      ? maxdrate_bps - rtprop_drate_bps
+      : 0.0;
+  result.midpoint_triggered = reference_valid &&
+      result.swing_bps > midpoint_trigger_ratio * result.reference_gap_bps;
+  const double midpoint = mindrate_bps + result.swing_bps / 2.0;
+  if (classification == WaveformClassification::kFullLoad) {
+    result.next_baseline_bps = meandrate_bps;
+    result.update_probed_bw = true;
+    result.probed_bw_bps = meandrate_bps;
+  } else if (classification == WaveformClassification::kUnderload) {
+    result.next_baseline_bps = result.midpoint_triggered
+        ? midpoint : maxdrate_bps;
+  } else {
+    result.next_baseline_bps = result.midpoint_triggered
+        ? midpoint : mindrate_bps;
+  }
+  result.next_baseline_bps =
+      std::max(minimum_rate_bps, result.next_baseline_bps);
+  result.valid = std::isfinite(result.next_baseline_bps) &&
+      result.next_baseline_bps > 0.0;
+  return result;
+}
+
+double FBBRSender::EstimateActualSignalPeriod(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double nominal_period_s,
+    double* correlation) {
+  if (correlation != nullptr) {
+    *correlation = -1.0;
+  }
+  if (values.size() != valid.size() || values.size() < 20 ||
+      sample_step_s <= 0.0 || nominal_period_s <= 0.0) {
+    return 0.0;
+  }
+  const size_t minimum_lag = std::max<size_t>(
+      2, static_cast<size_t>(std::llround(
+             0.75 * nominal_period_s / sample_step_s)));
+  const size_t maximum_lag = std::min<size_t>(
+      values.size() - 2,
+      static_cast<size_t>(std::llround(
+          1.25 * nominal_period_s / sample_step_s)));
+  double best_correlation = -1.0;
+  size_t best_lag = 0;
+  for (size_t lag = minimum_lag; lag <= maximum_lag; ++lag) {
+    size_t pairs = 0;
+    const double candidate =
+        ValidLagCorrelation(values, valid, lag, &pairs);
+    if (pairs >= std::max<size_t>(4, lag / 2) &&
+        candidate > best_correlation) {
+      best_correlation = candidate;
+      best_lag = lag;
+    }
+  }
+  if (correlation != nullptr) {
+    *correlation = best_correlation;
+  }
+  return best_lag > 0 && best_correlation >= 0.50
+      ? best_lag * sample_step_s
+      : 0.0;
+}
+
+FBBRSender::WaveActivityFeatures
+FBBRSender::DetectOrdinaryWaveActivity(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double period_s) const {
+  WaveActivityFeatures result;
+  if (values.size() != valid.size() || sample_step_s <= 0.0 ||
+      period_s <= 0.0) {
+    return result;
+  }
+  const std::vector<double> filtered = MedianFilter3(values, valid);
+  const size_t samples_per_period = static_cast<size_t>(
+      std::llround(period_s / sample_step_s));
+  if (samples_per_period < 20 || values.size() < 2 * samples_per_period) {
+    return result;
+  }
+  bool all_cycles_valid = true;
+  const char* best_failure = "LOW_AMP";
+  for (size_t cycle = 0; cycle < 2; ++cycle) {
+    const size_t begin = cycle * samples_per_period;
+    const size_t end = std::min(values.size(), begin + samples_per_period);
+    std::vector<double> cycle_values;
+    std::vector<double> residuals;
+    for (size_t i = begin; i < end; ++i) {
+      if (valid[i] && std::isfinite(values[i]) &&
+          std::isfinite(filtered[i])) {
+        cycle_values.push_back(filtered[i]);
+        residuals.push_back(values[i] - filtered[i]);
+      }
+    }
+    if (cycle_values.size() < 20) {
+      all_cycles_valid = false;
+      continue;
+    }
+    const double sigma = RobustSigma(residuals);
+    const double amplitude =
+        Quantile(cycle_values, 0.95) - Quantile(cycle_values, 0.05);
+    const double level = std::max(
+        std::abs(Median(cycle_values)), 1e-12);
+    const bool amplitude_ok = amplitude >= std::max(
+        waveform_activity_amplitude_noise_multiplier_ * sigma,
+        waveform_activity_min_level_ratio_ * level);
+    double up_change = 0.0;
+    double down_change = 0.0;
+    size_t valid_steps = 0;
+    size_t active_steps = 0;
+    int previous_sign = 0;
+    uint32_t reversals = 0;
+    double last_threshold = 0.0;
+    if (amplitude > 0.0) {
+      for (size_t i = begin + 1; i < end; ++i) {
+        if (!valid[i - 1] || !valid[i] ||
+            !std::isfinite(filtered[i - 1]) ||
+            !std::isfinite(filtered[i])) {
+          continue;
+        }
+        ++valid_steps;
+        const double delta = filtered[i] - filtered[i - 1];
+        const double threshold = std::max(
+            waveform_activity_step_noise_multiplier_ *
+                std::sqrt(2.0) * sigma,
+            waveform_activity_min_normalized_step_slope_ * amplitude *
+                sample_step_s / period_s);
+        last_threshold = threshold;
+        if (std::abs(delta) + 1e-15 < threshold) {
+          continue;
+        }
+        ++active_steps;
+        const int sign = delta > 0.0 ? 1 : -1;
+        if (previous_sign != 0 && sign != previous_sign) {
+          ++reversals;
+        }
+        previous_sign = sign;
+        if (delta > 0.0) {
+          up_change += delta;
+        } else {
+          down_change -= delta;
+        }
+      }
+    }
+    const size_t required_steps = std::max<size_t>(
+        waveform_activity_min_active_steps_,
+        static_cast<size_t>(std::ceil(
+            waveform_activity_min_active_step_ratio_ * valid_steps)));
+    const bool active_ok = active_steps >= required_steps;
+    const double path = up_change + down_change;
+    const bool return_ok = amplitude > 0.0 &&
+        up_change >= waveform_activity_min_directional_change_ratio_ *
+                         amplitude &&
+        down_change >= waveform_activity_min_directional_change_ratio_ *
+                           amplitude &&
+        path >= waveform_activity_min_significant_path_ratio_ * amplitude &&
+        reversals >= waveform_activity_min_slope_reversals_;
+    const bool has_wave = amplitude_ok && active_ok && return_ok;
+    if (has_wave) {
+      result.has_wave = true;
+      result.active_cycle_mask |= static_cast<uint8_t>(1u << cycle);
+      best_failure = "NONE";
+    } else if (!amplitude_ok) {
+      best_failure = "LOW_AMP";
+    } else if (!active_ok) {
+      best_failure = active_steps <= 2 ? "SPIKE" : "SMOOTH_ONLY";
+    } else {
+      best_failure = "ONE_WAY";
+    }
+    if (amplitude >= result.amplitude) {
+      result.amplitude = amplitude;
+      result.noise_sigma = sigma;
+      result.amplitude_to_level_ratio = amplitude / level;
+      result.step_threshold = last_threshold;
+      result.active_step_ratio = valid_steps == 0
+          ? 0.0 : static_cast<double>(active_steps) / valid_steps;
+      result.up_change_ratio = amplitude > 0.0
+          ? up_change / amplitude : 0.0;
+      result.down_change_ratio = amplitude > 0.0
+          ? down_change / amplitude : 0.0;
+      result.significant_path_ratio = amplitude > 0.0
+          ? path / amplitude : 0.0;
+      result.slope_reversals = reversals;
+    }
+  }
+  result.input_valid = all_cycles_valid;
+  if (!result.input_valid) {
+    result.has_wave = false;
+    result.failure_reason = "INVALID_INPUT";
+  } else {
+    result.failure_reason = result.has_wave ? "NONE" : best_failure;
+  }
+  return result;
+}
+
+std::vector<FBBRSender::ContinuousHorizontalEvidence>
+FBBRSender::DetectContinuousHorizontalSegments(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double period_s) const {
+  std::vector<ContinuousHorizontalEvidence> results;
+  if (values.size() != valid.size() || values.size() < 5 ||
+      sample_step_s <= 0.0 || period_s <= 0.0) {
+    return results;
+  }
+  const std::vector<double> filtered = MedianFilter3(values, valid);
+  std::vector<double> finite;
+  std::vector<double> residuals;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i]) &&
+        std::isfinite(filtered[i])) {
+      finite.push_back(filtered[i]);
+      residuals.push_back(values[i] - filtered[i]);
+    }
+  }
+  if (finite.size() < 5) {
+    return results;
+  }
+  const double p05 = Quantile(finite, 0.05);
+  const double p95 = Quantile(finite, 0.95);
+  const double amplitude = p95 - p05;
+  const double sigma_x = RobustSigma(residuals);
+  if (amplitude < std::max(
+          waveform_horizontal_amplitude_noise_multiplier_ * sigma_x,
+          1e-12)) {
+    return results;
+  }
+  const size_t local_radius = std::max<size_t>(
+      2, static_cast<size_t>(std::ceil(0.05 * period_s / sample_step_s)));
+  std::vector<double> local_slopes(values.size(), 0.0);
+  std::vector<double> absolute_local_slopes;
+  for (size_t i = 0; i < values.size(); ++i) {
+    const size_t begin = i > local_radius ? i - local_radius : 0;
+    const size_t end = std::min(values.size(), i + local_radius + 1);
+    local_slopes[i] =
+        TheilSenSlope(filtered, valid, begin, end, sample_step_s);
+    if (valid[i] && std::isfinite(local_slopes[i])) {
+      absolute_local_slopes.push_back(std::abs(local_slopes[i]));
+    }
+  }
+  const double s80 = Quantile(absolute_local_slopes, 0.80);
+  std::vector<double> residual_slope_noise;
+  for (size_t i = 1; i < residuals.size(); ++i) {
+    residual_slope_noise.push_back(
+        (residuals[i] - residuals[i - 1]) / sample_step_s);
+  }
+  const double sigma_s = RobustSigma(residual_slope_noise);
+  const double theta_flat = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_max_local_slope_ratio_ * s80);
+  const double theta_side = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_min_side_slope_ratio_ * s80);
+  const double theta_kink = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_min_boundary_kink_ratio_ * s80);
+  std::vector<bool> flat_step(values.size(), false);
+  for (size_t i = 1; i < values.size(); ++i) {
+    flat_step[i] = valid[i - 1] && valid[i] &&
+        std::isfinite(filtered[i - 1]) && std::isfinite(filtered[i]) &&
+        std::abs((filtered[i] - filtered[i - 1]) / sample_step_s) <=
+            theta_flat + 1e-15;
+  }
+  const size_t context_points = std::max<size_t>(
+      4, static_cast<size_t>(std::ceil(0.10 * period_s / sample_step_s)));
+  const size_t minimum_steps = std::max<size_t>(
+      2, static_cast<size_t>(std::ceil(
+          waveform_horizontal_continuous_min_duration_ratio_ * period_s /
+          sample_step_s)));
+  size_t i = 1;
+  while (i < flat_step.size()) {
+    if (!flat_step[i]) {
+      ++i;
+      continue;
+    }
+    const size_t start = i - 1;
+    size_t end = i;
+    while (end + 1 < flat_step.size() && flat_step[end + 1]) {
+      ++end;
+    }
+    i = end + 1;
+    if (end - start < minimum_steps || end - start + 1 < 3) {
+      continue;
+    }
+    std::vector<double> segment_values;
+    size_t valid_points = 0;
+    size_t internal_flat_steps = 0;
+    size_t internal_valid_steps = 0;
+    for (size_t j = start; j <= end; ++j) {
+      if (valid[j] && std::isfinite(filtered[j])) {
+        segment_values.push_back(filtered[j]);
+        ++valid_points;
+      }
+      if (j > start && valid[j - 1] && valid[j]) {
+        ++internal_valid_steps;
+        if (flat_step[j]) {
+          ++internal_flat_steps;
+        }
+      }
+    }
+    const double coverage = static_cast<double>(valid_points) /
+        static_cast<double>(end - start + 1);
+    const double flat_fraction = internal_valid_steps == 0
+        ? 0.0 : static_cast<double>(internal_flat_steps) /
+                    internal_valid_steps;
+    const double duration_s = (end - start) * sample_step_s;
+    const double level_span = Quantile(segment_values, 0.95) -
+        Quantile(segment_values, 0.05);
+    const double robust_slope = TheilSenSlope(
+        filtered, valid, start, end + 1, sample_step_s);
+    const double level_span_limit = std::max(
+        waveform_horizontal_level_span_noise_multiplier_ * sigma_x,
+        waveform_horizontal_max_level_span_ratio_ * amplitude);
+    const double drift_limit = std::max(
+        waveform_horizontal_slope_noise_multiplier_ * sigma_x,
+        waveform_horizontal_max_total_drift_ratio_ * amplitude);
+    if (coverage + 1e-15 <
+            waveform_horizontal_min_valid_coverage_ratio_ ||
+        flat_fraction + 1e-15 <
+            waveform_horizontal_min_flat_fraction_ ||
+        level_span > level_span_limit + 1e-15 ||
+        std::abs(robust_slope) * duration_s > drift_limit + 1e-15) {
+      continue;
+    }
+
+    const double segment_mean = std::accumulate(
+        segment_values.begin(), segment_values.end(), 0.0) /
+        segment_values.size();
+    double rss_constant = 0.0;
+    double rss_linear = 0.0;
+    const double intercept = segment_values.front();
+    for (size_t j = start; j <= end; ++j) {
+      if (!valid[j]) {
+        continue;
+      }
+      const double constant_residual = filtered[j] - segment_mean;
+      const double predicted = intercept +
+          robust_slope * (j - start) * sample_step_s;
+      const double linear_residual = filtered[j] - predicted;
+      rss_constant += constant_residual * constant_residual;
+      rss_linear += linear_residual * linear_residual;
+    }
+    const double n = static_cast<double>(valid_points);
+    const double bic_constant = n * std::log(std::max(
+        rss_constant / n, 1e-24)) + std::log(n);
+    const double bic_linear = n * std::log(std::max(
+        rss_linear / n, 1e-24)) + 2.0 * std::log(n);
+    if (bic_constant > bic_linear + 1e-12) {
+      continue;
+    }
+
+    const bool touches_left = start <= 1;
+    const bool touches_right = end + 2 >= values.size();
+    const size_t left_begin = start > context_points
+        ? start - context_points : 0;
+    const size_t right_end = std::min(values.size(), end + context_points + 1);
+    const double left_slope = touches_left ? 0.0 : TheilSenSlope(
+        filtered, valid, left_begin, start, sample_step_s);
+    const double right_slope = touches_right ? 0.0 : TheilSenSlope(
+        filtered, valid, end + 1, right_end, sample_step_s);
+    auto mean_step = [&](size_t first, size_t last) {
+      std::vector<double> steps;
+      for (size_t j = std::max<size_t>(1, first); j < last; ++j) {
+        if (valid[j - 1] && valid[j]) {
+          steps.push_back((filtered[j] - filtered[j - 1]) /
+                          sample_step_s);
+        }
+      }
+      return Median(steps);
+    };
+    const double left_q_out = touches_left ? 0.0 : mean_step(
+        start > 2 ? start - 2 : 1, start);
+    const double left_q_in = mean_step(start + 1,
+                                      std::min(end + 1, start + 3));
+    const double right_q_in = mean_step(
+        end > 1 ? end - 1 : 1, end + 1);
+    const double right_q_out = touches_right ? 0.0 : mean_step(
+        end + 2, std::min(values.size(), end + 4));
+    const double side_change_min = std::max(
+        waveform_horizontal_slope_noise_multiplier_ * sigma_x,
+        waveform_horizontal_min_side_change_ratio_ * amplitude);
+    const double context_s = context_points * sample_step_s;
+    const bool left_verified = touches_left ||
+        (std::abs(left_slope) + 1e-15 >= theta_side &&
+         std::abs(left_slope) * context_s + 1e-15 >= side_change_min &&
+         std::abs(left_q_in) <= theta_flat + 1e-15 &&
+         std::abs(left_q_out - left_q_in) + 1e-15 >= theta_kink);
+    const bool right_verified = touches_right ||
+        (std::abs(right_slope) + 1e-15 >= theta_side &&
+         std::abs(right_slope) * context_s + 1e-15 >= side_change_min &&
+         std::abs(right_q_in) <= theta_flat + 1e-15 &&
+         std::abs(right_q_out - right_q_in) + 1e-15 >= theta_kink);
+    if (!left_verified || !right_verified) {
+      continue;
+    }
+    ContinuousHorizontalEvidence evidence;
+    evidence.valid = true;
+    evidence.start_index = start;
+    evidence.end_index = end;
+    evidence.start_s = start * sample_step_s;
+    evidence.end_s = end * sample_step_s;
+    evidence.duration_ratio_of_period = duration_s / period_s;
+    evidence.level = Median(segment_values);
+    evidence.touches_left_edge = touches_left;
+    evidence.touches_right_edge = touches_right;
+    evidence.left_boundary_verified = !touches_left && left_verified;
+    evidence.right_boundary_verified = !touches_right && right_verified;
+    evidence.flat_fraction = flat_fraction;
+    evidence.level_span_ratio = level_span / amplitude;
+    evidence.robust_slope = robust_slope;
+    evidence.left_context_slope = left_slope;
+    evidence.right_context_slope = right_slope;
+    evidence.bic_linear_minus_constant = bic_linear - bic_constant;
+    evidence.is_upper = p95 - evidence.level <= std::max(
+        waveform_horizontal_level_span_noise_multiplier_ * sigma_x,
+        waveform_horizontal_extreme_distance_ratio_ * amplitude);
+    evidence.is_lower = evidence.level - p05 <= std::max(
+        waveform_horizontal_level_span_noise_multiplier_ * sigma_x,
+        waveform_horizontal_extreme_distance_ratio_ * amplitude);
+    results.push_back(evidence);
+  }
+  return results;
+}
+
+FBBRSender::RepeatedClipLineEvidence
+FBBRSender::DetectRepeatedClipLineContacts(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    double sample_step_s,
+    double period_s,
+    bool upper) const {
+  RepeatedClipLineEvidence result;
+  result.is_upper = upper;
+  if (values.size() != valid.size() || values.size() < 10 ||
+      sample_step_s <= 0.0 || period_s <= 0.0) {
+    return result;
+  }
+  const std::vector<double> filtered = MedianFilter3(values, valid);
+  std::vector<double> finite;
+  std::vector<double> residuals;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i]) &&
+        std::isfinite(filtered[i])) {
+      finite.push_back(filtered[i]);
+      residuals.push_back(values[i] - filtered[i]);
+    }
+  }
+  if (finite.size() < 10) {
+    return result;
+  }
+  const double p05 = Quantile(finite, 0.05);
+  const double p95 = Quantile(finite, 0.95);
+  const double amplitude = p95 - p05;
+  const double sigma_x = RobustSigma(residuals);
+  if (amplitude < std::max(
+          waveform_horizontal_amplitude_noise_multiplier_ * sigma_x,
+          1e-12)) {
+    return result;
+  }
+  const double band_boundary = upper
+      ? p05 + 0.80 * amplitude
+      : p95 - 0.80 * amplitude;
+  const double epsilon_h = std::max(
+      waveform_horizontal_level_span_noise_multiplier_ * sigma_x,
+      waveform_repeated_clip_contact_level_tolerance_ratio_ * amplitude);
+  std::vector<double> band_values;
+  for (size_t i = 0; i < filtered.size(); ++i) {
+    if (valid[i] && ((upper && filtered[i] >= band_boundary) ||
+                     (!upper && filtered[i] <= band_boundary))) {
+      band_values.push_back(filtered[i]);
+    }
+  }
+  if (band_values.empty()) {
+    return result;
+  }
+  std::sort(band_values.begin(), band_values.end());
+  double clip_level = upper ? band_values.back() : band_values.front();
+  size_t best_members = 0;
+  for (double candidate : band_values) {
+    size_t members = 0;
+    uint8_t cycle_mask = 0;
+    for (size_t i = 0; i < filtered.size(); ++i) {
+      if (valid[i] && std::abs(filtered[i] - candidate) <= epsilon_h) {
+        ++members;
+        cycle_mask |= static_cast<uint8_t>(
+            1u << std::min<size_t>(1, static_cast<size_t>(
+                i * sample_step_s / period_s)));
+      }
+    }
+    if (cycle_mask == 0x3 &&
+        (members > best_members ||
+         (members == best_members &&
+          ((upper && candidate > clip_level) ||
+           (!upper && candidate < clip_level))))) {
+      best_members = members;
+      clip_level = candidate;
+    }
+  }
+  std::vector<size_t> contacts;
+  std::array<uint32_t, 2> per_cycle = {{0, 0}};
+  for (size_t i = 0; i < filtered.size(); ++i) {
+    if (valid[i] && std::abs(filtered[i] - clip_level) <= epsilon_h) {
+      contacts.push_back(i);
+      const size_t cycle = std::min<size_t>(
+          1, static_cast<size_t>(i * sample_step_s / period_s));
+      ++per_cycle[cycle];
+    }
+  }
+  const uint32_t minimum_total = std::max<uint32_t>(
+      waveform_repeated_clip_min_total_contact_samples_,
+      static_cast<uint32_t>(std::ceil(
+          waveform_repeated_clip_min_contact_sample_ratio_ * finite.size())));
+  if (contacts.size() < minimum_total ||
+      per_cycle[0] < waveform_repeated_clip_min_contact_samples_per_cycle_ ||
+      per_cycle[1] < waveform_repeated_clip_min_contact_samples_per_cycle_) {
+    return result;
+  }
+  const size_t merge_gap = std::max<size_t>(
+      1, static_cast<size_t>(std::floor(
+          waveform_repeated_clip_merge_gap_ratio_ * period_s /
+          sample_step_s)));
+  std::vector<std::pair<size_t, size_t>> events;
+  size_t event_start = contacts.front();
+  size_t event_end = contacts.front();
+  for (size_t k = 1; k < contacts.size(); ++k) {
+    const size_t gap = contacts[k] - event_end - 1;
+    bool missing_gap_ok = true;
+    size_t consecutive_missing = 0;
+    size_t maximum_missing = 0;
+    for (size_t j = event_end + 1; j < contacts[k]; ++j) {
+      if (!valid[j]) {
+        maximum_missing = std::max(maximum_missing, ++consecutive_missing);
+      } else {
+        consecutive_missing = 0;
+      }
+    }
+    missing_gap_ok = maximum_missing * sample_step_s <=
+        waveform_repeated_clip_max_missing_gap_ratio_ * period_s + 1e-15;
+    if (gap <= merge_gap && missing_gap_ok) {
+      event_end = contacts[k];
+    } else {
+      events.push_back({event_start, event_end});
+      event_start = event_end = contacts[k];
+    }
+  }
+  events.push_back({event_start, event_end});
+  const double window_s = 2.0 * period_s;
+  const double span_ratio =
+      (contacts.back() - contacts.front()) * sample_step_s / window_s;
+  if (span_ratio + 1e-15 <
+      waveform_repeated_clip_min_contact_span_ratio_of_window_) {
+    result.contact_time_span_ratio_of_window = span_ratio;
+    return result;
+  }
+  std::vector<double> contact_values;
+  std::array<std::vector<double>, 2> cycle_contact_values;
+  for (size_t index : contacts) {
+    contact_values.push_back(filtered[index]);
+    const size_t cycle = std::min<size_t>(
+        1, static_cast<size_t>(index * sample_step_s / period_s));
+    cycle_contact_values[cycle].push_back(filtered[index]);
+  }
+  const double level_span = Quantile(contact_values, 0.95) -
+      Quantile(contact_values, 0.05);
+  const double cycle_level_delta = std::abs(
+      Median(cycle_contact_values[0]) - Median(cycle_contact_values[1]));
+  if (level_span > epsilon_h + 1e-15 ||
+      cycle_level_delta > std::max(
+          waveform_horizontal_slope_noise_multiplier_ * sigma_x,
+          waveform_repeated_clip_max_level_delta_ratio_ * amplitude) +
+              1e-15) {
+    return result;
+  }
+  size_t pooled_steps = 0;
+  size_t pooled_flat = 0;
+  std::vector<double> absolute_steps;
+  for (size_t i = 1; i < filtered.size(); ++i) {
+    if (valid[i - 1] && valid[i]) {
+      absolute_steps.push_back(std::abs(
+          (filtered[i] - filtered[i - 1]) / sample_step_s));
+    }
+  }
+  const double s80 = Quantile(absolute_steps, 0.80);
+  std::vector<double> residual_slope_noise;
+  for (size_t i = 1; i < residuals.size(); ++i) {
+    residual_slope_noise.push_back(
+        (residuals[i] - residuals[i - 1]) / sample_step_s);
+  }
+  const double sigma_s = RobustSigma(residual_slope_noise);
+  const double theta_flat = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_max_local_slope_ratio_ * s80);
+  const double theta_side = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_min_side_slope_ratio_ * s80);
+  const double theta_kink = std::max(
+      waveform_horizontal_slope_noise_multiplier_ * sigma_s,
+      waveform_horizontal_min_boundary_kink_ratio_ * s80);
+  for (const auto& event : events) {
+    for (size_t j = event.first + 1; j <= event.second; ++j) {
+      if (valid[j - 1] && valid[j]) {
+        ++pooled_steps;
+        const double step =
+            (filtered[j] - filtered[j - 1]) / sample_step_s;
+        if (std::abs(step) <= theta_flat + 1e-15) {
+          ++pooled_flat;
+        }
+      }
+    }
+  }
+  const double pooled_fraction = pooled_steps == 0
+      ? 0.0 : static_cast<double>(pooled_flat) / pooled_steps;
+  if (pooled_steps < 2 || pooled_fraction + 1e-15 <
+          waveform_repeated_clip_min_pooled_flat_fraction_) {
+    return result;
+  }
+
+  const size_t context_points = std::max<size_t>(
+      4, static_cast<size_t>(std::ceil(0.10 * period_s / sample_step_s)));
+  size_t observable_boundaries = 0;
+  size_t verified_boundaries = 0;
+  std::array<bool, 2> cycle_boundary_verified = {{false, false}};
+  std::array<std::vector<double>, 2> event_centers;
+  double best_overshoot_ratio = 0.0;
+  for (const auto& event : events) {
+    const size_t cycle = std::min<size_t>(
+        1, static_cast<size_t>(event.first * sample_step_s / period_s));
+    event_centers[cycle].push_back(
+        0.5 * (event.first + event.second) * sample_step_s);
+    const bool has_left = event.first >= 3;
+    const bool has_right = event.second + 3 < filtered.size();
+    const double left_slope = has_left ? TheilSenSlope(
+        filtered, valid,
+        event.first > context_points ? event.first - context_points : 0,
+        event.first, sample_step_s) : 0.0;
+    const double right_slope = has_right ? TheilSenSlope(
+        filtered, valid, event.second + 1,
+        std::min(filtered.size(), event.second + context_points + 1),
+        sample_step_s) : 0.0;
+    auto verify = [&](bool left) {
+      const size_t inner_a = left ? event.first :
+          (event.second > 0 ? event.second - 1 : 0);
+      const size_t inner_b = left ? std::min(event.second, event.first + 2) :
+          event.second;
+      const double q_in = TheilSenSlope(
+          filtered, valid, inner_a, inner_b + 1, sample_step_s);
+      const size_t outer_a = left
+          ? (event.first > 3 ? event.first - 3 : 0)
+          : event.second + 1;
+      const size_t outer_b = left
+          ? event.first
+          : std::min(filtered.size(), event.second + 4);
+      const double q_out = TheilSenSlope(
+          filtered, valid, outer_a, outer_b, sample_step_s);
+      const double side = left ? left_slope : right_slope;
+      const size_t adjacent = left ? event.first - 1 : event.second + 1;
+      const bool correct_side = adjacent < filtered.size() && valid[adjacent] &&
+          (upper ? filtered[adjacent] < clip_level + epsilon_h
+                 : filtered[adjacent] > clip_level - epsilon_h);
+      return std::abs(side) + 1e-15 >= theta_side &&
+          std::abs(q_in) <= theta_flat + 1e-15 &&
+          std::abs(q_out - q_in) + 1e-15 >= theta_kink && correct_side;
+    };
+    if (has_left) {
+      ++observable_boundaries;
+      if (verify(true)) {
+        ++verified_boundaries;
+        cycle_boundary_verified[cycle] = true;
+      }
+    }
+    if (has_right) {
+      ++observable_boundaries;
+      if (verify(false)) {
+        ++verified_boundaries;
+        cycle_boundary_verified[cycle] = true;
+      }
+    }
+    if (has_left && has_right &&
+        ((upper && left_slope > 0.0 && right_slope < 0.0) ||
+         (!upper && left_slope < 0.0 && right_slope > 0.0))) {
+      const double overshoot = std::min(
+          std::abs(left_slope), std::abs(right_slope)) *
+          context_points * sample_step_s;
+      best_overshoot_ratio = std::max(
+          best_overshoot_ratio, overshoot / amplitude);
+    }
+  }
+  const double boundary_fraction = observable_boundaries == 0
+      ? 0.0 : static_cast<double>(verified_boundaries) /
+                    observable_boundaries;
+  if (!cycle_boundary_verified[0] || !cycle_boundary_verified[1] ||
+      boundary_fraction + 1e-15 <
+          waveform_repeated_clip_min_verified_boundary_fraction_ ||
+      best_overshoot_ratio + 1e-15 <
+          waveform_repeated_clip_min_extrapolated_overshoot_ratio_) {
+    return result;
+  }
+  double best_period_error = std::numeric_limits<double>::infinity();
+  for (double first : event_centers[0]) {
+    for (double second : event_centers[1]) {
+      best_period_error = std::min(
+          best_period_error, std::abs((second - first) - period_s) /
+                                 period_s);
+    }
+  }
+  if (best_period_error >
+      waveform_repeated_clip_max_period_error_ratio_ + 1e-15) {
+    return result;
+  }
+  const double outside_excursion = std::max(
+      waveform_horizontal_level_span_noise_multiplier_ * sigma_x,
+      waveform_repeated_clip_min_outside_excursion_ratio_ * amplitude);
+  for (size_t cycle = 0; cycle < 2; ++cycle) {
+    bool left_line = false;
+    const size_t begin = static_cast<size_t>(
+        std::floor(cycle * period_s / sample_step_s));
+    const size_t end = std::min(values.size(), static_cast<size_t>(
+        std::ceil((cycle + 1) * period_s / sample_step_s)));
+    for (size_t j = begin; j < end; ++j) {
+      if (valid[j] && (upper
+          ? filtered[j] <= clip_level - outside_excursion
+          : filtered[j] >= clip_level + outside_excursion)) {
+        left_line = true;
+        break;
+      }
+    }
+    if (!left_line) {
+      return result;
+    }
+  }
+  result.valid = true;
+  result.clip_level = Median(contact_values);
+  result.contact_fragment_count = static_cast<uint32_t>(events.size());
+  result.contact_sample_count = static_cast<uint32_t>(contacts.size());
+  result.contact_cycle_mask = 0x3;
+  result.contact_sample_ratio =
+      static_cast<double>(contacts.size()) / finite.size();
+  result.contact_time_span_ratio_of_window = span_ratio;
+  result.pooled_flat_fraction = pooled_fraction;
+  result.contact_level_span_ratio = level_span / amplitude;
+  result.cross_cycle_level_delta_ratio = cycle_level_delta / amplitude;
+  result.event_period_error_ratio = best_period_error;
+  result.verified_boundary_fraction = boundary_fraction;
+  result.extrapolated_overshoot_ratio = best_overshoot_ratio;
+  return result;
+}
+
+std::vector<FBBRSender::MiddleSequentialEvidence>
+FBBRSender::DetectMiddleSequentialDisturbances(
+    const std::vector<double>& values,
+    const std::vector<bool>& valid,
+    const std::vector<bool>& protected_mask,
+    double sample_step_s,
+    double period_s) const {
+  std::vector<MiddleSequentialEvidence> candidates;
+  if (values.size() != valid.size() ||
+      (!protected_mask.empty() && protected_mask.size() != values.size()) ||
+      values.size() < 12 || sample_step_s <= 0.0 || period_s <= 0.0) {
+    return candidates;
+  }
+  const std::vector<double> filtered = MedianFilter3(values, valid);
+  std::vector<double> finite;
+  std::vector<double> residuals;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (valid[i] && std::isfinite(values[i]) &&
+        std::isfinite(filtered[i])) {
+      finite.push_back(filtered[i]);
+      residuals.push_back(values[i] - filtered[i]);
+    }
+  }
+  const double amplitude = Quantile(finite, 0.95) - Quantile(finite, 0.05);
+  const double sigma_x = RobustSigma(residuals);
+  if (finite.size() < 10 || amplitude <= 0.0) {
+    return candidates;
+  }
+  std::vector<double> step_slopes(values.size(), 0.0);
+  std::vector<double> abs_slopes;
+  for (size_t i = 1; i < values.size(); ++i) {
+    if (valid[i - 1] && valid[i]) {
+      step_slopes[i] =
+          (filtered[i] - filtered[i - 1]) / sample_step_s;
+      abs_slopes.push_back(std::abs(step_slopes[i]));
+    }
+  }
+  const double s80 = Quantile(abs_slopes, 0.80);
+  std::vector<double> residual_slope_noise;
+  for (size_t i = 1; i < residuals.size(); ++i) {
+    residual_slope_noise.push_back(
+        (residuals[i] - residuals[i - 1]) / sample_step_s);
+  }
+  const double sigma_s = RobustSigma(residual_slope_noise);
+  const size_t context = std::max<size_t>(
+      4, static_cast<size_t>(std::ceil(
+          waveform_middle_context_duration_ratio_ * period_s /
+          sample_step_s)));
+  const size_t min_points = std::max<size_t>(
+      3, static_cast<size_t>(std::ceil(
+          waveform_middle_min_duration_ratio_ * period_s / sample_step_s)) +
+             1);
+  const size_t max_points = std::max<size_t>(min_points,
+      static_cast<size_t>(std::floor(
+          waveform_middle_max_duration_ratio_ * period_s / sample_step_s)) +
+             1);
+  const double theta_trend = std::max(
+      waveform_middle_noise_multiplier_ * sigma_s,
+      waveform_middle_min_trend_slope_ratio_ * s80);
+  for (size_t start = context; start + min_points + context < values.size();
+       ++start) {
+    for (size_t length = min_points;
+         length <= max_points && start + length + context <= values.size();
+         ++length) {
+      const size_t end = start + length - 1;
+      bool protected_overlap = false;
+      bool all_valid = true;
+      for (size_t i = start; i <= end; ++i) {
+        protected_overlap = protected_overlap ||
+            (!protected_mask.empty() && protected_mask[i]);
+        all_valid = all_valid && valid[i];
+      }
+      if (protected_overlap || !all_valid) {
+        continue;
+      }
+      const double left_slope = TheilSenSlope(
+          filtered, valid, start - context, start, sample_step_s);
+      const double right_slope = TheilSenSlope(
+          filtered, valid, end + 1, end + context + 1, sample_step_s);
+      if (left_slope * right_slope <= 0.0 ||
+          std::min(std::abs(left_slope), std::abs(right_slope)) + 1e-15 <
+              theta_trend ||
+          std::abs(left_slope - right_slope) > std::max(
+              waveform_middle_noise_multiplier_ * sigma_s,
+              waveform_middle_max_context_slope_delta_ratio_ *
+                  std::max(std::abs(left_slope), std::abs(right_slope))) +
+                  1e-15) {
+        continue;
+      }
+      const double reference_slope = Median(
+          {left_slope, right_slope});
+      const double theta_mismatch = std::max(
+          waveform_middle_noise_multiplier_ * sigma_s,
+          waveform_middle_min_slope_mismatch_ratio_ *
+              std::abs(reference_slope));
+      size_t mismatch_count = 0;
+      size_t current_run = 0;
+      size_t longest_run = 0;
+      std::vector<double> inside_slopes;
+      for (size_t i = start + 1; i <= end; ++i) {
+        const double slope = step_slopes[i];
+        inside_slopes.push_back(slope);
+        const bool mismatch =
+            slope * reference_slope <= 0.0 ||
+            std::abs(slope) < 0.50 * std::abs(reference_slope) ||
+            std::abs(slope - reference_slope) + 1e-15 >= theta_mismatch;
+        if (mismatch) {
+          ++mismatch_count;
+          longest_run = std::max(longest_run, ++current_run);
+        } else {
+          current_run = 0;
+        }
+      }
+      const size_t required_mismatches = std::max<size_t>(
+          waveform_middle_min_mismatching_samples_,
+          static_cast<size_t>(std::ceil(
+              waveform_middle_min_mismatching_sample_ratio_ *
+              inside_slopes.size())));
+      if (mismatch_count < required_mismatches ||
+          longest_run <
+              waveform_middle_min_consecutive_mismatching_samples_) {
+        continue;
+      }
+      const size_t third = std::max<size_t>(1, inside_slopes.size() / 3);
+      const double entry_slope = Median(std::vector<double>(
+          inside_slopes.begin(), inside_slopes.begin() + third));
+      const double exit_slope = Median(std::vector<double>(
+          inside_slopes.end() - third, inside_slopes.end()));
+      if (std::abs(entry_slope - left_slope) + 1e-15 < theta_mismatch ||
+          std::abs(right_slope - exit_slope) + 1e-15 < theta_mismatch) {
+        continue;
+      }
+      std::vector<double> bridge_deviations;
+      for (size_t i = start; i <= end; ++i) {
+        const double fraction = static_cast<double>(i - start) /
+            std::max<size_t>(1, end - start);
+        const double bridge = filtered[start] +
+            fraction * (filtered[end] - filtered[start]);
+        bridge_deviations.push_back(std::abs(filtered[i] - bridge));
+      }
+      const double bridge_deviation = Quantile(bridge_deviations, 0.95);
+      const double bridge_threshold = std::max(
+          waveform_middle_noise_multiplier_ * sigma_x,
+          waveform_middle_min_bridge_deviation_ratio_ * amplitude);
+      if (bridge_deviation + 1e-15 < bridge_threshold) {
+        continue;
+      }
+      MiddleSequentialEvidence evidence;
+      evidence.valid = true;
+      evidence.start_index = start;
+      evidence.end_index = end;
+      evidence.duration_ratio_of_period =
+          (end - start) * sample_step_s / period_s;
+      evidence.left_context_slope = left_slope;
+      evidence.right_context_slope = right_slope;
+      evidence.reference_slope = reference_slope;
+      evidence.slope_mismatch_ratio = inside_slopes.empty()
+          ? 0.0 : static_cast<double>(mismatch_count) /
+                      inside_slopes.size();
+      evidence.bridge_deviation_ratio = bridge_deviation / amplitude;
+      evidence.score = (bridge_deviation / bridge_threshold) *
+          evidence.slope_mismatch_ratio;
+      candidates.push_back(evidence);
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const MiddleSequentialEvidence& lhs,
+               const MiddleSequentialEvidence& rhs) {
+              return lhs.score > rhs.score;
+            });
+  std::vector<MiddleSequentialEvidence> selected;
+  std::vector<bool> occupied(values.size(), false);
+  std::array<size_t, 2> masked_per_cycle = {{0, 0}};
+  const size_t max_mask_per_cycle = static_cast<size_t>(std::floor(
+      waveform_middle_max_mask_ratio_per_cycle_ * period_s /
+      sample_step_s));
+  for (const auto& candidate : candidates) {
+    bool overlaps = false;
+    std::array<size_t, 2> added = {{0, 0}};
+    for (size_t i = candidate.start_index; i <= candidate.end_index; ++i) {
+      overlaps = overlaps || occupied[i];
+      const size_t cycle = std::min<size_t>(
+          1, static_cast<size_t>(i * sample_step_s / period_s));
+      ++added[cycle];
+    }
+    if (overlaps || masked_per_cycle[0] + added[0] > max_mask_per_cycle ||
+        masked_per_cycle[1] + added[1] > max_mask_per_cycle) {
+      continue;
+    }
+    for (size_t i = candidate.start_index; i <= candidate.end_index; ++i) {
+      occupied[i] = true;
+    }
+    masked_per_cycle[0] += added[0];
+    masked_per_cycle[1] += added[1];
+    selected.push_back(candidate);
+  }
+  return selected;
+}
+
+FBBRSender::PeriodicSimilarityResult
+FBBRSender::AnalyzeFbbrHybridPeriodicSimilarity(
+    const std::vector<double>& values,
+    const std::vector<bool>& original_valid,
+    const std::vector<bool>& periodic_valid,
+    double sample_step_s,
+    double period_s,
+    double srate_period_s,
+    bool verified_upper_clip,
+    SignalRegimeFeatures* features) const {
+  if (features != nullptr) {
+    features->periodic_similarity_input_valid = false;
+    features->periodic_similar = false;
+    features->upper_clip_periodic_veto = verified_upper_clip;
+    features->estimated_srate_period_s = srate_period_s;
+  }
+  if (values.size() != original_valid.size() ||
+      values.size() != periodic_valid.size() || values.empty() ||
+      sample_step_s <= 0.0 || period_s <= 0.0 ||
+      !std::isfinite(srate_period_s) || srate_period_s <= 0.0) {
+    return PeriodicSimilarityResult::kInvalidInput;
+  }
+  const size_t original_count = static_cast<size_t>(std::count(
+      original_valid.begin(), original_valid.end(), true));
+  const size_t masked_count = static_cast<size_t>(std::count(
+      periodic_valid.begin(), periodic_valid.end(), true));
+  const double original_coverage =
+      static_cast<double>(original_count) / values.size();
+  const double masked_coverage =
+      static_cast<double>(masked_count) / values.size();
+  if (original_coverage + 1e-15 < waveform_min_cycle_coverage_ratio_ ||
+      masked_coverage + 1e-15 < waveform_masked_min_cycle_coverage_ratio_) {
+    return PeriodicSimilarityResult::kInvalidInput;
+  }
+  if (features != nullptr) {
+    features->periodic_similarity_input_valid = true;
+  }
+  if (verified_upper_clip &&
+      fbbr_regime_periodic_upper_clip_is_hard_veto_) {
+    return PeriodicSimilarityResult::kNoMatch;
+  }
+  double periodicity = -1.0;
+  const double estimated_period = EstimateActualSignalPeriod(
+      values, periodic_valid, sample_step_s, srate_period_s, &periodicity);
+  if (features != nullptr) {
+    features->estimated_period_s = estimated_period;
+    features->periodicity_correlation = periodicity;
+  }
+  if (estimated_period <= 0.0) {
+    return PeriodicSimilarityResult::kNoMatch;
+  }
+  const double period_error =
+      std::abs(estimated_period - srate_period_s) / srate_period_s;
+  if (features != nullptr) {
+    features->response_srate_period_error_ratio = period_error;
+  }
+  const std::vector<double> filtered = MedianFilter3(values, periodic_valid);
+  std::vector<double> finite;
+  std::vector<double> residuals;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (periodic_valid[i] && std::isfinite(values[i]) &&
+        std::isfinite(filtered[i])) {
+      finite.push_back(filtered[i]);
+      residuals.push_back(values[i] - filtered[i]);
+    }
+  }
+  const double amplitude = Quantile(finite, 0.95) - Quantile(finite, 0.05);
+  const double sigma = RobustSigma(residuals);
+  const double level = std::max(std::abs(Median(finite)), 1e-12);
+  const bool amplitude_ok = amplitude >= std::max(
+      waveform_activity_amplitude_noise_multiplier_ * sigma,
+      waveform_activity_min_level_ratio_ * level);
+  size_t longest_rise = 0;
+  size_t longest_fall = 0;
+  size_t current_rise = 0;
+  size_t current_fall = 0;
+  for (size_t i = 1; i < filtered.size(); ++i) {
+    if (!periodic_valid[i - 1] || !periodic_valid[i]) {
+      current_rise = current_fall = 0;
+      continue;
+    }
+    const double delta = filtered[i] - filtered[i - 1];
+    const double noise_deadband = std::max(1e-15, sigma);
+    if (delta > noise_deadband) {
+      longest_rise = std::max(longest_rise, ++current_rise);
+      current_fall = 0;
+    } else if (delta < -noise_deadband) {
+      longest_fall = std::max(longest_fall, ++current_fall);
+      current_rise = 0;
+    }
+  }
+  const bool complete_cycle = amplitude_ok &&
+      longest_rise * sample_step_s + 1e-15 >= 0.15 * period_s &&
+      longest_fall * sample_step_s + 1e-15 >= 0.15 * period_s;
+  const bool matched = complete_cycle &&
+      period_error <= fbbr_regime_period_tolerance_ratio_ + 1e-15 &&
+      periodicity + 1e-15 >= fbbr_regime_min_periodicity_correlation_;
+  if (features != nullptr) {
+    features->periodic_similar = matched;
+  }
+  return matched ? PeriodicSimilarityResult::kMatch
+                 : PeriodicSimilarityResult::kNoMatch;
+}
+
+bool FBBRSender::ShouldRefreshRtpropForTrueClip(bool top_clip,
+                                                bool bottom_clip) {
+  // BOTH_CLIPPED still contains a genuine bottom clip. The RTprop/ProbeRTT
+  // refresh depends only on the presence of that bottom clip.
+  static_cast<void>(top_clip);
+  return bottom_clip;
+}
+
 WaveformClassification FBBRSender::ClassifyWaveformState(
     const WaveformDecisionInputs& inputs,
     const char** decision_rule) {
@@ -2944,12 +5275,59 @@ WaveformClassification FBBRSender::ClassifyWaveformState(
     }
     return decide(WaveformClassification::kInconclusive, "R6.3");
   };
-  if (!inputs.prechecks_valid || !inputs.srtt_input_valid) {
+  const bool bic_clip_detected =
+      inputs.bic_srtt_top_clip || inputs.bic_srtt_bottom_clip;
+  if ((!inputs.prechecks_valid || !inputs.srtt_input_valid) &&
+      !bic_clip_detected) {
     return decide_r6();
   }
 
   const bool drate_effective_similar =
       inputs.drate_similar || inputs.drate_similar_without_middle;
+  auto classify_clipped_shape = [&](bool top_clip, bool bottom_clip) {
+    const bool top_only = top_clip && !bottom_clip;
+    const bool bottom_only = !top_clip && bottom_clip;
+    const bool both_clipped = top_clip && bottom_clip;
+    if (top_only) {
+      if (!inputs.drate_input_valid) {
+        return decide(WaveformClassification::kInconclusive, "R2.4");
+      }
+      const bool matching_drate_top_clip = inputs.drate_similar &&
+          ((inputs.drate_positive_half_clipped &&
+            inputs.positive_half_clips_simultaneous) ||
+           (inputs.adaptive_guard_enabled &&
+            inputs.drate_only_negative_half));
+      if (matching_drate_top_clip) {
+        return decide(WaveformClassification::kOverload, "R2.1");
+      }
+      if (drate_effective_similar) {
+        return decide(WaveformClassification::kFullLoad, "R2.2");
+      }
+      return decide(WaveformClassification::kOverload, "R2.3");
+    }
+    if (bottom_only || both_clipped) {
+      const char* similar_rule = bottom_only ? "R3.1" : "R4.1";
+      const char* plateau_rule = bottom_only ? "R3.2" : "R4.2";
+      const char* otherwise_rule = bottom_only ? "R3.3" : "R4.3";
+      if (inputs.drate_input_valid && inputs.drate_similar) {
+        return decide(WaveformClassification::kUnderload, similar_rule);
+      }
+      if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
+        return decide(WaveformClassification::kUnderload, plateau_rule);
+      }
+      return decide(WaveformClassification::kInconclusive, otherwise_rule);
+    }
+    return decide(WaveformClassification::kFullLoad, "R1");
+  };
+
+  // A repeated BIC clipping shape is independent evidence and has priority.
+  // Only when no true clipping shape is present may waveform similarity and
+  // shoulder suppression contribute a clipping classification.
+  if (bic_clip_detected) {
+    return classify_clipped_shape(inputs.bic_srtt_top_clip,
+                                  inputs.bic_srtt_bottom_clip);
+  }
+
   if (inputs.adaptive_guard_enabled) {
     const bool srtt_effective_similar =
         inputs.srtt_similar || inputs.srtt_similar_without_middle;
@@ -2960,38 +5338,9 @@ WaveformClassification FBBRSender::ClassifyWaveformState(
       const bool negative_side_suppressed =
           inputs.srtt_negative_half_clipped ||
           inputs.srtt_only_positive_half;
-      const bool positive_only = positive_side_suppressed &&
-                                 !negative_side_suppressed;
-      const bool negative_only = !positive_side_suppressed &&
-                                 negative_side_suppressed;
-      const bool both_clipped = positive_side_suppressed &&
-                                negative_side_suppressed;
-      if (positive_only) {
-        if (!inputs.drate_input_valid) {
-          return decide(WaveformClassification::kInconclusive, "R2.4");
-        }
-        if (inputs.drate_similar &&
-            ((inputs.drate_positive_half_clipped &&
-              inputs.positive_half_clips_simultaneous) ||
-             inputs.drate_only_negative_half)) {
-          return decide(WaveformClassification::kOverload, "R2.1");
-        }
-        if (drate_effective_similar) {
-          return decide(WaveformClassification::kFullLoad, "R2.2");
-        }
-        return decide(WaveformClassification::kOverload, "R2.3");
-      }
-      if (negative_only || both_clipped) {
-        const char* similar_rule = negative_only ? "R3.1" : "R4.1";
-        const char* plateau_rule = negative_only ? "R3.2" : "R4.2";
-        const char* otherwise_rule = negative_only ? "R3.3" : "R4.3";
-        if (inputs.drate_input_valid && inputs.drate_similar) {
-          return decide(WaveformClassification::kUnderload, similar_rule);
-        }
-        if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
-          return decide(WaveformClassification::kUnderload, plateau_rule);
-        }
-        return decide(WaveformClassification::kInconclusive, otherwise_rule);
+      if (positive_side_suppressed || negative_side_suppressed) {
+        return classify_clipped_shape(positive_side_suppressed,
+                                      negative_side_suppressed);
       }
       return decide(WaveformClassification::kFullLoad, "R1");
     }
@@ -3002,36 +5351,13 @@ WaveformClassification FBBRSender::ClassifyWaveformState(
   }
 
   if (inputs.srtt_similar) {
-    const bool positive_only = inputs.srtt_positive_half_clipped &&
-                               !inputs.srtt_negative_half_clipped;
-    const bool negative_only = !inputs.srtt_positive_half_clipped &&
-                               inputs.srtt_negative_half_clipped;
-    const bool both_clipped = inputs.srtt_positive_half_clipped &&
-                              inputs.srtt_negative_half_clipped;
-    if (positive_only) {
-      if (!inputs.drate_input_valid) {
-        return decide(WaveformClassification::kInconclusive, "R2.4");
-      }
-      if (inputs.drate_similar && inputs.drate_positive_half_clipped &&
-          inputs.positive_half_clips_simultaneous) {
-        return decide(WaveformClassification::kOverload, "R2.1");
-      }
-      if (drate_effective_similar) {
-        return decide(WaveformClassification::kFullLoad, "R2.2");
-      }
-      return decide(WaveformClassification::kOverload, "R2.3");
-    }
-    if (negative_only || both_clipped) {
-      const char* similar_rule = negative_only ? "R3.1" : "R4.1";
-      const char* plateau_rule = negative_only ? "R3.2" : "R4.2";
-      const char* otherwise_rule = negative_only ? "R3.3" : "R4.3";
-      if (inputs.drate_input_valid && inputs.drate_similar) {
-        return decide(WaveformClassification::kUnderload, similar_rule);
-      }
-      if (inputs.drate_has_waveform && inputs.drate_middle_any_plateau) {
-        return decide(WaveformClassification::kUnderload, plateau_rule);
-      }
-      return decide(WaveformClassification::kInconclusive, otherwise_rule);
+    const bool positive_side_suppressed =
+        inputs.srtt_positive_half_clipped;
+    const bool negative_side_suppressed =
+        inputs.srtt_negative_half_clipped;
+    if (positive_side_suppressed || negative_side_suppressed) {
+      return classify_clipped_shape(positive_side_suppressed,
+                                    negative_side_suppressed);
     }
     return decide(WaveformClassification::kFullLoad, "R1");
   }
@@ -3822,6 +6148,681 @@ FBBRSender::AnalyzeCycleCompleteness(
   return result;
 }
 
+FBBRSender::BicClippingDetectionResult
+FBBRSender::DetectBicSrttClipping(
+    const std::vector<double>& srtt,
+    const std::vector<bool>& valid,
+    double noise_sigma) {
+  BicClippingDetectionResult result;
+  if (srtt.size() != valid.size() || srtt.size() < 9) {
+    result.invalid_reason = "invalid_bic_clipping_input";
+    return result;
+  }
+
+  // This path is deliberately shape-only: it does not use sender phase,
+  // waveform period, delivery rate, or RTprop.
+  std::vector<double> smoothed = srtt;
+  for (size_t i = 1; i + 1 < srtt.size(); ++i) {
+    if (!valid[i - 1] || !valid[i] || !valid[i + 1] ||
+        !std::isfinite(srtt[i - 1]) || !std::isfinite(srtt[i]) ||
+        !std::isfinite(srtt[i + 1])) {
+      continue;
+    }
+    std::array<double, 3> local = {
+        {srtt[i - 1], srtt[i], srtt[i + 1]}};
+    std::sort(local.begin(), local.end());
+    smoothed[i] = local[1];
+  }
+
+  std::vector<double> x;
+  std::vector<double> y;
+  x.reserve(srtt.size());
+  y.reserve(srtt.size());
+  for (size_t i = 0; i < smoothed.size(); ++i) {
+    if (valid[i] && std::isfinite(smoothed[i])) {
+      x.push_back(static_cast<double>(i));
+      y.push_back(smoothed[i]);
+    }
+  }
+  const size_t n = y.size();
+  if (n < 9) {
+    result.invalid_reason = "insufficient_bic_clipping_samples";
+    return result;
+  }
+
+  const double y_mean =
+      std::accumulate(y.begin(), y.end(), 0.0) /
+      static_cast<double>(n);
+  double signal_sum_squares = 0.0;
+  for (double value : y) {
+    const double centered = value - y_mean;
+    signal_sum_squares += centered * centered;
+  }
+  const double signal_variance =
+      signal_sum_squares / static_cast<double>(n);
+  if (!std::isfinite(signal_variance) ||
+      signal_variance <= std::numeric_limits<double>::epsilon()) {
+    result.invalid_reason = "flat_bic_clipping_signal";
+    return result;
+  }
+
+  // Infer the noise scale from the robust residual, the observed SRTT
+  // quantization, and the finite-window variance.  No absolute slope,
+  // duration, amplitude, or RTT-level threshold is introduced here.
+  std::vector<double> sorted_levels = y;
+  std::sort(sorted_levels.begin(), sorted_levels.end());
+  std::vector<double> positive_level_steps;
+  for (size_t i = 1; i < sorted_levels.size(); ++i) {
+    const double difference = sorted_levels[i] - sorted_levels[i - 1];
+    if (difference > std::numeric_limits<double>::epsilon() *
+                         std::max(1.0, std::abs(sorted_levels[i]))) {
+      positive_level_steps.push_back(difference);
+    }
+  }
+  const double quantization_sigma = positive_level_steps.empty()
+      ? 0.0
+      : Median(positive_level_steps) / std::sqrt(12.0);
+  const double finite_window_sigma =
+      std::sqrt(signal_variance / static_cast<double>(n));
+  const double model_sigma = std::max(
+      std::isfinite(noise_sigma) ? std::max(0.0, noise_sigma) : 0.0,
+      std::max(quantization_sigma, finite_window_sigma));
+  const double noise_variance = std::max(
+      model_sigma * model_sigma,
+      std::numeric_limits<double>::epsilon() *
+          std::max(1.0, signal_variance));
+
+  std::vector<double> prefix_x(n + 1, 0.0);
+  std::vector<double> prefix_x2(n + 1, 0.0);
+  std::vector<double> prefix_y(n + 1, 0.0);
+  std::vector<double> prefix_y2(n + 1, 0.0);
+  std::vector<double> prefix_xy(n + 1, 0.0);
+  for (size_t i = 0; i < n; ++i) {
+    prefix_x[i + 1] = prefix_x[i] + x[i];
+    prefix_x2[i + 1] = prefix_x2[i] + x[i] * x[i];
+    prefix_y[i + 1] = prefix_y[i] + y[i];
+    prefix_y2[i + 1] = prefix_y2[i] + y[i] * y[i];
+    prefix_xy[i + 1] = prefix_xy[i] + x[i] * y[i];
+  }
+
+  struct LineFit {
+    bool valid = false;
+    double slope = 0.0;
+    double rss = std::numeric_limits<double>::infinity();
+  };
+  auto fit_line_range = [&](size_t begin, size_t end) {
+    LineFit fit;
+    if (end <= begin || end > n) {
+      return fit;
+    }
+    const double count = static_cast<double>(end - begin);
+    const double sum_x = prefix_x[end] - prefix_x[begin];
+    const double sum_x2 = prefix_x2[end] - prefix_x2[begin];
+    const double sum_y = prefix_y[end] - prefix_y[begin];
+    const double sum_y2 = prefix_y2[end] - prefix_y2[begin];
+    const double sum_xy = prefix_xy[end] - prefix_xy[begin];
+    const double denominator = count * sum_x2 - sum_x * sum_x;
+    if (denominator <= std::numeric_limits<double>::epsilon()) {
+      return fit;
+    }
+    fit.slope = (count * sum_xy - sum_x * sum_y) / denominator;
+    const double intercept = (sum_y - fit.slope * sum_x) / count;
+    fit.rss = std::max(
+        0.0, sum_y2 - intercept * sum_y - fit.slope * sum_xy);
+    fit.valid = std::isfinite(fit.rss) && std::isfinite(fit.slope);
+    return fit;
+  };
+  auto constant_rss_range = [&](size_t begin, size_t end) {
+    if (end <= begin || end > n) {
+      return std::numeric_limits<double>::infinity();
+    }
+    const double count = static_cast<double>(end - begin);
+    const double sum_y = prefix_y[end] - prefix_y[begin];
+    const double sum_y2 = prefix_y2[end] - prefix_y2[begin];
+    return std::max(0.0, sum_y2 - sum_y * sum_y / count);
+  };
+  auto bic_score = [&](double rss, size_t count, size_t parameters) {
+    if (!std::isfinite(rss) || count == 0) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return rss / noise_variance +
+        static_cast<double>(parameters) *
+            std::log(static_cast<double>(count));
+  };
+
+  constexpr size_t kMinimumSegmentSamples = 3;
+  constexpr size_t kMaximumSegments = 16;
+  const size_t maximum_segments = std::min(
+      kMaximumSegments, n / kMinimumSegmentSamples);
+  if (maximum_segments < 3) {
+    result.invalid_reason = "insufficient_bic_segment_capacity";
+    return result;
+  }
+  const size_t stride = n + 1;
+  std::vector<double> segment_cost(
+      stride * stride, std::numeric_limits<double>::infinity());
+  for (size_t begin = 0; begin < n; ++begin) {
+    for (size_t end = begin + kMinimumSegmentSamples;
+         end <= n; ++end) {
+      const LineFit fit = fit_line_range(begin, end);
+      if (fit.valid) {
+        segment_cost[begin * stride + end] = fit.rss;
+      }
+    }
+  }
+
+  const size_t dp_stride = n + 1;
+  std::vector<double> dp(
+      (maximum_segments + 1) * dp_stride,
+      std::numeric_limits<double>::infinity());
+  std::vector<int> backpointer(
+      (maximum_segments + 1) * dp_stride, -1);
+  dp[0] = 0.0;
+  for (size_t segments = 1; segments <= maximum_segments; ++segments) {
+    const size_t minimum_end = segments * kMinimumSegmentSamples;
+    for (size_t end = minimum_end; end <= n; ++end) {
+      const size_t first_begin =
+          (segments - 1) * kMinimumSegmentSamples;
+      const size_t last_begin = end - kMinimumSegmentSamples;
+      double best = std::numeric_limits<double>::infinity();
+      int best_begin = -1;
+      for (size_t begin = first_begin; begin <= last_begin; ++begin) {
+        const double prior =
+            dp[(segments - 1) * dp_stride + begin];
+        const double cost = segment_cost[begin * stride + end];
+        if (!std::isfinite(prior) || !std::isfinite(cost)) {
+          continue;
+        }
+        const double candidate = prior + cost;
+        if (candidate < best) {
+          best = candidate;
+          best_begin = static_cast<int>(begin);
+        }
+      }
+      dp[segments * dp_stride + end] = best;
+      backpointer[segments * dp_stride + end] = best_begin;
+    }
+  }
+
+  size_t selected_segments = 0;
+  double selected_score = std::numeric_limits<double>::infinity();
+  for (size_t segments = 1; segments <= maximum_segments; ++segments) {
+    const double rss = dp[segments * dp_stride + n];
+    const size_t parameters = 3 * segments - 1;
+    const double score = bic_score(rss, n, parameters);
+    if (score < selected_score) {
+      selected_score = score;
+      selected_segments = segments;
+    }
+  }
+  if (selected_segments == 0 || !std::isfinite(selected_score)) {
+    result.invalid_reason = "bic_segmentation_failed";
+    return result;
+  }
+
+  struct Segment {
+    size_t begin = 0;
+    size_t end = 0;
+  };
+  std::vector<Segment> reversed_segments;
+  size_t segment_end = n;
+  for (size_t segments = selected_segments; segments > 0; --segments) {
+    const int segment_begin =
+        backpointer[segments * dp_stride + segment_end];
+    if (segment_begin < 0) {
+      result.invalid_reason = "bic_backtracking_failed";
+      return result;
+    }
+    reversed_segments.push_back(
+        {static_cast<size_t>(segment_begin), segment_end});
+    segment_end = static_cast<size_t>(segment_begin);
+  }
+  std::reverse(reversed_segments.begin(), reversed_segments.end());
+
+  struct ThreeParameterFit {
+    bool valid = false;
+    std::array<double, 3> coefficients = {{0.0, 0.0, 0.0}};
+    double rss = std::numeric_limits<double>::infinity();
+  };
+  struct TwoParameterFit {
+    bool valid = false;
+    std::array<double, 2> coefficients = {{0.0, 0.0}};
+    double rss = std::numeric_limits<double>::infinity();
+  };
+  auto solve_three_by_three = [](
+      double matrix[3][4], std::array<double, 3>* solution) {
+    for (size_t column = 0; column < 3; ++column) {
+      size_t pivot = column;
+      for (size_t row = column + 1; row < 3; ++row) {
+        if (std::abs(matrix[row][column]) >
+            std::abs(matrix[pivot][column])) {
+          pivot = row;
+        }
+      }
+      if (std::abs(matrix[pivot][column]) <=
+          std::numeric_limits<double>::epsilon()) {
+        return false;
+      }
+      if (pivot != column) {
+        for (size_t entry = column; entry < 4; ++entry) {
+          std::swap(matrix[column][entry], matrix[pivot][entry]);
+        }
+      }
+      const double divisor = matrix[column][column];
+      for (size_t entry = column; entry < 4; ++entry) {
+        matrix[column][entry] /= divisor;
+      }
+      for (size_t row = 0; row < 3; ++row) {
+        if (row == column) {
+          continue;
+        }
+        const double factor = matrix[row][column];
+        for (size_t entry = column; entry < 4; ++entry) {
+          matrix[row][entry] -= factor * matrix[column][entry];
+        }
+      }
+    }
+    for (size_t i = 0; i < 3; ++i) {
+      (*solution)[i] = matrix[i][3];
+    }
+    return true;
+  };
+  auto fit_three_parameter = [&](size_t begin, size_t end,
+                                 const std::function<
+                                     std::array<double, 3>(double)>&
+                                     features) {
+    ThreeParameterFit fit;
+    if (end <= begin || end > n) {
+      return fit;
+    }
+    double normal[3][4] = {};
+    for (size_t i = begin; i < end; ++i) {
+      const std::array<double, 3> f = features(x[i]);
+      for (size_t row = 0; row < 3; ++row) {
+        for (size_t column = 0; column < 3; ++column) {
+          normal[row][column] += f[row] * f[column];
+        }
+        normal[row][3] += f[row] * y[i];
+      }
+    }
+    if (!solve_three_by_three(normal, &fit.coefficients)) {
+      return fit;
+    }
+    fit.rss = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+      const std::array<double, 3> f = features(x[i]);
+      const double predicted =
+          fit.coefficients[0] * f[0] +
+          fit.coefficients[1] * f[1] +
+          fit.coefficients[2] * f[2];
+      const double residual = y[i] - predicted;
+      fit.rss += residual * residual;
+    }
+    fit.valid = std::isfinite(fit.rss);
+    return fit;
+  };
+  auto fit_single_feature = [&] (
+      size_t begin, size_t end,
+      const std::function<double(double)>& feature) {
+    TwoParameterFit fit;
+    if (end <= begin || end > n) {
+      return fit;
+    }
+    double sum_feature = 0.0;
+    double sum_feature_squared = 0.0;
+    double sum_y = 0.0;
+    double sum_feature_y = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+      const double value = feature(x[i]);
+      sum_feature += value;
+      sum_feature_squared += value * value;
+      sum_y += y[i];
+      sum_feature_y += value * y[i];
+    }
+    const double count = static_cast<double>(end - begin);
+    const double denominator =
+        count * sum_feature_squared - sum_feature * sum_feature;
+    if (denominator <= std::numeric_limits<double>::epsilon()) {
+      return fit;
+    }
+    fit.coefficients[1] =
+        (count * sum_feature_y - sum_feature * sum_y) / denominator;
+    fit.coefficients[0] =
+        (sum_y - fit.coefficients[1] * sum_feature) / count;
+    fit.rss = 0.0;
+    for (size_t i = begin; i < end; ++i) {
+      const double predicted = fit.coefficients[0] +
+          fit.coefficients[1] * feature(x[i]);
+      const double residual = y[i] - predicted;
+      fit.rss += residual * residual;
+    }
+    fit.valid = std::isfinite(fit.rss);
+    return fit;
+  };
+
+  struct Motif {
+    bool top = false;
+    size_t plateau_begin = 0;
+    size_t plateau_end = 0;
+    double rounded_bic_margin = 0.0;
+    bool has_sharp_edge = false;
+  };
+  std::vector<Motif> motifs;
+  for (size_t i = 1; i + 1 < reversed_segments.size(); ++i) {
+    const Segment& before = reversed_segments[i - 1];
+    const Segment& plateau = reversed_segments[i];
+    const Segment& after = reversed_segments[i + 1];
+    const size_t plateau_count = plateau.end - plateau.begin;
+    const LineFit plateau_line =
+        fit_line_range(plateau.begin, plateau.end);
+    const double plateau_constant_rss =
+        constant_rss_range(plateau.begin, plateau.end);
+    if (!plateau_line.valid ||
+        bic_score(plateau_constant_rss, plateau_count, 1) >=
+            bic_score(plateau_line.rss, plateau_count, 2)) {
+      continue;
+    }
+
+    const double left_edge = x[plateau.begin];
+    const double right_edge = x[plateau.end - 1];
+    const ThreeParameterFit hinge = fit_three_parameter(
+        before.begin, after.end,
+        [left_edge, right_edge](double sample_x) {
+          return std::array<double, 3>{{
+              1.0,
+              std::max(0.0, left_edge - sample_x),
+              std::max(0.0, sample_x - right_edge)}};
+        });
+    const double context_center =
+        0.5 * (x[before.begin] + x[after.end - 1]);
+    const ThreeParameterFit quadratic = fit_three_parameter(
+        before.begin, after.end,
+        [context_center](double sample_x) {
+          const double centered = sample_x - context_center;
+          return std::array<double, 3>{{
+              1.0, centered, centered * centered}};
+        });
+    const size_t context_count = after.end - before.begin;
+    if (!hinge.valid || !quadratic.valid) {
+      continue;
+    }
+    const bool bottom = hinge.coefficients[1] > 0.0 &&
+                        hinge.coefficients[2] > 0.0;
+    const bool top = hinge.coefficients[1] < 0.0 &&
+                     hinge.coefficients[2] < 0.0;
+    if (!bottom && !top) {
+      continue;
+    }
+
+    // A quantized triangular or smoothly rounded response can contain a
+    // short constant run at its turning point without being clipped.  Compare
+    // the two-knot clipped hinge with three non-clipped explanations:
+    // quadratic, one-knot V, and an affine rounded turn.  The last model is
+    //   a + b*u + c*sqrt((u-v)^2 + r^2),
+    // where u is the normalized local time.  Its free center and radius let
+    // a gradual U-shaped turn compete fairly with the two free edges of the
+    // clipped hinge.  This is model selection only: no absolute RTT, slope,
+    // amplitude, plateau-duration, or RTprop threshold is involved.
+    ThreeParameterFit best_v;
+    for (size_t vertex = before.begin + 2;
+         vertex + 2 < after.end; ++vertex) {
+      const double vertex_x = x[vertex];
+      const ThreeParameterFit candidate_v = fit_three_parameter(
+          before.begin, after.end,
+          [vertex_x](double sample_x) {
+            return std::array<double, 3>{{
+                1.0,
+                std::max(0.0, vertex_x - sample_x),
+                std::max(0.0, sample_x - vertex_x)}};
+          });
+      if (!candidate_v.valid) {
+        continue;
+      }
+      const bool same_direction = bottom
+          ? candidate_v.coefficients[1] > 0.0 &&
+                candidate_v.coefficients[2] > 0.0
+          : candidate_v.coefficients[1] < 0.0 &&
+                candidate_v.coefficients[2] < 0.0;
+      if (same_direction &&
+          (!best_v.valid || candidate_v.rss < best_v.rss)) {
+        best_v = candidate_v;
+      }
+    }
+
+    const double context_span =
+        x[after.end - 1] - x[before.begin];
+    const double normalized_center =
+        0.5 * (x[before.begin] + x[after.end - 1]);
+    ThreeParameterFit best_rounded_turn;
+    if (context_span > std::numeric_limits<double>::epsilon()) {
+      std::vector<double> rounded_radii;
+      const double minimum_normalized_radius = 1.0 / context_span;
+      constexpr double kMaximumNormalizedRadius = 0.5;
+      constexpr size_t kRoundedRadiusCandidates = 32;
+      if (minimum_normalized_radius < kMaximumNormalizedRadius) {
+        const double log_minimum =
+            std::log(minimum_normalized_radius);
+        const double log_maximum =
+            std::log(kMaximumNormalizedRadius);
+        for (size_t radius_index = 0;
+             radius_index < kRoundedRadiusCandidates; ++radius_index) {
+          const double fraction = static_cast<double>(radius_index) /
+              static_cast<double>(kRoundedRadiusCandidates - 1);
+          rounded_radii.push_back(std::exp(
+              log_minimum + fraction * (log_maximum - log_minimum)));
+        }
+      } else {
+        rounded_radii.push_back(kMaximumNormalizedRadius);
+      }
+      for (size_t vertex = before.begin + 2;
+           vertex + 2 < after.end; ++vertex) {
+        const double normalized_vertex =
+            (x[vertex] - normalized_center) / context_span;
+        for (double normalized_radius : rounded_radii) {
+          const ThreeParameterFit candidate_turn = fit_three_parameter(
+              before.begin, after.end,
+              [normalized_center, context_span, normalized_vertex,
+               normalized_radius](double sample_x) {
+                const double normalized_x =
+                    (sample_x - normalized_center) / context_span;
+                const double offset = normalized_x - normalized_vertex;
+                return std::array<double, 3>{{
+                    1.0,
+                    normalized_x,
+                    std::sqrt(offset * offset +
+                              normalized_radius * normalized_radius)}};
+              });
+          if (candidate_turn.valid &&
+              (!best_rounded_turn.valid ||
+               candidate_turn.rss < best_rounded_turn.rss)) {
+            best_rounded_turn = candidate_turn;
+          }
+        }
+      }
+    }
+    if (!best_v.valid || !best_rounded_turn.valid ||
+        bic_score(hinge.rss, context_count, 5) >=
+            bic_score(quadratic.rss, context_count, 3) ||
+        bic_score(hinge.rss, context_count, 5) >=
+            bic_score(best_v.rss, context_count, 4) ||
+        bic_score(hinge.rss, context_count, 5) >=
+            bic_score(best_rounded_turn.rss, context_count, 5)) {
+      continue;
+    }
+
+    // A real horizontal cut also creates at least one slope discontinuity at
+    // an entry/exit edge.  A rounded valley instead has a continuously
+    // changing slope even when quantization makes its center look constant.
+    // On balanced neighborhoods around each selected edge, compare a sharp
+    // one-sided hinge with a smooth quadratic.  Both models have three
+    // effective parameters (two coefficients plus the selected edge versus
+    // three polynomial coefficients), so this remains threshold-free model
+    // competition.
+    const size_t left_wing = std::min(
+        before.end - before.begin, plateau_count);
+    const size_t right_wing = std::min(
+        after.end - after.begin, plateau_count);
+    bool left_edge_sharp = false;
+    bool right_edge_sharp = false;
+    if (left_wing >= kMinimumSegmentSamples) {
+      const size_t edge_begin = plateau.begin - left_wing;
+      const size_t edge_end = plateau.begin + left_wing;
+      const double edge_x = x[plateau.begin];
+      const TwoParameterFit sharp_edge = fit_single_feature(
+          edge_begin, edge_end,
+          [edge_x](double sample_x) {
+            return std::max(0.0, edge_x - sample_x);
+          });
+      const ThreeParameterFit smooth_edge = fit_three_parameter(
+          edge_begin, edge_end,
+          [edge_x](double sample_x) {
+            const double centered = sample_x - edge_x;
+            return std::array<double, 3>{{
+                1.0, centered, centered * centered}};
+          });
+      left_edge_sharp = sharp_edge.valid && smooth_edge.valid &&
+          bic_score(sharp_edge.rss, edge_end - edge_begin, 3) <
+              bic_score(smooth_edge.rss, edge_end - edge_begin, 3);
+    }
+    if (right_wing >= kMinimumSegmentSamples) {
+      const size_t edge_begin = plateau.end - right_wing;
+      const size_t edge_end = plateau.end + right_wing;
+      const double edge_x = x[plateau.end - 1];
+      const TwoParameterFit sharp_edge = fit_single_feature(
+          edge_begin, edge_end,
+          [edge_x](double sample_x) {
+            return std::max(0.0, sample_x - edge_x);
+          });
+      const ThreeParameterFit smooth_edge = fit_three_parameter(
+          edge_begin, edge_end,
+          [edge_x](double sample_x) {
+            const double centered = sample_x - edge_x;
+            return std::array<double, 3>{{
+                1.0, centered, centered * centered}};
+          });
+      right_edge_sharp = sharp_edge.valid && smooth_edge.valid &&
+          bic_score(sharp_edge.rss, edge_end - edge_begin, 3) <
+              bic_score(smooth_edge.rss, edge_end - edge_begin, 3);
+    }
+    motifs.push_back({
+        top, plateau.begin, plateau.end,
+        bic_score(best_rounded_turn.rss, context_count, 5) -
+            bic_score(hinge.rss, context_count, 5),
+        left_edge_sharp || right_edge_sharp});
+  }
+
+  auto shared_envelope_pair_exists = [&](bool top) {
+    std::vector<Motif> directional;
+    for (const Motif& motif : motifs) {
+      if (motif.top == top) {
+        directional.push_back(motif);
+      }
+    }
+    for (size_t first = 0; first < directional.size(); ++first) {
+      for (size_t second = first + 1;
+           second < directional.size(); ++second) {
+        std::vector<double> pair_x;
+        std::vector<double> pair_y;
+        const Motif pair[] = {directional[first], directional[second]};
+        // Both repetitions must independently expose a slope discontinuity.
+        // Letting one sharp motif validate a second smooth turn recreates the
+        // exact failure mode this detector is meant to reject.
+        if (!pair[0].has_sharp_edge || !pair[1].has_sharp_edge) {
+          continue;
+        }
+        for (const Motif& motif : pair) {
+          for (size_t i = motif.plateau_begin;
+               i < motif.plateau_end; ++i) {
+            pair_x.push_back(x[i]);
+            pair_y.push_back(y[i]);
+          }
+        }
+        if (pair_x.size() < 6) {
+          continue;
+        }
+        const double center =
+            std::accumulate(pair_x.begin(), pair_x.end(), 0.0) /
+            static_cast<double>(pair_x.size());
+        double sum_centered_x2 = 0.0;
+        double sum_y = 0.0;
+        double sum_centered_xy = 0.0;
+        for (size_t i = 0; i < pair_x.size(); ++i) {
+          const double centered_x = pair_x[i] - center;
+          sum_centered_x2 += centered_x * centered_x;
+          sum_y += pair_y[i];
+          sum_centered_xy += centered_x * pair_y[i];
+        }
+        if (sum_centered_x2 <=
+            std::numeric_limits<double>::epsilon()) {
+          continue;
+        }
+        const double common_slope =
+            sum_centered_xy / sum_centered_x2;
+        const double common_intercept =
+            sum_y / static_cast<double>(pair_y.size());
+        double common_rss = 0.0;
+        for (size_t i = 0; i < pair_x.size(); ++i) {
+          const double predicted = common_intercept +
+              common_slope * (pair_x[i] - center);
+          const double residual = pair_y[i] - predicted;
+          common_rss += residual * residual;
+        }
+        const LineFit first_fit = fit_line_range(
+            pair[0].plateau_begin, pair[0].plateau_end);
+        const LineFit second_fit = fit_line_range(
+            pair[1].plateau_begin, pair[1].plateau_end);
+        if (!first_fit.valid || !second_fit.valid) {
+          continue;
+        }
+        const double separate_rss = first_fit.rss + second_fit.rss;
+        if (bic_score(common_rss, pair_x.size(), 2) <
+            bic_score(separate_rss, pair_x.size(), 4)) {
+          const double minimum_margin = std::min(
+              pair[0].rounded_bic_margin,
+              pair[1].rounded_bic_margin);
+          const double combined_margin =
+              pair[0].rounded_bic_margin +
+              pair[1].rounded_bic_margin;
+          if (top) {
+            result.top_clip_min_rounded_bic_margin = minimum_margin;
+            result.top_clip_combined_rounded_bic_margin = combined_margin;
+            result.top_clip_pair_sharp_motif_count =
+                static_cast<size_t>(pair[0].has_sharp_edge) +
+                static_cast<size_t>(pair[1].has_sharp_edge);
+          } else {
+            result.bottom_clip_min_rounded_bic_margin = minimum_margin;
+            result.bottom_clip_combined_rounded_bic_margin =
+                combined_margin;
+            result.bottom_clip_pair_sharp_motif_count =
+                static_cast<size_t>(pair[0].has_sharp_edge) +
+                static_cast<size_t>(pair[1].has_sharp_edge);
+          }
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  for (const Motif& motif : motifs) {
+    if (motif.top) {
+      ++result.top_motif_count;
+    } else {
+      ++result.bottom_motif_count;
+    }
+  }
+  result.top_clip = shared_envelope_pair_exists(true);
+  result.bottom_clip = shared_envelope_pair_exists(false);
+  result.both_clipped = result.top_clip && result.bottom_clip;
+  result.selected_segment_count = selected_segments;
+  result.selected_score = selected_score;
+  result.valid = true;
+  result.invalid_reason = result.top_clip || result.bottom_clip
+      ? "none"
+      : "no_repeated_bic_clip_shape";
+  return result;
+}
+
 FBBRSender::PlateauDetectionResult
 FBBRSender::DetectDualSignalPlateaus(
     const std::vector<double>& srtt,
@@ -4402,10 +7403,467 @@ void FBBRSender::StartWaveformCollectionAt(
 }
 
 FBBRSender::WaveformWindowAnalysis
+FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
+                                    QuicTime window_end,
+                                    double window_periods,
+                                    bool extended_window) const {
+  WaveformWindowAnalysis result;
+  result.fbbr_hybrid_pipeline = true;
+  result.probe_epoch_start = probe_epoch_start_time_;
+  result.probe_epoch_rtt = probe_epoch_rtt_;
+  result.collection_window_start = window_start;
+  result.collection_window_end = window_end;
+  result.collection_window_periods = window_periods;
+  result.window_start = window_start;
+  result.window_end = window_end;
+  result.window_periods = window_periods;
+  result.extended_window = extended_window;
+  result.max_rtt_before_ms = fbbr_hybrid_max_rtt_valid_
+      ? fbbr_hybrid_max_rtt_ms_ : 0.0;
+  result.max_rtt_after_ms = result.max_rtt_before_ms;
+  result.rtprop_drate_before_bps = fbbr_hybrid_rtprop_drate_valid_
+      ? static_cast<double>(
+            fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
+      : 0.0;
+  result.rtprop_drate_after_bps = result.rtprop_drate_before_bps;
+  if (window_end <= window_start || cruise_modulation_freq_hz_ <= 0.0 ||
+      probe_epoch_rtt_.IsZero()) {
+    result.invalid_reason = "invalid_hybrid_window";
+    return result;
+  }
+  const double period_s = 1.0 / cruise_modulation_freq_hz_;
+  const double sample_step_s = ClampValue(period_s / 40.0, 0.001, 0.005);
+  const double max_gap_s =
+      waveform_max_interpolation_gap_period_ratio_ * period_s;
+  const TimeDelta feedback_lag = probe_epoch_rtt_;
+  const auto sender_samples = SelectRateSamples(
+      sender_rate_history_, window_start - feedback_lag,
+      window_end - feedback_lag);
+  const auto drate_samples = SelectRateSamples(
+      delivery_rate_history_, window_start, window_end);
+  const auto srtt_samples = SelectRttSamples(
+      srtt_history_, window_start, window_end);
+  result.sender_sample_count = sender_samples.size();
+  result.drate_sample_count = drate_samples.size();
+  result.srtt_sample_count = srtt_samples.size();
+  uint64_t acked_bytes = 0;
+  size_t app_limited = 0;
+  for (const auto& sample : drate_samples) {
+    acked_bytes += sample.acked_bytes;
+    if (sample.is_app_limited) {
+      ++app_limited;
+    }
+  }
+  result.app_limited_ratio = drate_samples.empty()
+      ? 1.0 : static_cast<double>(app_limited) / drate_samples.size();
+  ResampledWaveformSeries sender = ResampleRateWaveform(
+      sender_samples, window_start - feedback_lag,
+      window_end - feedback_lag, sample_step_s, max_gap_s);
+  ResampledWaveformSeries drate = ResampleRateWaveform(
+      drate_samples, window_start, window_end, sample_step_s, max_gap_s);
+  ResampledWaveformSeries srtt = ResampleRttWaveform(
+      srtt_samples, window_start, window_end, sample_step_s, max_gap_s);
+  if (sender.values.empty() || drate.values.empty() || srtt.values.empty() ||
+      sender.values.size() != drate.values.size() ||
+      drate.values.size() != srtt.values.size()) {
+    result.invalid_reason = "hybrid_resampling_failed";
+    return result;
+  }
+  result.coverage_ratio = std::min(drate.coverage_ratio,
+                                   srtt.coverage_ratio);
+  result.drate_input_valid = drate_samples.size() >= 4 && acked_bytes > 0 &&
+      drate.coverage_ratio + 1e-15 >= waveform_min_cycle_coverage_ratio_ &&
+      result.app_limited_ratio <=
+          waveform_max_app_limited_sample_ratio_ + 1e-15;
+  result.srtt_input_valid = srtt_samples.size() >= 4 &&
+      srtt.coverage_ratio + 1e-15 >= waveform_min_cycle_coverage_ratio_;
+
+  auto resampled_stats = [](const std::vector<double>& values,
+                            const std::vector<bool>& valid,
+                            double* minimum,
+                            double* maximum,
+                            double* mean,
+                            size_t* count) {
+    *minimum = std::numeric_limits<double>::infinity();
+    *maximum = -std::numeric_limits<double>::infinity();
+    *mean = 0.0;
+    *count = 0;
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (valid[i] && std::isfinite(values[i]) && values[i] > 0.0) {
+        *minimum = std::min(*minimum, values[i]);
+        *maximum = std::max(*maximum, values[i]);
+        *mean += values[i];
+        ++*count;
+      }
+    }
+    if (*count == 0) {
+      *minimum = *maximum = *mean = 0.0;
+      return false;
+    }
+    *mean /= static_cast<double>(*count);
+    return std::isfinite(*minimum) && std::isfinite(*maximum) &&
+        std::isfinite(*mean);
+  };
+  result.delivery_rate_stats_valid = resampled_stats(
+      drate.values, drate.valid, &result.delivery_rate_min_bps,
+      &result.delivery_rate_max_bps, &result.delivery_rate_mean_bps,
+      &result.delivery_rate_stat_sample_count) && result.drate_input_valid;
+  result.srtt_stats_valid = resampled_stats(
+      srtt.values, srtt.valid, &result.srtt_min_ms,
+      &result.srtt_max_ms, &result.srtt_mean_ms,
+      &result.srtt_stat_sample_count) && result.srtt_input_valid;
+
+  double sender_period_correlation = -1.0;
+  const double srate_period_s = EstimateActualSignalPeriod(
+      sender.values, sender.valid, sample_step_s, period_s,
+      &sender_period_correlation);
+  result.sender_waveform_valid = srate_period_s > 0.0;
+  FbbrHybridRegimeFeatures& features = result.hybrid_features;
+  features.estimated_srate_period_s = srate_period_s;
+  features.srtt_stats_valid = result.srtt_stats_valid;
+  features.srtt_min_ms = result.srtt_min_ms;
+  features.srtt_max_ms = result.srtt_max_ms;
+  features.drate_stats_valid = result.delivery_rate_stats_valid;
+  features.mindrate_bps = result.delivery_rate_min_bps;
+  features.maxdrate_bps = result.delivery_rate_max_bps;
+  features.meandrate_bps = result.delivery_rate_mean_bps;
+
+  auto build_masks_and_raw_evidence = [&](
+      const std::vector<double>& values,
+      const std::vector<bool>& original_valid,
+      bool drate_signal,
+      SignalRegimeFeatures* signal,
+      std::vector<bool>* clean_valid,
+      std::vector<bool>* periodic_valid,
+      std::vector<ContinuousHorizontalEvidence>* continuous) {
+    signal->input_valid = drate_signal
+        ? result.drate_input_valid : result.srtt_input_valid;
+    signal->ordinary_wave_uses_raw_valid_view = drate_signal;
+    *continuous = DetectContinuousHorizontalSegments(
+        values, original_valid, sample_step_s, period_s);
+    signal->continuous_horizontal_count =
+        static_cast<uint32_t>(continuous->size());
+    signal->top_repeated_clip = DetectRepeatedClipLineContacts(
+        values, original_valid, sample_step_s, period_s, true);
+    signal->bottom_repeated_clip = DetectRepeatedClipLineContacts(
+        values, original_valid, sample_step_s, period_s, false);
+    signal->repeated_top_clip = signal->top_repeated_clip.valid;
+    signal->repeated_bottom_clip = signal->bottom_repeated_clip.valid;
+    signal->suspected_top_candidate = signal->repeated_top_clip;
+    signal->suspected_bottom_candidate = signal->repeated_bottom_clip;
+    std::vector<bool> protected_mask(values.size(), false);
+    *clean_valid = original_valid;
+    *periodic_valid = original_valid;
+    size_t edge_masked = 0;
+    for (const auto& segment : *continuous) {
+      signal->suspected_top_candidate =
+          signal->suspected_top_candidate || segment.is_upper;
+      signal->suspected_bottom_candidate =
+          signal->suspected_bottom_candidate || segment.is_lower;
+      if (segment.is_upper) {
+        signal->longest_top_line_ratio_of_period = std::max(
+            signal->longest_top_line_ratio_of_period,
+            segment.duration_ratio_of_period);
+      }
+      if (segment.is_lower) {
+        signal->longest_bottom_line_ratio_of_period = std::max(
+            signal->longest_bottom_line_ratio_of_period,
+            segment.duration_ratio_of_period);
+      }
+      const bool edge = segment.touches_left_edge ||
+                        segment.touches_right_edge;
+      for (size_t i = segment.start_index;
+           i <= segment.end_index && i < values.size(); ++i) {
+        if (edge) {
+          if ((*periodic_valid)[i]) {
+            ++edge_masked;
+          }
+          (*periodic_valid)[i] = false;
+          (*clean_valid)[i] = false;
+        } else {
+          protected_mask[i] = true;
+        }
+      }
+      signal->left_edge_line_masked = signal->left_edge_line_masked ||
+          segment.touches_left_edge;
+      signal->right_edge_line_masked = signal->right_edge_line_masked ||
+          segment.touches_right_edge;
+    }
+    const auto middle = DetectMiddleSequentialDisturbances(
+        values, *periodic_valid, protected_mask, sample_step_s, period_s);
+    size_t middle_masked = 0;
+    for (const auto& disturbance : middle) {
+      signal->middle_sequential_masked = true;
+      signal->middle_best_slope_mismatch_ratio = std::max(
+          signal->middle_best_slope_mismatch_ratio,
+          disturbance.slope_mismatch_ratio);
+      signal->middle_best_bridge_deviation_ratio = std::max(
+          signal->middle_best_bridge_deviation_ratio,
+          disturbance.bridge_deviation_ratio);
+      for (size_t i = disturbance.start_index;
+           i <= disturbance.end_index && i < values.size(); ++i) {
+        if ((*periodic_valid)[i]) {
+          ++middle_masked;
+        }
+        (*periodic_valid)[i] = false;
+        (*clean_valid)[i] = false;
+      }
+    }
+    signal->edge_mask_ratio = values.empty()
+        ? 0.0 : static_cast<double>(edge_masked) / values.size();
+    signal->middle_mask_ratio = values.empty()
+        ? 0.0 : static_cast<double>(middle_masked) / values.size();
+  };
+
+  std::vector<bool> srtt_clean_valid;
+  std::vector<bool> srtt_periodic_valid;
+  std::vector<bool> drate_clean_valid;
+  std::vector<bool> drate_periodic_valid;
+  std::vector<ContinuousHorizontalEvidence> srtt_continuous;
+  std::vector<ContinuousHorizontalEvidence> drate_continuous;
+  build_masks_and_raw_evidence(
+      srtt.values, srtt.valid, false, &features.srtt,
+      &srtt_clean_valid, &srtt_periodic_valid, &srtt_continuous);
+  build_masks_and_raw_evidence(
+      drate.values, drate.valid, true, &features.drate,
+      &drate_clean_valid, &drate_periodic_valid, &drate_continuous);
+
+  features.srtt.wave = DetectOrdinaryWaveActivity(
+      srtt.values, srtt_clean_valid, sample_step_s, period_s);
+  // PDF: DRate ordinary-wave detection always uses the raw valid view.
+  features.drate.wave = DetectOrdinaryWaveActivity(
+      drate.values, drate.valid, sample_step_s, period_s);
+
+  auto derive_shoulders = [&](const std::vector<double>& values,
+                              const std::vector<bool>& valid,
+                              const std::vector<ContinuousHorizontalEvidence>&
+                                  segments,
+                              SignalRegimeFeatures* signal) {
+    const std::vector<double> filtered = MedianFilter3(values, valid);
+    std::vector<double> finite;
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (valid[i]) {
+        finite.push_back(filtered[i]);
+      }
+    }
+    const double amplitude = Quantile(finite, 0.95) -
+        Quantile(finite, 0.05);
+    const double level = std::max(std::abs(Median(finite)), 1e-12);
+    const bool amplitude_ok = amplitude >=
+        waveform_activity_min_level_ratio_ * level;
+    const size_t leg_points = static_cast<size_t>(std::ceil(
+        waveform_shoulder_min_residual_cycle_leg_duration_ratio_ *
+        period_s / sample_step_s));
+    for (const auto& segment : segments) {
+      if (segment.touches_left_edge || segment.touches_right_edge ||
+          (!segment.is_upper && !segment.is_lower)) {
+        continue;
+      }
+      size_t positive_points = 0;
+      size_t negative_points = 0;
+      size_t aligned_points = 0;
+      for (size_t i = segment.start_index; i <= segment.end_index &&
+           i < sender.values.size(); ++i) {
+        if (!sender.valid[i]) {
+          continue;
+        }
+        ++aligned_points;
+        const double centered_sender = sender.values[i] -
+            Median(std::vector<double>(sender.values.begin(),
+                                       sender.values.end()));
+        positive_points += centered_sender >= 0.0 ? 1 : 0;
+        negative_points += centered_sender < 0.0 ? 1 : 0;
+      }
+      const double positive_overlap = aligned_points == 0
+          ? 0.0 : static_cast<double>(positive_points) / aligned_points;
+      const double negative_overlap = aligned_points == 0
+          ? 0.0 : static_cast<double>(negative_points) / aligned_points;
+      const bool upper_shape = segment.is_upper &&
+          positive_overlap + 1e-15 >=
+              waveform_shoulder_min_half_overlap_ratio_ &&
+          segment.left_context_slope > 0.0 &&
+          segment.right_context_slope < 0.0;
+      const bool lower_shape = segment.is_lower &&
+          negative_overlap + 1e-15 >=
+              waveform_shoulder_min_half_overlap_ratio_ &&
+          segment.left_context_slope < 0.0 &&
+          segment.right_context_slope > 0.0;
+      if (!upper_shape && !lower_shape) {
+        continue;
+      }
+      const bool cycle_input_valid = srate_period_s > 0.0 && amplitude_ok &&
+          segment.start_index >= leg_points &&
+          segment.end_index + leg_points < values.size();
+      if (upper_shape) {
+        signal->positive_shoulder_cycle_input_valid = cycle_input_valid;
+      } else {
+        signal->negative_shoulder_cycle_input_valid = cycle_input_valid;
+      }
+      if (!cycle_input_valid) {
+        continue;
+      }
+      const size_t search_radius = static_cast<size_t>(std::ceil(
+          1.25 * srate_period_s / sample_step_s));
+      const size_t left_begin = segment.start_index > search_radius
+          ? segment.start_index - search_radius : 0;
+      const size_t right_end = std::min(
+          values.size(), segment.end_index + search_radius + 1);
+      size_t left_extreme = segment.start_index;
+      size_t right_extreme = segment.end_index;
+      bool left_found = false;
+      bool right_found = false;
+      for (size_t i = left_begin; i < segment.start_index; ++i) {
+        if (!valid[i]) {
+          continue;
+        }
+        if (!left_found || (upper_shape
+            ? filtered[i] < filtered[left_extreme]
+            : filtered[i] > filtered[left_extreme])) {
+          left_extreme = i;
+          left_found = true;
+        }
+      }
+      for (size_t i = segment.end_index + 1; i < right_end; ++i) {
+        if (!valid[i]) {
+          continue;
+        }
+        if (!right_found || (upper_shape
+            ? filtered[i] < filtered[right_extreme]
+            : filtered[i] > filtered[right_extreme])) {
+          right_extreme = i;
+          right_found = true;
+        }
+      }
+      const double extrema_period =
+          (right_extreme - left_extreme) * sample_step_s;
+      const double extrema_error =
+          std::abs(extrema_period - srate_period_s) / srate_period_s;
+      const bool recognizable = left_found && right_found &&
+          segment.start_index - left_extreme >= leg_points &&
+          right_extreme - segment.end_index >= leg_points &&
+          extrema_error <=
+              waveform_shoulder_max_residual_cycle_period_error_ratio_ +
+                  1e-15;
+      if (upper_shape) {
+        signal->positive_shoulder_cycle_recognizable = recognizable;
+        signal->positive_shoulder = signal->positive_shoulder ||
+                                    recognizable;
+      } else {
+        signal->negative_shoulder_cycle_recognizable = recognizable;
+        signal->negative_shoulder = signal->negative_shoulder ||
+                                    recognizable;
+      }
+    }
+  };
+  derive_shoulders(srtt.values, srtt.valid, srtt_continuous,
+                   &features.srtt);
+  derive_shoulders(drate.values, drate.valid, drate_continuous,
+                   &features.drate);
+
+  features.srtt.long_top_line =
+      features.srtt.longest_top_line_ratio_of_period >
+          fbbr_regime_long_top_horizontal_duration_ratio_;
+  features.srtt.long_bottom_line =
+      features.srtt.longest_bottom_line_ratio_of_period >
+          fbbr_regime_long_bottom_horizontal_duration_ratio_;
+  features.drate.long_top_line =
+      features.drate.longest_top_line_ratio_of_period >
+          fbbr_regime_long_top_horizontal_duration_ratio_;
+  features.drate.long_bottom_line =
+      features.drate.longest_bottom_line_ratio_of_period >
+          fbbr_regime_long_bottom_horizontal_duration_ratio_;
+
+  const bool srtt_upper_verified = features.srtt.positive_shoulder ||
+      features.srtt.long_top_line || features.srtt.repeated_top_clip;
+  const bool srtt_lower_verified = features.srtt.negative_shoulder ||
+      features.srtt.long_bottom_line || features.srtt.repeated_bottom_clip;
+  const bool drate_upper_verified = features.drate.positive_shoulder ||
+      features.drate.long_top_line || features.drate.repeated_top_clip;
+  const bool drate_lower_verified = features.drate.negative_shoulder ||
+      features.drate.long_bottom_line || features.drate.repeated_bottom_clip;
+  features.srtt.lower_clip_ignored_for_periodic = srtt_lower_verified;
+  features.drate.lower_clip_ignored_for_periodic = drate_lower_verified;
+  features.srtt.periodic = AnalyzeFbbrHybridPeriodicSimilarity(
+      srtt.values, srtt.valid, srtt_periodic_valid,
+      sample_step_s, period_s, srate_period_s, srtt_upper_verified,
+      &features.srtt);
+  features.drate.periodic = AnalyzeFbbrHybridPeriodicSimilarity(
+      drate.values, drate.valid, drate_periodic_valid,
+      sample_step_s, period_s, srate_period_s, drate_upper_verified,
+      &features.drate);
+
+  const bool u1 = features.srtt.positive_shoulder;
+  const bool u2 = features.srtt.long_top_line;
+  const bool u3 = features.srtt.repeated_top_clip;
+  const bool l1 = features.srtt.negative_shoulder;
+  const bool l2 = features.srtt.long_bottom_line;
+  const bool l3 = features.srtt.repeated_bottom_clip;
+  features.both_clip_directions = (u1 || u2 || u3) && (l1 || l2 || l3);
+  if (u1) {
+    features.selected_clip_case = SrttClipCase::kU1PositiveShoulder;
+  } else if (u2) {
+    features.selected_clip_case = SrttClipCase::kU2LongTopLine;
+  } else if (u3) {
+    features.selected_clip_case = SrttClipCase::kU3RepeatedTopClip;
+  } else if (l1) {
+    features.selected_clip_case = SrttClipCase::kL1NegativeShoulder;
+  } else if (l2) {
+    features.selected_clip_case = SrttClipCase::kL2LongBottomLine;
+  } else if (l3) {
+    features.selected_clip_case = SrttClipCase::kL3RepeatedBottomClip;
+  } else {
+    features.fallback_entered = true;
+    features.clip_candidate_rejected_to_wave_fallback =
+        features.srtt.suspected_top_candidate ||
+        features.srtt.suspected_bottom_candidate;
+  }
+  features.input_valid = result.srtt_input_valid &&
+                         result.drate_input_valid;
+  const TimeDelta current_rtprop = model_.MinRtt();
+  FbbrRegimeContext context;
+  context.max_rtt_valid = fbbr_hybrid_max_rtt_valid_;
+  context.max_rtt_ms = fbbr_hybrid_max_rtt_ms_;
+  context.rtprop_valid = !current_rtprop.IsZero();
+  context.rtprop_ms = context.rtprop_valid
+      ? static_cast<double>(current_rtprop.ToMicroseconds()) / 1000.0
+      : 0.0;
+  result.hybrid_decision = ClassifyFbbrHybridRegime(features, context);
+  result.classification = result.hybrid_decision.classification;
+  result.unsuppressed_classification = result.classification;
+  result.decision_rule = result.hybrid_decision.rule_id;
+  result.drate_similar = features.drate.periodic_similar;
+  result.drate_effective_similar = result.drate_similar;
+  result.srtt_similar = features.srtt.periodic_similar;
+  result.srtt_effective_similar = result.srtt_similar;
+  result.drate_match = result.drate_similar;
+  result.srtt_match = result.srtt_similar;
+  result.plateau.drate_has_waveform = features.drate.wave.has_wave;
+  const int64_t period_us = std::max<int64_t>(
+      1, static_cast<int64_t>(std::llround(period_s * 1000000.0)));
+  const int64_t window_start_us =
+      (window_start - QuicTime::Zero()).ToMicroseconds();
+  result.window_first_cycle_id = static_cast<uint64_t>(
+      std::max<int64_t>(0, window_start_us / period_us));
+  result.window_second_cycle_id = result.window_first_cycle_id + 1;
+  if (result.classification == WaveformClassification::kInconclusive) {
+    result.invalid_reason = result.hybrid_decision.rule_id[0] == '\0'
+        ? "hybrid_required_predicate_invalid"
+        : "hybrid_inconclusive";
+  } else {
+    result.invalid_reason = "none";
+  }
+  return result;
+}
+
+FBBRSender::WaveformWindowAnalysis
 FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
                                       QuicTime window_end,
                                       double window_periods,
                                       bool extended_window) const {
+  if (IsFbbrHybrid()) {
+    return AnalyzeFbbrHybridWindow(window_start, window_end,
+                                   window_periods, extended_window);
+  }
   WaveformWindowAnalysis result;
   result.probe_epoch_start = probe_epoch_start_time_;
   result.probe_epoch_rtt = probe_epoch_rtt_;
@@ -4419,6 +7877,22 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
   const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
   auto apply_r6_fallback = [&]() {
     WaveformDecisionInputs decision;
+    decision.srtt_input_valid = result.srtt_input_valid;
+    decision.drate_input_valid = result.drate_input_valid;
+    decision.drate_similar = result.drate_similar;
+    decision.drate_similar_without_middle =
+        result.drate_similar_without_middle;
+    decision.bic_srtt_top_clip = result.bic_clipping.top_clip;
+    decision.bic_srtt_bottom_clip = result.bic_clipping.bottom_clip;
+    decision.drate_positive_half_clipped =
+        result.plateau.drate_positive_half_clipped;
+    decision.drate_only_negative_half =
+        result.plateau.drate_only_negative_half;
+    decision.positive_half_clips_simultaneous =
+        result.plateau.positive_half_clips_simultaneous;
+    decision.drate_has_waveform = result.plateau.drate_has_waveform;
+    decision.drate_middle_any_plateau =
+        result.plateau.drate_middle_any_plateau;
     decision.adaptive_guard_enabled = use_adaptive_load_judgment;
     decision.srtt_window_stats_valid = result.srtt_stats_valid;
     decision.srtt_mean_ms = result.srtt_mean_ms;
@@ -4573,6 +8047,11 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
   }
   const double shape_independent_srtt_noise_sigma =
       1.4826 * Median(srtt_noise_deviations);
+  // True clipping is shape-only evidence.  Detect it before sender/receiver
+  // lag alignment, similarity, and shoulder analysis so failures in those
+  // secondary paths cannot hide a valid horizontal cut.
+  result.bic_clipping = DetectBicSrttClipping(
+      srtt.values, srtt.valid, shape_independent_srtt_noise_sigma);
   std::vector<double> drate_noise_residuals;
   for (size_t i = 0; i < drate_raw_detrended.size(); ++i) {
     if (drate.valid[i] && std::isfinite(drate_raw_detrended[i]) &&
@@ -4906,7 +8385,9 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
       result.srtt_input_valid && !result.srtt_effective_similar &&
       result.srtt_completeness.periodicity_correlation >=
           waveform_min_periodicity_correlation_;
-  if (!precheck_failure.empty()) {
+  const bool true_clip_detected =
+      result.bic_clipping.top_clip || result.bic_clipping.bottom_clip;
+  if (!precheck_failure.empty() && !true_clip_detected) {
     result.invalid_reason = precheck_failure;
     apply_r6_fallback();
     if (result.classification != WaveformClassification::kInconclusive) {
@@ -4944,6 +8425,8 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
       result.srtt_negative_half_clipped;
   decision.srtt_only_negative_half = result.srtt_only_negative_half;
   decision.srtt_only_positive_half = result.srtt_only_positive_half;
+  decision.bic_srtt_top_clip = result.bic_clipping.top_clip;
+  decision.bic_srtt_bottom_clip = result.bic_clipping.bottom_clip;
   decision.drate_positive_half_clipped =
       result.plateau.drate_positive_half_clipped;
   decision.drate_only_negative_half =
@@ -4974,9 +8457,312 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
   return result;
 }
 
+void FBBRSender::RefreshRtpropFromTrueBottomClip(
+    WaveformWindowAnalysis* analysis,
+    QuicTime now) {
+  if (analysis == nullptr ||
+      !ShouldRefreshRtpropForTrueClip(analysis->bic_clipping.top_clip,
+                                      analysis->bic_clipping.bottom_clip)) {
+    return;
+  }
+  auto time_seconds = [](QuicTime time) {
+    return time == QuicTime::Zero()
+        ? 0.0
+        : static_cast<double>(
+              (time - QuicTime::Zero()).ToMicroseconds()) /
+              1000000.0;
+  };
+  const TimeDelta rtprop_before = model_.MinRtt();
+  const QuicTime timestamp_before = model_.MinRttTimestamp();
+  analysis->true_bottom_clip_rtprop_before_ms = rtprop_before.IsZero()
+      ? 0.0
+      : static_cast<double>(rtprop_before.ToMicroseconds()) / 1000.0;
+  analysis->true_bottom_clip_min_rtt_timestamp_before_s =
+      time_seconds(timestamp_before);
+
+  if (!analysis->srtt_stats_valid ||
+      !std::isfinite(analysis->srtt_min_ms) ||
+      analysis->srtt_min_ms <= 0.0 || now == QuicTime::Zero()) {
+    return;
+  }
+  const int64_t minimum_rtt_us = std::max<int64_t>(
+      1, static_cast<int64_t>(
+             std::llround(analysis->srtt_min_ms * 1000.0)));
+  const TimeDelta bottom_min_rtt =
+      TimeDelta::FromMicroseconds(minimum_rtt_us);
+  model_.ForceUpdateMinRtt(bottom_min_rtt, now);
+  if (in_cruise_) {
+    current_cruise_rtprop_updated_ = true;
+  }
+
+  analysis->true_bottom_clip_rtprop_refresh_applied = true;
+  analysis->true_bottom_clip_rtprop_after_ms =
+      static_cast<double>(model_.MinRtt().ToMicroseconds()) / 1000.0;
+  analysis->true_bottom_clip_min_rtt_timestamp_after_s =
+      time_seconds(model_.MinRttTimestamp());
+  analysis->true_bottom_clip_probe_rtt_deadline_after_s =
+      time_seconds(model_.MinRttTimestamp() + Params().probe_rtt_period);
+}
+
+void FBBRSender::UpdateFbbrHybridRetryState(
+    WaveformWindowAnalysis* analysis) {
+  if (analysis == nullptr || !analysis->fbbr_hybrid_pipeline) {
+    return;
+  }
+  constexpr uint8_t kInvalidInput = 0x1;
+  constexpr uint8_t kTwoWindowNoWave = 0x2;
+  analysis->unsuppressed_classification = analysis->classification;
+  const bool classification_invalid =
+      analysis->classification == WaveformClassification::kInconclusive;
+  if (classification_invalid) {
+    fbbr_hybrid_retry_reason_mask_ |= kInvalidInput;
+  } else {
+    fbbr_hybrid_retry_reason_mask_ &=
+        static_cast<uint8_t>(~kInvalidInput);
+  }
+  const bool unique_window =
+      analysis->window_second_cycle_id !=
+          fbbr_hybrid_last_counted_window_second_cycle_id_;
+  if (unique_window) {
+    fbbr_hybrid_last_counted_window_second_cycle_id_ =
+        analysis->window_second_cycle_id;
+    auto update_streak = [](const WaveActivityFeatures& wave,
+                            uint8_t* streak) {
+      if (!wave.input_valid) {
+        return;
+      }
+      if (wave.has_wave) {
+        *streak = 0;
+      } else if (*streak < std::numeric_limits<uint8_t>::max()) {
+        ++*streak;
+      }
+    };
+    update_streak(analysis->hybrid_features.srtt.wave,
+                  &fbbr_hybrid_srtt_no_wave_streak_);
+    update_streak(analysis->hybrid_features.drate.wave,
+                  &fbbr_hybrid_drate_no_wave_streak_);
+  }
+  const bool was_active =
+      fbbr_hybrid_wave_fidelity_enhancement_active_;
+  const bool trigger = !was_active &&
+      (fbbr_hybrid_srtt_no_wave_streak_ >=
+           fbbr_wave_fidelity_no_wave_trigger_windows_ ||
+       fbbr_hybrid_drate_no_wave_streak_ >=
+           fbbr_wave_fidelity_no_wave_trigger_windows_);
+  const bool either_wave =
+      (analysis->hybrid_features.srtt.wave.input_valid &&
+       analysis->hybrid_features.srtt.wave.has_wave) ||
+      (analysis->hybrid_features.drate.wave.input_valid &&
+       analysis->hybrid_features.drate.wave.has_wave);
+  if (trigger) {
+    fbbr_hybrid_wave_fidelity_enhancement_active_ = true;
+    fbbr_hybrid_retry_reason_mask_ |= kTwoWindowNoWave;
+    analysis->no_wave_triggered = true;
+    analysis->wave_fidelity_just_entered = true;
+  } else if (was_active && either_wave) {
+    fbbr_hybrid_wave_fidelity_enhancement_active_ = false;
+    fbbr_hybrid_retry_reason_mask_ &=
+        static_cast<uint8_t>(~kTwoWindowNoWave);
+    fbbr_hybrid_srtt_no_wave_streak_ = 0;
+    fbbr_hybrid_drate_no_wave_streak_ = 0;
+  }
+  const bool suppress_for_no_wave = trigger ||
+      (was_active && !either_wave);
+  if (suppress_for_no_wave) {
+    analysis->classification = WaveformClassification::kInconclusive;
+    analysis->classification_suppressed_for_retry = true;
+    analysis->state_updates_suppressed_for_retry = true;
+    analysis->invalid_reason = AppendReason(
+        analysis->invalid_reason, "TWO_WINDOW_NO_WAVE");
+    if (fbbr_hybrid_rolling_retry_count_ <
+        std::numeric_limits<uint32_t>::max()) {
+      ++fbbr_hybrid_rolling_retry_count_;
+    }
+  }
+  analysis->wave_fidelity_enhancement_active =
+      fbbr_hybrid_wave_fidelity_enhancement_active_;
+  analysis->retry_reason_mask = fbbr_hybrid_retry_reason_mask_;
+  analysis->srtt_no_wave_streak =
+      fbbr_hybrid_srtt_no_wave_streak_;
+  analysis->drate_no_wave_streak =
+      fbbr_hybrid_drate_no_wave_streak_;
+}
+
+void FBBRSender::ApplyFbbrHybridRegimeStateUpdates(
+    WaveformWindowAnalysis* trace_analysis,
+    QuicTime now) {
+  if (trace_analysis == nullptr ||
+      trace_analysis->classification_suppressed_for_retry ||
+      trace_analysis->classification ==
+          WaveformClassification::kInconclusive) {
+    return;
+  }
+  const FbbrHybridDecision& decision = trace_analysis->hybrid_decision;
+  if (decision.update_max_rtt && trace_analysis->srtt_stats_valid &&
+      std::isfinite(trace_analysis->srtt_max_ms) &&
+      trace_analysis->srtt_max_ms > 0.0) {
+    fbbr_hybrid_max_rtt_valid_ = true;
+    fbbr_hybrid_max_rtt_ms_ = trace_analysis->srtt_max_ms;
+    fbbr_hybrid_max_rtt_source_cruise_id_ =
+        static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+  }
+  if (decision.refresh_rtprop && trace_analysis->srtt_stats_valid &&
+      std::isfinite(trace_analysis->srtt_min_ms) &&
+      trace_analysis->srtt_min_ms > 0.0 && now != QuicTime::Zero()) {
+    const TimeDelta refreshed = TimeDelta::FromMicroseconds(
+        std::max<int64_t>(1, static_cast<int64_t>(std::llround(
+            trace_analysis->srtt_min_ms * 1000.0))));
+    model_.ForceUpdateMinRtt(refreshed, now);
+    current_cruise_rtprop_updated_ = true;
+  }
+  if (decision.update_rtprop_drate &&
+      trace_analysis->delivery_rate_stats_valid &&
+      std::isfinite(trace_analysis->delivery_rate_min_bps) &&
+      trace_analysis->delivery_rate_min_bps > 0.0) {
+    fbbr_hybrid_rtprop_drate_ =
+        BandwidthFromBps(trace_analysis->delivery_rate_min_bps);
+    fbbr_hybrid_rtprop_drate_valid_ =
+        !fbbr_hybrid_rtprop_drate_.IsZero();
+    fbbr_hybrid_rtprop_drate_source_cruise_id_ =
+        static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+  }
+  trace_analysis->max_rtt_after_ms = fbbr_hybrid_max_rtt_valid_
+      ? fbbr_hybrid_max_rtt_ms_ : 0.0;
+  trace_analysis->rtprop_drate_after_bps =
+      fbbr_hybrid_rtprop_drate_valid_
+          ? static_cast<double>(
+                fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
+          : 0.0;
+}
+
+void FBBRSender::ApplyFbbrHybridClassification(
+    const WaveformWindowAnalysis& analysis,
+    QuicTime now) {
+  WaveformWindowAnalysis trace_analysis = analysis;
+  const double baseline_before_bps = static_cast<double>(
+      current_injection_baseline_bw_.ToBitsPerSecond());
+  const double amplitude_before_bps =
+      static_cast<double>(current_probe_amplitude_bps_);
+  ++waveform_decision_count_;
+  if (analysis.classification == WaveformClassification::kInconclusive) {
+    waveform_last_action_ = "HYBRID_RETRY_WITHOUT_SIDE_EFFECTS";
+    waveform_last_invalid_reason_ = analysis.invalid_reason;
+    waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+    waveform_last_raw_delta_bw_bps_ = 0.0;
+    waveform_last_applied_delta_bw_bps_ = 0.0;
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+  if (!analysis.delivery_rate_stats_valid) {
+    waveform_last_action_ = "HYBRID_INVALID_DRATE_STATS_RETRY";
+    waveform_last_invalid_reason_ = "hybrid_delivery_rate_stats_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+  // Work out the post-decision DRate reference without committing it yet.
+  // The hybrid pipeline is transactional: an invalid actuator input must not
+  // partially update MaxRTT, RTprop, or RTpropDRate.
+  const bool prospective_rtprop_drate_valid =
+      analysis.hybrid_decision.update_rtprop_drate
+          ? (std::isfinite(analysis.delivery_rate_min_bps) &&
+             analysis.delivery_rate_min_bps > 0.0)
+          : fbbr_hybrid_rtprop_drate_valid_;
+  const double prospective_rtprop_drate_bps =
+      analysis.hybrid_decision.update_rtprop_drate
+          ? analysis.delivery_rate_min_bps
+          : (fbbr_hybrid_rtprop_drate_valid_
+                 ? static_cast<double>(
+                       fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
+                 : 0.0);
+  const FbbrHybridActuatorResult actuator =
+      ComputeFbbrHybridInjectionBaseline(
+          analysis.classification,
+          analysis.delivery_rate_min_bps,
+          analysis.delivery_rate_max_bps,
+          analysis.delivery_rate_mean_bps,
+          prospective_rtprop_drate_valid,
+          prospective_rtprop_drate_bps,
+          fbbr_regime_actuator_midpoint_trigger_ratio_,
+          static_cast<double>(minimum_pacing_rate_bps_));
+  if (!actuator.valid) {
+    waveform_last_action_ = "HYBRID_INVALID_ACTUATOR_INPUT_RETRY";
+    waveform_last_invalid_reason_ = "hybrid_actuator_input_invalid";
+    trace_analysis.invalid_reason = waveform_last_invalid_reason_;
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    return;
+  }
+  ApplyFbbrHybridRegimeStateUpdates(&trace_analysis, now);
+  current_injection_baseline_bw_ =
+      BandwidthFromBps(actuator.next_baseline_bps);
+  const double baseline_delta =
+      std::abs(actuator.next_baseline_bps - baseline_before_bps);
+  if (baseline_delta > 0.5 &&
+      baseline_adjustment_count_ < std::numeric_limits<uint32_t>::max()) {
+    ++baseline_adjustment_count_;
+  }
+  if (actuator.update_probed_bw) {
+    fbbr_hybrid_regime_ii_seen_this_cruise_ = true;
+    fbbr_hybrid_probed_bw_ =
+        BandwidthFromBps(actuator.probed_bw_bps);
+    fbbr_latest_trusted_bw_ = fbbr_hybrid_probed_bw_;
+    fbbr_smoothed_trusted_bw_ = fbbr_hybrid_probed_bw_;
+    fbbr_smoothed_trusted_bw_valid_ = !fbbr_hybrid_probed_bw_.IsZero();
+    trusted_bw_candidate_ = fbbr_hybrid_probed_bw_;
+    trusted_bw_candidate_source_ = kTrustedBwSourceFbbrWindowMean;
+    trusted_baseline_locked_ = !trusted_bw_candidate_.IsZero();
+    if (trusted_baseline_locked_) {
+      ++trusted_bw_candidate_update_count_;
+    }
+    trace_analysis.latest_trusted_bw_bps = actuator.probed_bw_bps;
+    trace_analysis.smoothed_trusted_bw_bps = actuator.probed_bw_bps;
+  }
+  trace_analysis.hybrid_swing_bps = actuator.swing_bps;
+  trace_analysis.hybrid_reference_gap_bps = actuator.reference_gap_bps;
+  trace_analysis.hybrid_midpoint_triggered =
+      actuator.midpoint_triggered;
+  trace_analysis.delta_source = analysis.classification ==
+          WaveformClassification::kFullLoad
+      ? kWaveformDeltaSourceFbbrTrustedBw
+      : (analysis.classification == WaveformClassification::kUnderload
+          ? kWaveformDeltaSourceFbbrWindowMaximum
+          : kWaveformDeltaSourceFbbrWindowMinimum);
+  trace_analysis.raw_delta_bw_bps = baseline_delta;
+  trace_analysis.applied_delta_bw_bps = baseline_delta;
+  waveform_last_delta_source_ = trace_analysis.delta_source;
+  waveform_last_raw_delta_bw_bps_ = baseline_delta;
+  waveform_last_applied_delta_bw_bps_ = baseline_delta;
+  waveform_last_invalid_reason_ = "none";
+  if (analysis.classification == WaveformClassification::kFullLoad) {
+    waveform_last_action_ = "HYBRID_REGIME_II_USE_TIME_MEAN";
+  } else if (analysis.classification == WaveformClassification::kUnderload) {
+    underload_located_ = true;
+    waveform_last_action_ = actuator.midpoint_triggered
+        ? "HYBRID_REGIME_I_USE_MIDPOINT"
+        : "HYBRID_REGIME_I_USE_MAXIMUM";
+  } else {
+    waveform_last_action_ = actuator.midpoint_triggered
+        ? "HYBRID_REGIME_III_USE_MIDPOINT"
+        : "HYBRID_REGIME_III_USE_MINIMUM";
+  }
+  ScheduleWaveformCollectionAfterSettle(now, false);
+  EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                          baseline_before_bps, amplitude_before_bps);
+}
+
 void FBBRSender::ApplyWaveformClassification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
+  if (IsFbbrHybrid()) {
+    ApplyFbbrHybridClassification(analysis, now);
+    return;
+  }
   WaveformWindowAnalysis trace_analysis = analysis;
   const double baseline_before_bps = static_cast<double>(
       current_injection_baseline_bw_.ToBitsPerSecond());
@@ -5449,8 +9235,9 @@ void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
     }
     if (waveform_cruise_state_ == WaveformCruiseState::kAnalyzeCycle) {
       WaveformWindowAnalysis analysis;
-      const bool use_adaptive_load_judgment = UsesAdaptiveLoadJudgment();
-      if (use_adaptive_load_judgment && waveform_window_extended_ &&
+      const bool use_rolling_retry =
+          UsesAdaptiveLoadJudgment() || IsFbbrHybrid();
+      if (use_rolling_retry && waveform_window_extended_ &&
           waveform_window_periods_ >= 3.0 &&
           cruise_modulation_freq_hz_ > 0.0) {
         const TimeDelta period = TimeDelta::FromMicroseconds(
@@ -5477,6 +9264,12 @@ void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
             waveform_window_start_, waveform_window_end_,
             waveform_window_periods_, waveform_window_extended_);
       }
+      if (IsFbbrHybrid()) {
+        UpdateFbbrHybridRetryState(&analysis);
+      } else {
+        UpdateMaxBwAttenuationFromWaveform(analysis);
+        RefreshRtpropFromTrueBottomClip(&analysis, now);
+      }
       if (analysis.classification ==
               WaveformClassification::kInconclusive &&
           inconclusive_extension_count_ > 0 &&
@@ -5486,14 +9279,14 @@ void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
       if (analysis.classification ==
               WaveformClassification::kInconclusive &&
           ShouldObserveAfterInconclusive(
-              use_adaptive_load_judgment, inconclusive_extension_count_,
+              use_rolling_retry, inconclusive_extension_count_,
               waveform_max_inconclusive_extensions_,
               waveform_window_periods_, waveform_max_window_periods_)) {
         const double start_advance_periods =
             InconclusiveWindowStartAdvancePeriods(
-                use_adaptive_load_judgment, waveform_window_extended_,
+                use_rolling_retry, waveform_window_extended_,
                 waveform_window_periods_);
-        const double extended_periods = use_adaptive_load_judgment
+        const double extended_periods = use_rolling_retry
             ? std::min(3.0, waveform_max_window_periods_)
             : std::min(waveform_max_window_periods_,
                        waveform_window_periods_ + 1.0);
@@ -5557,6 +9350,17 @@ void FBBRSender::EmitWaveformSearchTrace(
       current_injection_baseline_bw_.ToBitsPerSecond());
   const double amplitude_after_bps =
       static_cast<double>(current_probe_amplitude_bps_);
+  auto clip_case_name = [](SrttClipCase clip_case) {
+    switch (clip_case) {
+      case SrttClipCase::kU1PositiveShoulder: return "U1";
+      case SrttClipCase::kU2LongTopLine: return "U2";
+      case SrttClipCase::kU3RepeatedTopClip: return "U3";
+      case SrttClipCase::kL1NegativeShoulder: return "L1";
+      case SrttClipCase::kL2LongBottomLine: return "L2";
+      case SrttClipCase::kL3RepeatedBottomClip: return "L3";
+      default: return "NONE";
+    }
+  };
   const double probe_epoch_rtt_s = static_cast<double>(
       analysis.probe_epoch_rtt.ToMicroseconds()) / 1000000.0;
   std::ostringstream row;
@@ -5619,6 +9423,29 @@ void FBBRSender::EmitWaveformSearchTrace(
       << analysis.plateau.srtt_positive_half_span_ms << ","
       << analysis.plateau.srtt_negative_half_span_ms << ","
       << (analysis.srtt_clip_ambiguous ? "true" : "false") << ","
+      << (analysis.bic_clipping.valid ? "true" : "false") << ","
+      << (analysis.bic_clipping.top_clip ? "true" : "false") << ","
+      << (analysis.bic_clipping.bottom_clip ? "true" : "false") << ","
+      << (analysis.bic_clipping.both_clipped ? "true" : "false") << ","
+      << analysis.bic_clipping.top_motif_count << ","
+      << analysis.bic_clipping.bottom_motif_count << ","
+      << analysis.bic_clipping.selected_segment_count << ","
+      << analysis.bic_clipping.selected_score << ","
+      << analysis.bic_clipping.top_clip_min_rounded_bic_margin << ","
+      << analysis.bic_clipping.bottom_clip_min_rounded_bic_margin << ","
+      << analysis.bic_clipping.top_clip_combined_rounded_bic_margin << ","
+      << analysis.bic_clipping.bottom_clip_combined_rounded_bic_margin << ","
+      << analysis.bic_clipping.top_clip_pair_sharp_motif_count << ","
+      << analysis.bic_clipping.bottom_clip_pair_sharp_motif_count << ","
+      << (analysis.true_bottom_clip_rtprop_refresh_applied
+              ? "true"
+              : "false") << ","
+      << analysis.true_bottom_clip_rtprop_before_ms << ","
+      << analysis.true_bottom_clip_rtprop_after_ms << ","
+      << analysis.true_bottom_clip_min_rtt_timestamp_before_s << ","
+      << analysis.true_bottom_clip_min_rtt_timestamp_after_s << ","
+      << analysis.true_bottom_clip_probe_rtt_deadline_after_s << ","
+      << analysis.bic_clipping.invalid_reason << ","
       << analysis.srtt_direct_ncc << ","
       << analysis.srtt_integral_ncc << ","
       << analysis.srtt_derivative_ncc << ","
@@ -5664,6 +9491,10 @@ void FBBRSender::EmitWaveformSearchTrace(
       << baseline_after_bps << ","
       << amplitude_before_bps << ","
       << amplitude_after_bps << ","
+      << max_bw_attenuation_factor_ << ","
+      << max_bw_actual_fluctuation_amplitude_bps_ << ","
+      << max_bw_delivery_response_gain_ << ","
+      << (max_bw_response_observed_ ? "true" : "false") << ","
       << (trusted_baseline_locked_ ? "true" : "false") << ","
       << trusted_bw_candidate_update_count_ << ","
       << "true" << ","
@@ -5731,7 +9562,132 @@ void FBBRSender::EmitWaveformSearchTrace(
       << latest_waveform_underload_srtt_mean_ms_ << ","
       << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
       << ","
-      << latest_waveform_overload_srtt_mean_ms_;
+      << latest_waveform_overload_srtt_mean_ms_ << ","
+      << (IsFbbrHybrid() ? "FBBR-hybrid"
+                         : (adaptive_guard_enabled_ ? "FBBR-adaptive"
+                                                    : "FBBR")) << ","
+      << (analysis.fbbr_hybrid_pipeline ? "fbbr_hybrid_v2" : "legacy")
+      << ","
+      << (analysis.fbbr_hybrid_pipeline ? "fbbr_hybrid_v2" : "legacy")
+      << ","
+      << analysis.hybrid_decision.rule_id << ","
+      << WaveformClassificationName(analysis.unsuppressed_classification)
+      << ","
+      << (analysis.hybrid_features.srtt.suspected_top_candidate ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.suspected_bottom_candidate ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.positive_shoulder ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.long_top_line ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.repeated_top_clip ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.negative_shoulder ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.long_bottom_line ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.repeated_bottom_clip ? "true" : "false") << ","
+      << clip_case_name(analysis.hybrid_features.selected_clip_case) << ","
+      << (analysis.hybrid_features.both_clip_directions ? "true" : "false") << ","
+      << (analysis.hybrid_features.clip_candidate_rejected_to_wave_fallback ? "true" : "false") << ","
+      << (analysis.hybrid_features.fallback_entered ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.upper_clip_periodic_veto ? "true" : "false") << ","
+      << (analysis.hybrid_features.drate.upper_clip_periodic_veto ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.lower_clip_ignored_for_periodic ? "true" : "false") << ","
+      << (analysis.hybrid_features.drate.lower_clip_ignored_for_periodic ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.ordinary_wave_uses_raw_valid_view ? "RAW" : "CLEANED") << ","
+      << (analysis.hybrid_features.drate.ordinary_wave_uses_raw_valid_view ? "RAW" : "CLEANED") << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.contact_fragment_count << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.contact_fragment_count << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.contact_sample_count << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.contact_sample_count << ","
+      << static_cast<unsigned>(analysis.hybrid_features.srtt.top_repeated_clip.contact_cycle_mask) << ","
+      << static_cast<unsigned>(analysis.hybrid_features.srtt.bottom_repeated_clip.contact_cycle_mask) << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.contact_time_span_ratio_of_window << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.contact_time_span_ratio_of_window << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.pooled_flat_fraction << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.pooled_flat_fraction << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.verified_boundary_fraction << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.verified_boundary_fraction << ","
+      << analysis.hybrid_features.srtt.top_repeated_clip.extrapolated_overshoot_ratio << ","
+      << analysis.hybrid_features.srtt.bottom_repeated_clip.extrapolated_overshoot_ratio << ","
+      << analysis.hybrid_features.drate.top_repeated_clip.contact_fragment_count << ","
+      << analysis.hybrid_features.drate.bottom_repeated_clip.contact_fragment_count << ","
+      << analysis.hybrid_features.drate.top_repeated_clip.contact_sample_count << ","
+      << analysis.hybrid_features.drate.bottom_repeated_clip.contact_sample_count << ","
+      << static_cast<unsigned>(analysis.hybrid_features.drate.top_repeated_clip.contact_cycle_mask) << ","
+      << static_cast<unsigned>(analysis.hybrid_features.drate.bottom_repeated_clip.contact_cycle_mask) << ","
+      << analysis.hybrid_features.drate.top_repeated_clip.contact_time_span_ratio_of_window << ","
+      << analysis.hybrid_features.drate.bottom_repeated_clip.contact_time_span_ratio_of_window << ","
+      << analysis.hybrid_features.srtt.longest_top_line_ratio_of_period << ","
+      << analysis.hybrid_features.srtt.longest_bottom_line_ratio_of_period << ","
+      << (analysis.hybrid_features.srtt.positive_shoulder_cycle_input_valid ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.negative_shoulder_cycle_input_valid ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.positive_shoulder_cycle_recognizable ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.negative_shoulder_cycle_recognizable ? "true" : "false") << ","
+      << analysis.hybrid_features.srtt.continuous_horizontal_count << ","
+      << analysis.hybrid_features.drate.continuous_horizontal_count << ","
+      << analysis.hybrid_features.srtt.middle_mask_ratio << ","
+      << analysis.hybrid_features.drate.middle_mask_ratio << ","
+      << analysis.hybrid_features.srtt.middle_best_slope_mismatch_ratio << ","
+      << analysis.hybrid_features.drate.middle_best_slope_mismatch_ratio << ","
+      << analysis.hybrid_features.srtt.middle_best_bridge_deviation_ratio << ","
+      << analysis.hybrid_features.drate.middle_best_bridge_deviation_ratio << ","
+      << (analysis.hybrid_features.srtt.wave.has_wave ? "true" : "false") << ","
+      << (analysis.hybrid_features.drate.wave.has_wave ? "true" : "false") << ","
+      << analysis.hybrid_features.srtt.wave.failure_reason << ","
+      << analysis.hybrid_features.drate.wave.failure_reason << ","
+      << analysis.hybrid_features.srtt.wave.amplitude << ","
+      << analysis.hybrid_features.drate.wave.amplitude << ","
+      << analysis.hybrid_features.srtt.wave.noise_sigma << ","
+      << analysis.hybrid_features.drate.wave.noise_sigma << ","
+      << analysis.hybrid_features.srtt.wave.step_threshold << ","
+      << analysis.hybrid_features.drate.wave.step_threshold << ","
+      << analysis.hybrid_features.srtt.wave.active_step_ratio << ","
+      << analysis.hybrid_features.drate.wave.active_step_ratio << ","
+      << analysis.hybrid_features.srtt.wave.up_change_ratio << ","
+      << analysis.hybrid_features.srtt.wave.down_change_ratio << ","
+      << analysis.hybrid_features.drate.wave.up_change_ratio << ","
+      << analysis.hybrid_features.drate.wave.down_change_ratio << ","
+      << analysis.hybrid_features.srtt.wave.significant_path_ratio << ","
+      << analysis.hybrid_features.drate.wave.significant_path_ratio << ","
+      << analysis.hybrid_features.srtt.wave.slope_reversals << ","
+      << analysis.hybrid_features.drate.wave.slope_reversals << ","
+      << static_cast<unsigned>(analysis.hybrid_features.srtt.wave.active_cycle_mask) << ","
+      << static_cast<unsigned>(analysis.hybrid_features.drate.wave.active_cycle_mask) << ","
+      << (analysis.hybrid_features.srtt.periodic_similarity_input_valid ? "true" : "false") << ","
+      << (analysis.hybrid_features.drate.periodic_similarity_input_valid ? "true" : "false") << ","
+      << (analysis.hybrid_features.srtt.periodic_similar ? "true" : "false") << ","
+      << (analysis.hybrid_features.drate.periodic_similar ? "true" : "false") << ","
+      << analysis.hybrid_features.estimated_srate_period_s << ","
+      << analysis.hybrid_features.srtt.estimated_period_s << ","
+      << analysis.hybrid_features.drate.estimated_period_s << ","
+      << analysis.hybrid_features.srtt.response_srate_period_error_ratio << ","
+      << analysis.hybrid_features.drate.response_srate_period_error_ratio << ","
+      << analysis.hybrid_features.srtt.edge_mask_ratio << ","
+      << analysis.hybrid_features.drate.edge_mask_ratio << ","
+      << (fbbr_hybrid_max_rtt_valid_ ? "true" : "false") << ","
+      << analysis.max_rtt_before_ms << ","
+      << analysis.max_rtt_after_ms << ","
+      << (fbbr_hybrid_rtprop_drate_valid_ ? "true" : "false") << ","
+      << analysis.rtprop_drate_before_bps << ","
+      << analysis.rtprop_drate_after_bps << ","
+      << analysis.hybrid_swing_bps << ","
+      << analysis.hybrid_reference_gap_bps << ","
+      << (analysis.hybrid_midpoint_triggered ? "true" : "false") << ","
+      << analysis.window_first_cycle_id << ","
+      << analysis.window_second_cycle_id << ","
+      << static_cast<unsigned>(analysis.srtt_no_wave_streak) << ","
+      << static_cast<unsigned>(analysis.drate_no_wave_streak) << ","
+      << (analysis.wave_fidelity_enhancement_active ? "true" : "false") << ","
+      << (analysis.wave_fidelity_just_entered ? "true" : "false") << ","
+      << static_cast<unsigned>(analysis.retry_reason_mask) << ","
+      << (analysis.no_wave_triggered ? "true" : "false") << ","
+      << (analysis.classification_suppressed_for_retry ? "true" : "false") << ","
+      << (analysis.state_updates_suppressed_for_retry ? "true" : "false") << ","
+      << (analysis.fbbr_hybrid_pipeline ? fbbr_wave_fidelity_retry_window_advance_periods_ : 0) << ","
+      << (analysis.fbbr_hybrid_pipeline ? 1 : 0) << ","
+      << inconclusive_extension_count_ << ","
+      << waveform_inconclusive_amplification_count_ << ","
+      << waveform_initial_probe_amplitude_bps_ << ","
+      << current_probe_amplitude_bps_ << ","
+      << static_cast<double>(waveform_initial_probe_amplitude_bps_) *
+             waveform_inconclusive_signal_amplification_max_ratio_ << ","
+      << fbbr_hybrid_rolling_retry_count_;
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -5834,8 +9790,10 @@ void FBBRSender::AnalyzeCruiseWindow(QuicTime window_start,
                                          QuicTime window_end,
                                          TimeDelta min_rtt,
                                          double window_duration_s) {
-  current_cruise_windows_.push_back(BuildCruiseWindowResult(
-      window_start, window_end, min_rtt, window_duration_s, "NORMAL"));
+  CruiseWindowResult result = BuildCruiseWindowResult(
+      window_start, window_end, min_rtt, window_duration_s, "NORMAL");
+  UpdateMaxBwAttenuationFromLegacyWindow(result);
+  current_cruise_windows_.push_back(result);
 }
 
 FBBRSender::CruiseWindowResult FBBRSender::BuildCruiseWindowResult(

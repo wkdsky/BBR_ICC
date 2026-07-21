@@ -142,6 +142,7 @@ bool g_trusted_bw_selection_self_test = false;
 bool g_trusted_bw_pacing_self_test = false;
 bool g_waveform_cruise_self_test = false;
 bool g_fbbr_baseline_self_test = false;
+bool g_fbbr_hybrid_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
@@ -408,6 +409,66 @@ bool SetFBBRConfigValue(FBBRConfig* config,
     SET_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio", waveform_inconclusive_signal_amplification_max_ratio)
     SET_DOUBLE("waveform.max_app_limited_sample_ratio", waveform_max_app_limited_sample_ratio)
     SET_DOUBLE("waveform.max_interpolation_gap_period_ratio", waveform_max_interpolation_gap_period_ratio)
+    SET_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
+    SET_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
+    SET_DOUBLE("fbbr.regime.actuator.midpoint_trigger_ratio", fbbr_regime_actuator_midpoint_trigger_ratio)
+    SET_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
+    SET_BOOL("fbbr.wave_fidelity.stop_on_either_wave", fbbr_wave_fidelity_stop_on_either_wave)
+    SET_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
+    SET_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)
+    SET_DOUBLE("waveform.activity.min_level_ratio", waveform_activity_min_level_ratio)
+    SET_DOUBLE("waveform.activity.step_noise_multiplier", waveform_activity_step_noise_multiplier)
+    SET_DOUBLE("waveform.activity.min_normalized_step_slope", waveform_activity_min_normalized_step_slope)
+    SET_U32("waveform.activity.min_active_steps", waveform_activity_min_active_steps)
+    SET_DOUBLE("waveform.activity.min_active_step_ratio", waveform_activity_min_active_step_ratio)
+    SET_DOUBLE("waveform.activity.min_directional_change_ratio", waveform_activity_min_directional_change_ratio)
+    SET_DOUBLE("waveform.activity.min_significant_path_ratio", waveform_activity_min_significant_path_ratio)
+    SET_U32("waveform.activity.min_slope_reversals", waveform_activity_min_slope_reversals)
+    SET_DOUBLE("waveform.horizontal.continuous_min_duration_ratio", waveform_horizontal_continuous_min_duration_ratio)
+    SET_DOUBLE("waveform.horizontal.min_valid_coverage_ratio", waveform_horizontal_min_valid_coverage_ratio)
+    SET_DOUBLE("waveform.horizontal.min_flat_fraction", waveform_horizontal_min_flat_fraction)
+    SET_DOUBLE("waveform.horizontal.max_local_slope_ratio", waveform_horizontal_max_local_slope_ratio)
+    SET_DOUBLE("waveform.horizontal.min_side_slope_ratio", waveform_horizontal_min_side_slope_ratio)
+    SET_DOUBLE("waveform.horizontal.min_boundary_kink_ratio", waveform_horizontal_min_boundary_kink_ratio)
+    SET_DOUBLE("waveform.horizontal.max_level_span_ratio", waveform_horizontal_max_level_span_ratio)
+    SET_DOUBLE("waveform.horizontal.max_total_drift_ratio", waveform_horizontal_max_total_drift_ratio)
+    SET_DOUBLE("waveform.horizontal.min_side_change_ratio", waveform_horizontal_min_side_change_ratio)
+    SET_DOUBLE("waveform.horizontal.amplitude_noise_multiplier", waveform_horizontal_amplitude_noise_multiplier)
+    SET_DOUBLE("waveform.horizontal.level_span_noise_multiplier", waveform_horizontal_level_span_noise_multiplier)
+    SET_DOUBLE("waveform.horizontal.slope_noise_multiplier", waveform_horizontal_slope_noise_multiplier)
+    SET_DOUBLE("waveform.horizontal.extreme_distance_ratio", waveform_horizontal_extreme_distance_ratio)
+    SET_DOUBLE("waveform.repeated_clip_max_period_error_ratio", waveform_repeated_clip_max_period_error_ratio)
+    SET_DOUBLE("waveform.repeated_clip_max_level_delta_ratio", waveform_repeated_clip_max_level_delta_ratio)
+    SET_DOUBLE("waveform.repeated_clip_contact_level_tolerance_ratio", waveform_repeated_clip_contact_level_tolerance_ratio)
+    SET_U32("waveform.repeated_clip_min_contact_samples_per_cycle", waveform_repeated_clip_min_contact_samples_per_cycle)
+    SET_U32("waveform.repeated_clip_min_total_contact_samples", waveform_repeated_clip_min_total_contact_samples)
+    SET_DOUBLE("waveform.repeated_clip_min_contact_sample_ratio", waveform_repeated_clip_min_contact_sample_ratio)
+    SET_DOUBLE("waveform.repeated_clip_min_contact_span_ratio_of_window", waveform_repeated_clip_min_contact_span_ratio_of_window)
+    SET_DOUBLE("waveform.repeated_clip_min_pooled_flat_fraction", waveform_repeated_clip_min_pooled_flat_fraction)
+    SET_DOUBLE("waveform.repeated_clip_min_verified_boundary_fraction", waveform_repeated_clip_min_verified_boundary_fraction)
+    SET_DOUBLE("waveform.repeated_clip_min_outside_excursion_ratio", waveform_repeated_clip_min_outside_excursion_ratio)
+    SET_DOUBLE("waveform.repeated_clip_min_extrapolated_overshoot_ratio", waveform_repeated_clip_min_extrapolated_overshoot_ratio)
+    SET_DOUBLE("waveform.repeated_clip_merge_gap_ratio", waveform_repeated_clip_merge_gap_ratio)
+    SET_DOUBLE("waveform.repeated_clip_max_missing_gap_ratio", waveform_repeated_clip_max_missing_gap_ratio)
+    SET_DOUBLE("waveform.shoulder.min_half_overlap_ratio", waveform_shoulder_min_half_overlap_ratio)
+    SET_DOUBLE("waveform.shoulder.min_side_change_ratio", waveform_shoulder_min_side_change_ratio)
+    SET_DOUBLE("waveform.shoulder.max_residual_cycle_period_error_ratio", waveform_shoulder_max_residual_cycle_period_error_ratio)
+    SET_DOUBLE("waveform.shoulder.min_residual_cycle_leg_duration_ratio", waveform_shoulder_min_residual_cycle_leg_duration_ratio)
+    SET_DOUBLE("waveform.middle.min_duration_ratio", waveform_middle_min_duration_ratio)
+    SET_DOUBLE("waveform.middle.max_duration_ratio", waveform_middle_max_duration_ratio)
+    SET_DOUBLE("waveform.middle.context_duration_ratio", waveform_middle_context_duration_ratio)
+    SET_DOUBLE("waveform.middle.min_trend_slope_ratio", waveform_middle_min_trend_slope_ratio)
+    SET_DOUBLE("waveform.middle.max_context_slope_delta_ratio", waveform_middle_max_context_slope_delta_ratio)
+    SET_DOUBLE("waveform.middle.min_slope_mismatch_ratio", waveform_middle_min_slope_mismatch_ratio)
+    SET_DOUBLE("waveform.middle.min_mismatching_sample_ratio", waveform_middle_min_mismatching_sample_ratio)
+    SET_U32("waveform.middle.min_mismatching_samples", waveform_middle_min_mismatching_samples)
+    SET_U32("waveform.middle.min_consecutive_mismatching_samples", waveform_middle_min_consecutive_mismatching_samples)
+    SET_DOUBLE("waveform.middle.min_bridge_deviation_ratio", waveform_middle_min_bridge_deviation_ratio)
+    SET_DOUBLE("waveform.middle.noise_multiplier", waveform_middle_noise_multiplier)
+    SET_DOUBLE("waveform.middle.max_mask_ratio_per_cycle", waveform_middle_max_mask_ratio_per_cycle)
+    SET_DOUBLE("fbbr.regime.period_tolerance_ratio", fbbr_regime_period_tolerance_ratio)
+    SET_DOUBLE("fbbr.regime.min_periodicity_correlation", fbbr_regime_min_periodicity_correlation)
+    SET_BOOL("fbbr.regime.periodic_upper_clip_is_hard_veto", fbbr_regime_periodic_upper_clip_is_hard_veto)
     if(key == "trace.gate_trace_mode"){
         config->trace_gate_trace_mode = value;
         return true;
@@ -662,7 +723,8 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         }
     }
 		    // Configure FBBR oscillation parameters
-		    if(cc_type == kFBBR || cc_type == kFBBRAdaptive){
+		    if(cc_type == kFBBR || cc_type == kFBBRAdaptive ||
+               cc_type == kFBBRHybrid){
 	        sendApp->ConfigureFBBR(g_fbbr_config, flow_index);
 	        sendApp->ConfigureFBBRConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
@@ -797,12 +859,14 @@ void ns3_fbbr(int ins, std::string algo, DqcTraceState *stat, double sim_time=60
         cc = kBBRv2;
     } else if(algo_key == "FBBR-adaptive"){
         cc = kFBBRAdaptive;
+    } else if(algo_key == "FBBR-hybrid"){
+        cc = kFBBRHybrid;
     } else if(algo_key == "FBBR"){
         cc = kFBBR;
     } else {
         NS_ABORT_MSG("unsupported algorithm: " << algo
                                                << " (supported: FBBR, "
-                                                  "FBBR-adaptive, BBRv2)");
+                                                  "FBBR-adaptive, FBBR-hybrid, BBRv2)");
     }
 
     uint32_t max_bps=0;
@@ -946,7 +1010,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.AddValue("outputDir", "Output trace directory path", output_dir);
-    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-adaptive, or BBRv2", algo);
+    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-adaptive, FBBR-hybrid, or BBRv2", algo);
     cmd.AddValue("runId", "ns-3 RNG run id", run_id);
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FBBR convergence-gate CSV trace", g_enable_convergence_gate_trace);
@@ -964,6 +1028,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
 	    cmd.AddValue("waveformCruiseSelfTest", "Run deterministic time-waveform CRUISE self-test and exit", g_waveform_cruise_self_test);
 	    cmd.AddValue("fbbrBaselineSelfTest", "Run FBBR window-baseline self-test and exit", g_fbbr_baseline_self_test);
+	    cmd.AddValue("fbbrHybridSelfTest", "Run FBBR-hybrid N01-N18 and boundary self-test and exit", g_fbbr_hybrid_self_test);
 	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_fbbr_config.cruise_detector_mode);
 	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_fbbr_config.waveform_recv_signal_mode);
 	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_fbbr_config.waveform_initial_settle_rtt_mult);
@@ -1054,6 +1119,9 @@ int main (int argc, char *argv[]){
 	    }
 	    if(g_fbbr_baseline_self_test){
 	        return FBBRSender::RunFbbrBaselineSelfTest(std::cout) ? 0 : 1;
+	    }
+	    if(g_fbbr_hybrid_self_test){
+	        return FBBRSender::RunFbbrHybridSelfTest(std::cout) ? 0 : 1;
 	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);

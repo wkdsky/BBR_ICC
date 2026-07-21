@@ -25,6 +25,7 @@ OPTIMAL_AREA_COLOR = "#f08c00"
 OPTIMAL_AREA_TEXT_COLOR = "#7a3f00"
 SEND_RATE_COLOR = "#0b7285"
 DRATE_COLOR = "#d9480f"
+CUBIC_COLOR = "#495057"
 SRTT_COLOR = "#5f3dc4"
 OPTIMAL_AREA_START_S = 2.2
 OPTIMAL_AREA_END_S = 2.4
@@ -171,26 +172,30 @@ def infer_load_boundaries(
     empty_fraction: float,
     overload_fraction: float,
 ) -> tuple[float | None, float | None, int]:
+    """Infer where the SRTT response leaves lower and reaches upper clipping."""
+
     dt = float(np.median(np.diff(t)))
     period_s = 1.0 / modulation_freq_hz if modulation_freq_hz > 0.0 else 0.2
     window = max(3, int(round(period_s / dt)))
 
-    window_center_offset_s = 0.5 * (window - 1) * dt
-
-    cycle_mean = rolling_stat(queue_fraction, window, np.mean)
-
-    under_to_full_end = first_time(t, cycle_mean, empty_fraction)
+    # Lower clipping is gone once an entire modulation cycle stays above the
+    # propagation-RTT floor.  The rolling minimum confirms the full cycle;
+    # move the reported boundary back to the start of that confirmed run.
+    cycle_min = rolling_stat(queue_fraction, window, np.min)
+    under_to_full_end = first_time(t, cycle_min, empty_fraction)
     under_to_full = (
-        max(float(t[0]), under_to_full_end - window_center_offset_s)
+        max(float(t[0]), under_to_full_end - (window - 1) * dt)
         if under_to_full_end is not None
         else None
     )
 
-    full_to_overload_end = first_time(t, cycle_mean, overload_fraction, under_to_full)
-    full_to_overload = (
-        max(float(t[0]), full_to_overload_end - window_center_offset_s)
-        if full_to_overload_end is not None
-        else None
+    # Upper clipping begins at the first sample that reaches the configured
+    # near-capacity threshold; no cycle-centering offset is appropriate here.
+    full_to_overload = first_time(
+        t,
+        queue_fraction,
+        overload_fraction,
+        under_to_full,
     )
 
     return under_to_full, full_to_overload, window
@@ -313,7 +318,7 @@ def add_optimal_operating_area(
     )
 
 
-def add_phase_labels(
+def add_regime_labels(
     fig,
     ref_ax,
     spectrum_axes,
@@ -322,7 +327,7 @@ def add_phase_labels(
     full_to_overload: float | None,
     sender_stop_s: float,
 ) -> None:
-    """Place Phase labels at the centers of the regions separated by vertical boundaries."""
+    """Place Regime labels at the centers of the three equal time regions."""
 
     fig.canvas.draw()
 
@@ -338,10 +343,10 @@ def add_phase_labels(
         min(max(edge_3, sender_start_s), sender_stop_s),
     ]
 
-    phase_labels = [
-        "Phase I:\nbottleneck-unsaturated",
-        "Phase II:\nbottleneck-saturated",
-        "Phase III:\nbuffer-saturated",
+    regime_labels = [
+        "Regime I:\nbottleneck-unsaturated",
+        "Regime II:\nbottleneck-saturated",
+        "Regime III:\nbuffer-saturated",
     ]
 
     fig_edges = [data_x_to_fig_x(fig, ref_ax, edge) for edge in edges]
@@ -352,7 +357,7 @@ def add_phase_labels(
     # they are centered within the regions separated by the dashed boundaries.
     label_y = y_top + 0.025
 
-    for i, label in enumerate(phase_labels):
+    for i, label in enumerate(regime_labels):
         left = fig_edges[i]
         right = fig_edges[i + 1]
 
@@ -410,6 +415,80 @@ def top_freqs(
             break
 
     return picked
+
+
+def triangle_value(phase: np.ndarray) -> np.ndarray:
+    phase = np.mod(phase, 1.0)
+    return np.where(
+        phase < 0.25,
+        4.0 * phase,
+        np.where(phase < 0.75, 2.0 - 4.0 * phase, 4.0 * phase - 4.0),
+    )
+
+
+def measure_complete_wave_cycles(
+    t: np.ndarray,
+    values: np.ndarray,
+    start_s: float,
+    end_s: float,
+    modulation_freq_hz: float,
+    expected_peak_to_peak_mbps: float,
+) -> tuple[float, int, int, list[tuple[float, float, float, bool]]]:
+    """Measure complete response cycles using amplitude and triangle-shape gates."""
+
+    if modulation_freq_hz <= 0.0 or end_s <= start_s:
+        return 0.0, 0, 0, []
+
+    period_s = 1.0 / modulation_freq_hz
+    dt = float(np.median(np.diff(t)))
+    expected_samples = max(1, int(round(period_s / dt)))
+    cycle_count = max(0, int(np.floor((end_s - start_s) / period_s + 1e-9)))
+    details: list[tuple[float, float, float, bool]] = []
+    complete_count = 0
+
+    for cycle_index in range(cycle_count):
+        cycle_start = start_s + cycle_index * period_s
+        cycle_end = cycle_start + period_s
+        mask = (t >= cycle_start) & (t < cycle_end)
+        cycle_values = values[mask]
+
+        if len(cycle_values) < max(8, int(0.75 * expected_samples)):
+            details.append((cycle_start, 0.0, 0.0, False))
+            continue
+
+        finite = np.isfinite(cycle_values)
+        if np.count_nonzero(finite) < max(8, int(0.75 * expected_samples)):
+            details.append((cycle_start, 0.0, 0.0, False))
+            continue
+
+        cycle_t = t[mask][finite]
+        cycle_values = cycle_values[finite]
+        peak_to_peak = float(
+            np.percentile(cycle_values, 95) - np.percentile(cycle_values, 5)
+        )
+        amplitude_ratio = peak_to_peak / max(expected_peak_to_peak_mbps, 1e-9)
+
+        centered_values = cycle_values - np.mean(cycle_values)
+        value_norm = float(np.linalg.norm(centered_values))
+        best_correlation = 0.0
+        if value_norm > 1e-9:
+            base_phase = (cycle_t - cycle_start) / period_s
+            for shift in np.linspace(0.0, 1.0, 41, endpoint=False):
+                template = triangle_value(base_phase - shift)
+                template -= np.mean(template)
+                denom = value_norm * float(np.linalg.norm(template))
+                if denom > 1e-9:
+                    best_correlation = max(
+                        best_correlation,
+                        float(np.dot(centered_values, template) / denom),
+                    )
+
+        complete = amplitude_ratio >= 0.60 and best_correlation >= 0.75
+        complete_count += int(complete)
+        details.append((cycle_start, amplitude_ratio, best_correlation, complete))
+
+    complete_ratio = complete_count / cycle_count if cycle_count else 0.0
+    return complete_ratio, complete_count, cycle_count, details
 
 
 def plot_phase_spectrum(
@@ -513,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace-name", default="open_loop_p2p_rate_ramp")
     parser.add_argument("--output-tag", default=None)
     parser.add_argument("--empty-fraction", type=float, default=0.005)
-    parser.add_argument("--overload-fraction", type=float, default=0.95)
+    parser.add_argument("--overload-fraction", type=float, default=0.999)
     parser.add_argument("--freq-max-hz", type=float, default=30.0)
 
     return parser
@@ -535,6 +614,7 @@ def main() -> None:
     t = rate[:, 0]
     target = rate[:, 3]
     rx = rate[:, 5]
+    cubic_rx = rate[:, 8] if rate.shape[1] > 8 else np.zeros_like(rx)
 
     queue = np.loadtxt(queue_path, comments="#", usecols=(0, 1))
     queue_at_t = resample_queue_to_rate_times(t, queue[:, 0], queue[:, 1])
@@ -554,12 +634,23 @@ def main() -> None:
         + queue_at_t * 8.0 / (link_bw_mbps * 1_000_000.0) * 1000.0
     )
 
-    under_to_full, full_to_overload, boundary_window = infer_load_boundaries(
-        t,
-        queue_fraction,
-        triangle_freq_hz,
-        args.empty_fraction,
-        args.overload_fraction,
+    regime_duration_s = sender_duration_s / 3.0
+    under_to_full = sender_start_s + regime_duration_s
+    full_to_overload = sender_start_s + 2.0 * regime_duration_s
+    boundary_window = max(
+        3,
+        int(round((1.0 / max(triangle_freq_hz, 1e-9)) / np.median(np.diff(t)))),
+    )
+
+    regime_ii_wave_ratio, regime_ii_complete_cycles, regime_ii_total_cycles, cycle_details = (
+        measure_complete_wave_cycles(
+            t,
+            rx,
+            under_to_full,
+            full_to_overload,
+            triangle_freq_hz,
+            2.0 * config.get("triangle_amp_mbps", 80.0),
+        )
     )
 
     output_tag = args.output_tag
@@ -569,7 +660,8 @@ def main() -> None:
             f"{config.get('start_rate_mbps', 200.0):.0f}_"
             f"{config.get('end_rate_mbps', 450.0):.0f}_"
             f"{sender_duration_s:.0f}s_"
-            f"{link_bw_mbps:.0f}mbps"
+            f"{link_bw_mbps:.0f}mbps_"
+            f"cubic{config.get('cubic_app_rate_mbps', 0.0):.0f}"
         )
 
     time_out = trace_dir / f"{trace_name}_{output_tag}_send_recv_rtt_curve.png"
@@ -581,26 +673,24 @@ def main() -> None:
 
     fig.suptitle(
         (
-            "Open-loop P2P rate ramp: "
-            f"{config.get('start_rate_mbps', 200.0):.0f} -> "
-            f"{config.get('end_rate_mbps', 450.0):.0f} Mbps over {sender_duration_s:.0f} s, "
-            f"{link_bw_mbps:.0f} Mbps link"
+            "Triangle probe with TCP CUBIC cross traffic: "
+            f"{link_bw_mbps:.0f} Mbps link, 4 BDP buffer"
         ),
         fontsize=SUPTITLE_FS,
         fontweight="bold",
         y=0.985,
     )
 
-    phase_edges = [
+    regime_edges = [
         sender_start_s,
-        under_to_full if under_to_full is not None else sender_stop_s,
-        full_to_overload if full_to_overload is not None else sender_stop_s,
+        under_to_full,
+        full_to_overload,
         sender_stop_s,
     ]
 
-    phase_edges = [
+    regime_edges = [
         min(max(edge, sender_start_s), sender_stop_s)
-        for edge in phase_edges
+        for edge in regime_edges
     ]
 
     def time_to_fig_x(x_value: float) -> float:
@@ -618,8 +708,8 @@ def main() -> None:
 
     spectrum_axes = []
     for i in range(3):
-        region_left = time_to_fig_x(phase_edges[i])
-        region_right = time_to_fig_x(phase_edges[i + 1])
+        region_left = time_to_fig_x(regime_edges[i])
+        region_right = time_to_fig_x(regime_edges[i + 1])
 
         ax_left = region_left + (PHASE_AXIS_GAP if i > 0 else 0.0)
         ax_right = region_right - (PHASE_AXIS_GAP if i < 2 else 0.0)
@@ -639,8 +729,8 @@ def main() -> None:
             t,
             rx,
             estimated_rtt_ms,
-            phase_edges[i],
-            phase_edges[i + 1],
+            regime_edges[i],
+            regime_edges[i + 1],
             args.freq_max_hz,
             show_ylabel=(i == 0),
         )
@@ -663,8 +753,25 @@ def main() -> None:
         rx[t > 0],
         color=DRATE_COLOR,
         linewidth=RATE_SERIES_LW,
-        label="DRate",
+        label="Probe DRate",
         zorder=4,
+    )
+
+    cubic_window = max(1, int(round(0.05 / max(float(np.median(np.diff(t))), 1e-9))))
+    cubic_smoothed = np.convolve(
+        cubic_rx,
+        np.ones(cubic_window, dtype=float) / cubic_window,
+        mode="same",
+    )
+    cubic_active = t >= under_to_full
+    axes[0].plot(
+        t[cubic_active],
+        cubic_smoothed[cubic_active],
+        color=CUBIC_COLOR,
+        linewidth=3.0,
+        linestyle="--",
+        label="CUBIC DRate",
+        zorder=2,
     )
 
     axes[0].axhline(
@@ -686,6 +793,7 @@ def main() -> None:
         560,
         float(np.nanmax(target) + 25),
         float(np.nanmax(rx) + 25),
+        float(np.nanmax(cubic_smoothed) + 25),
         link_bw_mbps + 45,
     )
 
@@ -740,7 +848,7 @@ def main() -> None:
         if i == 0:
             legend = ax.legend(
                 loc="lower right",
-                ncol=3,
+                ncol=4,
                 frameon=True,
                 prop={"size": LEGEND_FS, "weight": "bold"},
                 handlelength=3.2,
@@ -757,13 +865,6 @@ def main() -> None:
         legend.get_frame().set_edgecolor("none")
         legend.get_frame().set_alpha(0.0)
 
-    add_optimal_operating_area(
-        fig,
-        time_axes=axes,
-        start_s=OPTIMAL_AREA_START_S,
-        end_s=OPTIMAL_AREA_END_S,
-    )
-
     add_load_boundaries(
         fig,
         time_axes=axes,
@@ -772,7 +873,7 @@ def main() -> None:
         full_to_overload=full_to_overload,
     )
 
-    add_phase_labels(
+    add_regime_labels(
         fig,
         ref_ax=axes[0],
         spectrum_axes=spectrum_axes,
@@ -780,6 +881,23 @@ def main() -> None:
         under_to_full=under_to_full,
         full_to_overload=full_to_overload,
         sender_stop_s=sender_stop_s,
+    )
+
+    axes[0].text(
+        0.5 * (under_to_full + full_to_overload),
+        0.96,
+        (
+            "Regime II complete DRate cycles: "
+            f"{regime_ii_complete_cycles}/{regime_ii_total_cycles} "
+            f"({100.0 * regime_ii_wave_ratio:.0f}%)"
+        ),
+        transform=axes[0].get_xaxis_transform(),
+        ha="center",
+        va="top",
+        fontsize=16,
+        fontweight="bold",
+        color="#7f2704",
+        zorder=20,
     )
 
     fig.savefig(time_out, bbox_inches="tight", pad_inches=0.10)
@@ -912,12 +1030,20 @@ def main() -> None:
     plt.close(fig)
 
     with summary_out.open("w") as stream:
-        stream.write("# Load-state boundary and spectrum summary\n")
-        stream.write(f"under_to_full_s\t{under_to_full if under_to_full is not None else 'nan'}\n")
-        stream.write(f"full_to_overload_s\t{full_to_overload if full_to_overload is not None else 'nan'}\n")
+        stream.write("# Equal-duration regime and spectrum summary\n")
+        stream.write(f"regime_i_to_ii_s\t{under_to_full}\n")
+        stream.write(f"regime_ii_to_iii_s\t{full_to_overload}\n")
+        stream.write(f"regime_duration_s\t{regime_duration_s}\n")
         stream.write(f"boundary_window_samples\t{boundary_window}\n")
-        stream.write(f"empty_fraction\t{args.empty_fraction}\n")
-        stream.write(f"overload_fraction\t{args.overload_fraction}\n")
+        stream.write(f"regime_ii_complete_wave_ratio\t{regime_ii_wave_ratio}\n")
+        stream.write(f"regime_ii_complete_cycles\t{regime_ii_complete_cycles}\n")
+        stream.write(f"regime_ii_total_cycles\t{regime_ii_total_cycles}\n")
+        stream.write("# cycle_start_s\tamplitude_ratio\tshape_correlation\tcomplete\n")
+        for cycle_start, amplitude_ratio, correlation, complete in cycle_details:
+            stream.write(
+                f"regime_ii_cycle\t{cycle_start:.6f}\t{amplitude_ratio:.6f}\t"
+                f"{correlation:.6f}\t{int(complete)}\n"
+            )
         stream.write(
             "rx_top_freqs_hz_energy\t"
             + "\t".join(f"{f:.6f}:{e:.6g}" for f, e in rx_top)
@@ -932,8 +1058,13 @@ def main() -> None:
     print(time_out)
     print(spectrum_out)
     print(summary_out)
-    print(f"under_to_full_s={under_to_full}")
-    print(f"full_to_overload_s={full_to_overload}")
+    print(f"regime_i_to_ii_s={under_to_full}")
+    print(f"regime_ii_to_iii_s={full_to_overload}")
+    print(
+        "regime_ii_complete_wave_ratio="
+        f"{regime_ii_wave_ratio:.6f} "
+        f"({regime_ii_complete_cycles}/{regime_ii_total_cycles} cycles)"
+    )
 
 
 if __name__ == "__main__":

@@ -161,13 +161,27 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
       cycle_.has_advanced_max_bw = true;
     }
 
-    if (last_cycle_stopped_risky_probe_ && !last_cycle_probed_too_high_) {
+    if (!sender_->HasCustomProbeDownLogic() &&
+        last_cycle_stopped_risky_probe_ && !last_cycle_probed_too_high_) {
       EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
       return;
     }
   }
 
   MaybeAdaptUpperBounds(congestion_event);
+
+  QuicByteCount bytes_in_flight = congestion_event.bytes_in_flight;
+  QuicByteCount bdp = model_->BDP();
+  if (sender_->HasCustomProbeDownLogic()) {
+    QUIC_DVLOG(3)
+        << sender_
+        << " Checking custom PROBE_DOWN exit. bytes_in_flight:"
+        << bytes_in_flight << ", bdp:" << bdp;
+    if (sender_->ShouldExitCustomProbeDown(bytes_in_flight, bdp)) {
+      EnterProbeCruise(congestion_event.event_time);
+    }
+    return;
+  }
 
   if (IsTimeToProbeBandwidth(congestion_event)) {
     EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
@@ -189,15 +203,12 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
       << " congestion_event.bytes_in_flight:"
       << congestion_event.bytes_in_flight
       << ", inflight_with_headroom:" << inflight_with_headroom;
-  QuicByteCount bytes_in_flight = congestion_event.bytes_in_flight;
-
   if (bytes_in_flight > inflight_with_headroom) {
     // Stay in PROBE_DOWN.
     return;
   }
 
   // Transition to PROBE_CRUISE iff we've drained to target.
-  QuicByteCount bdp = model_->BDP();
   QUIC_DVLOG(3) << sender_ << " Checking if drained to target. bytes_in_flight:"
                 << bytes_in_flight << ", bdp:" << bdp;
   if (bytes_in_flight < bdp) {
@@ -902,7 +913,8 @@ float Bbr2ProbeBwMode::PacingGainForPhase(
     return Params().probe_bw_probe_up_pacing_gain;
   }
   if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_DOWN) {
-    return Params().probe_bw_probe_down_pacing_gain;
+    return sender_->GetProbeBwPacingGain(
+        phase, Params().probe_bw_probe_down_pacing_gain);
   }
   return sender_->GetProbeBwPacingGain(phase,
                                        Params().probe_bw_default_pacing_gain);

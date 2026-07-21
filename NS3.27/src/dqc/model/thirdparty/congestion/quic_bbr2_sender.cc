@@ -633,6 +633,16 @@ bool Bbr2Sender::ShouldDelayProbeBwCruiseExit(QuicTime /*now*/) const {
   return false;
 }
 
+bool Bbr2Sender::HasCustomProbeDownLogic() const {
+  return false;
+}
+
+bool Bbr2Sender::ShouldExitCustomProbeDown(
+    QuicByteCount /*bytes_in_flight*/,
+    QuicByteCount /*bdp*/) const {
+  return false;
+}
+
 float Bbr2Sender::GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
                                        float pacing_gain) const {
   return pacing_gain;
