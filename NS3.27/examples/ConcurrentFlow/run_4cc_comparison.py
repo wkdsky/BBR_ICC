@@ -443,7 +443,7 @@ ALGORITHM_PARAMS = {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
         "config_file": str(DEFAULT_FBBR_CONFIG),
         "algorithm": "FBBR-hybrid",
-        "notes": "独立 N01-N18 量化判定、MaxRTT/RTpropDRate 状态、50% 执行器和两窗无波保真增强分支。",
+        "notes": "独立 N01-N16 量化判定、MaxRTT/RTpropDRate 状态、50% 执行器和两窗无波保真增强分支。",
     },
     "FBBR": {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",

@@ -44,9 +44,19 @@ constexpr const char* kWaveformDeltaSourceFbbrWindowMaximum =
     "FBBR_WINDOW_MAXIMUM";
 constexpr const char* kWaveformDeltaSourceFbbrTrustedBw =
     "FBBR_TRUSTED_BW";
+constexpr const char* kWaveformDeltaSourceHybridAdaptiveBracket =
+    "HYBRID_ADAPTIVE_BRACKET";
+constexpr const char* kWaveformDeltaSourceHybridRtpropDrateMidpoint =
+    "HYBRID_RTPROP_DRATE_MIDPOINT";
 constexpr double kAdaptiveMaxBwInheritanceTolerance = 0.25;
 constexpr uint64_t kDefaultMinimumPacingRateBps = 1000000;
 constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
+// Match BBR-R's strong persistent-RTT-inflation pacing reduction.  Applying
+// it geometrically once per completed Hybrid window drains quickly while
+// retaining 80% of the preceding search rate at every step.
+constexpr double kFbbrHybridLowerBoundSearchFactor = 0.80;
+constexpr int64_t kFbbrHybridLowerBoundSearchFirstCruise = 3;
+constexpr int64_t kFbbrHybridStableObservationDurationMs = 200;
 constexpr float kFBBRCruiseCwndGain = 1.25f;
 constexpr float kFBBRRtpropProbeDownPacingGain = 0.75f;
 constexpr const char* kLimitingSpectralSignalDrate = "DRATE";
@@ -66,6 +76,42 @@ bool ShouldInheritAdaptiveBounds(double current_max_bw_bps,
   return std::abs(current_max_bw_bps - previous_max_bw_bps) /
              previous_max_bw_bps <
          kAdaptiveMaxBwInheritanceTolerance;
+}
+
+bool IsAtLeastElevenTenthsBdp(QuicByteCount bytes_in_flight,
+                              QuicByteCount bdp) {
+  return bdp > 0 &&
+         static_cast<long double>(bytes_in_flight) * 10.0L >=
+             static_cast<long double>(bdp) * 11.0L;
+}
+
+bool ShouldStartFbbrHybridLowerBoundSearch(
+    int64_t cruise_id,
+    bool baseline_low_valid,
+    bool rtprop_drate_valid) {
+  return cruise_id >= kFbbrHybridLowerBoundSearchFirstCruise &&
+         (!baseline_low_valid || !rtprop_drate_valid);
+}
+
+bool IsBelowHalfBdp(QuicByteCount inflight, QuicByteCount bdp) {
+  return bdp > 0 &&
+      2.0L * static_cast<long double>(inflight) <
+          static_cast<long double>(bdp);
+}
+
+double ComputeFbbrHybridLowerBoundSearchBaseline(
+    double current_baseline_bps,
+    double minimum_rate_bps) {
+  if (!std::isfinite(minimum_rate_bps) || minimum_rate_bps <= 0.0) {
+    minimum_rate_bps = 1.0;
+  }
+  if (!std::isfinite(current_baseline_bps) ||
+      current_baseline_bps <= minimum_rate_bps) {
+    return minimum_rate_bps;
+  }
+  return std::max(minimum_rate_bps,
+                  kFbbrHybridLowerBoundSearchFactor *
+                      current_baseline_bps);
 }
 
 bool IsWaveformDecisionRule(const char* decision_rule) {
@@ -528,6 +574,9 @@ FBBRSender::FBBRSender(
       rtprop_probe_down_active_(false),
       cruise_rtprop_at_entry_(TimeDelta::Zero()),
       latest_congestion_event_prior_inflight_(0),
+      latest_congestion_event_prior_inflight_valid_(false),
+      latest_congestion_event_inflight_(0),
+      latest_congestion_event_inflight_valid_(false),
       cruise_modulation_freq_hz_(5.0),
       cruise_start_time_(QuicTime::Zero()),
       next_cruise_window_start_(QuicTime::Zero()),
@@ -588,6 +637,20 @@ FBBRSender::FBBRSender(
       fbbr_hybrid_rtprop_drate_valid_(false),
       fbbr_hybrid_rtprop_drate_(QuicBandwidth::Zero()),
       fbbr_hybrid_rtprop_drate_source_cruise_id_(0),
+      fbbr_hybrid_rtprop_drate_source_time_(QuicTime::Zero()),
+      fbbr_hybrid_baseline_low_source_time_(QuicTime::Zero()),
+      fbbr_hybrid_srtt_low_valid_(false),
+      fbbr_hybrid_srtt_low_(TimeDelta::Zero()),
+      fbbr_hybrid_srtt_low_source_time_(QuicTime::Zero()),
+      fbbr_hybrid_lower_bound_search_active_(false),
+      fbbr_hybrid_lower_bound_search_baseline_(QuicBandwidth::Zero()),
+      fbbr_hybrid_lower_bound_search_step_count_(0),
+      fbbr_hybrid_lower_bound_search_bdp_(0),
+      fbbr_hybrid_stable_observation_source_(
+          HybridStableObservationSource::kNone),
+      fbbr_hybrid_stable_observation_start_(QuicTime::Zero()),
+      fbbr_hybrid_stable_observation_round_done_(false),
+      fbbr_hybrid_stable_observation_min_rtt_(TimeDelta::Infinite()),
       fbbr_hybrid_srtt_no_wave_streak_(0),
       fbbr_hybrid_drate_no_wave_streak_(0),
       fbbr_hybrid_wave_fidelity_enhancement_active_(false),
@@ -595,7 +658,7 @@ FBBRSender::FBBRSender(
       fbbr_hybrid_last_counted_window_second_cycle_id_(0),
       fbbr_hybrid_rolling_retry_count_(0),
       fbbr_hybrid_regime_ii_seen_this_cruise_(false),
-      fbbr_hybrid_probed_bw_(QuicBandwidth::Zero()),
+      fbbr_hybrid_trusted_bw_(QuicBandwidth::Zero()),
       floor_clip_confirmation_count_(0),
       waveform_last_clip_direction_(0),
       waveform_decision_count_(0),
@@ -796,6 +859,7 @@ FBBRSender::FBBRSender(
       gate_trace_mode_(FBBRGateTraceMode::kRoundOnly),
       gate_trace_sample_interval_(TimeDelta::FromMilliseconds(1)),
       last_pacing_gate_trace_time_(QuicTime::Zero()) {
+  InitializeHybridSrttLowFromModel();
   QUIC_DVLOG(2) << this << " Initializing FBBRSender @ " << now
                 << "; DefaultEcnCongestionRatio="
                 << default_ecn_congestion_ratio_;
@@ -1344,6 +1408,26 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   adaptive_previous_cruise_max_bw_ = QuicBandwidth::Zero();
   adaptive_cruise_start_max_bw_ = QuicBandwidth::Zero();
   adaptive_bounds_inherited_this_cruise_ = false;
+  fbbr_hybrid_max_rtt_valid_ = false;
+  fbbr_hybrid_max_rtt_ms_ = 0.0;
+  fbbr_hybrid_max_rtt_source_cruise_id_ = 0;
+  fbbr_hybrid_rtprop_drate_valid_ = false;
+  fbbr_hybrid_rtprop_drate_ = QuicBandwidth::Zero();
+  fbbr_hybrid_rtprop_drate_source_cruise_id_ = 0;
+  fbbr_hybrid_lower_bound_search_active_ = false;
+  fbbr_hybrid_lower_bound_search_baseline_ = QuicBandwidth::Zero();
+  fbbr_hybrid_lower_bound_search_step_count_ = 0;
+  fbbr_hybrid_lower_bound_search_bdp_ = 0;
+  CancelHybridStableObservation();
+  fbbr_hybrid_rtprop_drate_source_time_ = QuicTime::Zero();
+  fbbr_hybrid_baseline_low_source_time_ = QuicTime::Zero();
+  fbbr_hybrid_srtt_low_valid_ = false;
+  fbbr_hybrid_srtt_low_ = TimeDelta::Zero();
+  fbbr_hybrid_srtt_low_source_time_ = QuicTime::Zero();
+  InitializeHybridSrttLowFromModel();
+  latest_congestion_event_prior_inflight_valid_ = false;
+  latest_congestion_event_inflight_ = 0;
+  latest_congestion_event_inflight_valid_ = false;
   max_bw_response_observed_ = false;
   max_bw_delivery_response_gain_ = 1.0;
   max_bw_observation_center_bps_ = 0.0;
@@ -2280,12 +2364,18 @@ bool FBBRSender::RunWaveformCruiseSelfTest(std::ostream& os) {
   bdp_test_model.ForceSetMaxBandwidth(native_bdp_bw);
   require(bdp_test_model.BDP() == 50000,
           "test 22: native BDP uses MaxBandwidth before TrustedBw exists");
+  require(!IsAtLeastElevenTenthsBdp(54999, bdp_test_model.BDP()) &&
+              IsAtLeastElevenTenthsBdp(55000, bdp_test_model.BDP()),
+          "test 22b: 1.1 BDP fallback uses native BBRv2 BDP without TrustedBw");
   bdp_test_model.SetBdpBandwidthOverride(trusted_bdp_bw);
   require(bdp_test_model.BDP() == 100000 &&
               bdp_test_model.BDP(native_bdp_bw) == 100000 &&
               bdp_test_model.BDP(native_bdp_bw, 1.25f) == 125000 &&
               bdp_test_model.BdpBandwidth() == trusted_bdp_bw,
           "test 23: every BDP overload uses TrustedBw while it is valid");
+  require(!IsAtLeastElevenTenthsBdp(109999, bdp_test_model.BDP()) &&
+              IsAtLeastElevenTenthsBdp(110000, bdp_test_model.BDP()),
+          "test 23b: 1.1 BDP threshold uses TrustedBw while it is valid");
   bdp_test_model.ClearBdpBandwidthOverride();
   require(bdp_test_model.BDP() == 50000 &&
               bdp_test_model.BdpBandwidth() == native_bdp_bw,
@@ -2353,6 +2443,24 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
     pass = pass && condition;
   };
   os << "# FBBR-hybrid quantified-regime self-test\n";
+  require(!ShouldStartFbbrHybridLowerBoundSearch(2, false, false) &&
+              ShouldStartFbbrHybridLowerBoundSearch(3, false, false) &&
+              ShouldStartFbbrHybridLowerBoundSearch(3, true, false) &&
+              !ShouldStartFbbrHybridLowerBoundSearch(3, true, true),
+          "lower-bound drain starts only from the third Cruise while either lower reference is missing");
+  require(std::abs(ComputeFbbrHybridLowerBoundSearchBaseline(
+                       100.0, 1.0) - 80.0) < 1e-12 &&
+              ComputeFbbrHybridLowerBoundSearchBaseline(1.1, 1.0) == 1.0 &&
+              IsBelowHalfBdp(499, 1000) &&
+              !IsBelowHalfBdp(500, 1000),
+          "lower-bound drain uses geometric 0.80 steps and strict inflight below 0.5 BDP");
+  require(ComputeHybridStableDeliveryRate(
+              {10000000, 40000000, 30000000, 20000000}, {})
+                  .ToBitsPerSecond() == 20000000 &&
+              ComputeHybridStableDeliveryRate(
+                  {}, {9000000, 3000000, 6000000})
+                  .ToBitsPerSecond() == 6000000,
+          "ProbeRTT DRate uses the lower median after one stable round with an all-sample fallback");
   FbbrRegimeContext context;
   context.max_rtt_valid = true;
   context.max_rtt_ms = 100.0;
@@ -2362,10 +2470,15 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
     FbbrHybridRegimeFeatures features;
     features.input_valid = true;
     features.srtt.wave.input_valid = true;
+    features.srtt.wave.has_wave = true;
     features.drate.wave.input_valid = true;
     features.srtt_stats_valid = true;
     features.srtt_min_ms = 70.0;
+    features.srtt_mean_ms = 80.0;
     features.srtt_max_ms = 90.0;
+    features.inflight_bdp_valid = true;
+    features.inflight_bytes = 10999;
+    features.bdp_bytes = 10000;
     features.drate_stats_valid = true;
     features.mindrate_bps = 80.0;
     features.maxdrate_bps = 120.0;
@@ -2385,7 +2498,11 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
         decision.classification == classification &&
         decision.update_max_rtt == max_rtt &&
         decision.refresh_rtprop == rtprop &&
-        decision.update_rtprop_drate == rtprop_drate;
+        decision.update_rtprop_drate == rtprop_drate &&
+        decision.update_baseline_up == max_rtt &&
+        decision.update_baseline_low == rtprop_drate &&
+        !decision.update_lower_bound_from_rtprop_min &&
+        !decision.update_lower_bound_from_low_inflight;
     require(ok, std::string(rule) + " exact classification and side effects");
   };
 
@@ -2409,55 +2526,84 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
         true, false, false);
   f = base();
   f.selected_clip_case = SrttClipCase::kL1NegativeShoulder;
-  f.drate.wave.has_wave = true;
-  check(f, "N06", WaveformClassification::kUnderload,
-        false, true, true);
-  f.drate.wave.has_wave = false;
-  f.srtt_max_ms = 100.0001;
-  check(f, "N07", WaveformClassification::kOverload,
-        false, false, false);
-  f.srtt_max_ms = 100.0;
-  f.srtt_min_ms = 49.9999;
-  check(f, "N08", WaveformClassification::kUnderload,
-        false, false, false);
-  f.srtt_min_ms = 50.0;
-  check(f, "N09", WaveformClassification::kFullLoad,
+  check(f, "N06", WaveformClassification::kFullLoad,
         false, false, false);
   f = base();
   f.selected_clip_case = SrttClipCase::kL2LongBottomLine;
-  check(f, "N10", WaveformClassification::kUnderload,
+  f.drate.wave.has_wave = true;
+  check(f, "N07", WaveformClassification::kUnderload,
         false, true, true);
-  f.selected_clip_case = SrttClipCase::kL3RepeatedBottomClip;
-  check(f, "N11", WaveformClassification::kUnderload,
-        false, true, true);
-  f = base();
-  f.srtt.wave.has_wave = true;
-  f.srtt_max_ms = 100.0001;
-  check(f, "N12", WaveformClassification::kOverload,
+  f.drate.wave.has_wave = false;
+  check(f, "N08", WaveformClassification::kFullLoad,
         false, false, false);
-  f.srtt_max_ms = 100.0;
-  f.srtt_min_ms = 49.9999;
+  f = base();
+  f.selected_clip_case = SrttClipCase::kL3RepeatedBottomClip;
+  check(f, "N09", WaveformClassification::kUnderload,
+        false, false, true);
+  f = base();
+  f.selected_clip_case = SrttClipCase::kU2LongTopLine;
+  f.srtt.wave.has_wave = false;
+  f.drate.periodic = PeriodicSimilarityResult::kMatch;
   check(f, "N13", WaveformClassification::kUnderload,
         false, false, false);
-  f.srtt_min_ms = 50.0;
-  check(f, "N14", WaveformClassification::kFullLoad,
+  f.selected_clip_case = SrttClipCase::kL2LongBottomLine;
+  f.drate.periodic = PeriodicSimilarityResult::kNoMatch;
+  check(f, "N16", WaveformClassification::kOverload,
+        false, false, false);
+  f = base();
+  f.srtt_max_ms = 100.0001;
+  check(f, "N10", WaveformClassification::kOverload,
+        true, false, false);
+  f.srtt_max_ms = 100.0;
+  f.srtt_min_ms = 49.9999;
+  check(f, "N11", WaveformClassification::kUnderload,
+        false, true, true);
+  f.srtt_min_ms = 50.0001;
+  f.srtt_mean_ms = 62.5;
+  f.inflight_bytes = 10999;
+  check(f, "N12", WaveformClassification::kFullLoad,
+        false, false, false);
+  f.inflight_bytes = 11000;
+  check(f, "N12", WaveformClassification::kOverload,
+        false, false, false);
+  f.inflight_bytes = 10999;
+  f.srtt_mean_ms = 62.5001;
+  check(f, "N12", WaveformClassification::kOverload,
         false, false, false);
   f = base();
   f.srtt.wave.has_wave = false;
-  f.drate.wave.has_wave = true;
-  check(f, "N15", WaveformClassification::kUnderload,
+  f.drate.periodic = PeriodicSimilarityResult::kMatch;
+  check(f, "N13", WaveformClassification::kUnderload,
         false, false, false);
-  f.drate.wave.has_wave = false;
+  f.drate.periodic = PeriodicSimilarityResult::kNoMatch;
   f.srtt_max_ms = 100.0001;
-  check(f, "N16", WaveformClassification::kOverload,
-        false, false, false);
+  check(f, "N14", WaveformClassification::kOverload,
+        true, false, false);
   f.srtt_max_ms = 100.0;
   f.srtt_min_ms = 49.9999;
-  check(f, "N17", WaveformClassification::kUnderload,
+  check(f, "N15", WaveformClassification::kUnderload,
+        false, true, true);
+  f.srtt_min_ms = 50.0001;
+  f.srtt_mean_ms = 62.5;
+  f.inflight_bytes = 10999;
+  check(f, "N16", WaveformClassification::kFullLoad,
+        false, false, false);
+  f.inflight_bytes = 11000;
+  check(f, "N16", WaveformClassification::kOverload,
+        false, false, false);
+  f.inflight_bytes = 10999;
+  f.srtt_mean_ms = 62.5001;
+  check(f, "N16", WaveformClassification::kOverload,
         false, false, false);
   f.srtt_min_ms = 50.0;
-  check(f, "N18", WaveformClassification::kFullLoad,
-        false, false, false);
+  const FbbrHybridDecision rtprop_contact =
+      ClassifyFbbrHybridRegime(f, context);
+  require(!rtprop_contact.update_lower_bound_from_rtprop_min &&
+              !rtprop_contact.update_rtprop_drate &&
+              !rtprop_contact.update_baseline_low &&
+              !rtprop_contact.update_max_rtt &&
+              !rtprop_contact.update_baseline_up,
+          "N12/N16 RTprop contact does not invent extra side effects");
 
   f = base();
   f.selected_clip_case = SrttClipCase::kU1PositiveShoulder;
@@ -2467,28 +2613,42 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
               std::string(invalid.rule_id).empty(),
           "U1/U2 INVALID periodic input cannot fall through as NO_MATCH");
   f = base();
-  f.selected_clip_case = SrttClipCase::kL1NegativeShoulder;
+  f.selected_clip_case = SrttClipCase::kL2LongBottomLine;
   f.drate.wave.input_valid = false;
   invalid = ClassifyFbbrHybridRegime(f, context);
   require(invalid.classification == WaveformClassification::kInconclusive,
-          "L1 invalid ordinary-wave input is inconclusive");
+          "L2 invalid ordinary-wave input is inconclusive");
+  f = base();
+  f.srtt.wave.has_wave = false;
+  f.drate.periodic = PeriodicSimilarityResult::kInvalidInput;
+  invalid = ClassifyFbbrHybridRegime(f, context);
+  require(invalid.classification == WaveformClassification::kInconclusive,
+          "SRTT no-wave branch requires valid DRate periodic input");
 
   const FbbrHybridActuatorResult i_mid =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kUnderload,
-          80.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+          80.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          true, 60.0, 0.50, 1.0);
   const FbbrHybridActuatorResult i_equal =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kUnderload,
-          90.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+          90.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          true, 60.0, 0.50, 1.0);
   const FbbrHybridActuatorResult iii_mid =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kOverload,
-          80.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+          80.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          true, 60.0, 0.50, 1.0);
   const FbbrHybridActuatorResult iii_equal =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kOverload,
-          90.0, 120.0, 100.0, true, 60.0, 0.50, 1.0);
+          90.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          true, 60.0, 0.50, 1.0);
   require(i_mid.valid && i_mid.midpoint_triggered &&
               std::abs(i_mid.next_baseline_bps - 100.0) < 1e-12 &&
               i_equal.valid && !i_equal.midpoint_triggered &&
@@ -2502,22 +2662,69 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
   const FbbrHybridActuatorResult ii =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kFullLoad,
-          80.0, 120.0, 101.0, false, 0.0, 0.50, 1.0);
+          80.0, 120.0, 101.0,
+          false, 0.0, false, 0.0, 100.0,
+          false, 0.0, 0.50, 1.0);
   const FbbrHybridActuatorResult no_ref_i =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kUnderload,
-          80.0, 120.0, 100.0, false, 0.0, 0.50, 1.0);
+          80.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          false, 0.0, 0.50, 1.0);
   const FbbrHybridActuatorResult no_ref_iii =
       ComputeFbbrHybridInjectionBaseline(
           WaveformClassification::kOverload,
-          80.0, 120.0, 100.0, false, 0.0, 0.50, 90.0);
-  require(ii.valid && ii.update_probed_bw &&
-              std::abs(ii.next_baseline_bps - 101.0) < 1e-12 &&
-              std::abs(ii.probed_bw_bps - 101.0) < 1e-12,
-          "Regime II updates baseline and ProbedBw to time mean");
+          80.0, 120.0, 100.0,
+          false, 0.0, false, 0.0, 100.0,
+          false, 0.0, 0.50, 90.0);
+  require(ii.valid && !ii.update_baseline && ii.update_trusted_bw &&
+              ii.next_baseline_bps == 0.0 &&
+              std::abs(ii.trusted_bw_bps - 101.0) < 1e-12,
+          "Regime II updates TrustedBw without changing baseline");
   require(no_ref_i.valid && no_ref_i.next_baseline_bps == 120.0 &&
               no_ref_iii.valid && no_ref_iii.next_baseline_bps == 90.0,
           "invalid RTpropDRate selects max/min and pacing floor");
+
+  const FbbrHybridActuatorResult i_bracket =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kUnderload,
+          80.0, 120.0, 100.0,
+          true, 60.0, true, 140.0, 90.0,
+          true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult iii_bracket =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kOverload,
+          80.0, 120.0, 100.0,
+          true, 80.0, true, 120.0, 110.0,
+          true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult i_bracket_falls_to_midpoint =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kUnderload,
+          80.0, 120.0, 100.0,
+          true, 80.0, true, 120.0, 110.0,
+          true, 60.0, 0.50, 1.0);
+  const FbbrHybridActuatorResult iii_bracket_falls_to_direct =
+      ComputeFbbrHybridInjectionBaseline(
+          WaveformClassification::kOverload,
+          90.0, 120.0, 100.0,
+          true, 80.0, true, 120.0, 80.0,
+          false, 0.0, 0.50, 1.0);
+  require(i_bracket.valid && i_bracket.bracket_triggered &&
+              !i_bracket.midpoint_triggered &&
+              std::abs(i_bracket.next_baseline_bps - 100.0) < 1e-12 &&
+              iii_bracket.valid && iii_bracket.bracket_triggered &&
+              !iii_bracket.midpoint_triggered &&
+              std::abs(iii_bracket.next_baseline_bps - 90.0) < 1e-12,
+          "Adaptive low/up bracket has first actuator priority");
+  require(i_bracket_falls_to_midpoint.valid &&
+              !i_bracket_falls_to_midpoint.bracket_triggered &&
+              i_bracket_falls_to_midpoint.midpoint_triggered &&
+              i_bracket_falls_to_midpoint.next_baseline_bps == 100.0 &&
+              iii_bracket_falls_to_direct.valid &&
+              !iii_bracket_falls_to_direct.bracket_triggered &&
+              !iii_bracket_falls_to_direct.midpoint_triggered &&
+              iii_bracket_falls_to_direct.next_baseline_bps == 90.0,
+          "failed bracket falls through midpoint and then direct extrema");
 
   require(!(0.20 > 0.20) && 0.2001 > 0.20 &&
               !(0.30 > 0.30) && 0.3001 > 0.30,
@@ -2544,12 +2751,183 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
                       10, 1000, &detector_random, &detector_stats,
                       false, false, false, kFBBRHybrid);
   detector.ConfigureFBBR(FBBRConfig());
+  require(!detector.UsesAdaptiveLoadJudgment(),
+          "FBBR-hybrid reuses the Adaptive actuator without entering its classifier");
+  const QuicTime reference_time =
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(1);
+  detector.model_.ForceUpdateMinRtt(
+      TimeDelta::FromMilliseconds(40), reference_time);
+  detector.fbbr_hybrid_max_rtt_valid_ = true;
+  detector.fbbr_hybrid_max_rtt_ms_ = 85.0;
+  const WaveformWindowAnalysis reference_window =
+      detector.AnalyzeFbbrHybridWindow(
+          reference_time, reference_time, 2.0, false);
+  require(reference_window.hybrid_srtt_low_rtprop_valid &&
+              reference_window.hybrid_srtt_low_rtprop_ms == 40.0 &&
+              reference_window.hybrid_srtt_max_max_rtt_valid &&
+              reference_window.hybrid_srtt_max_max_rtt_ms == 85.0,
+          "Hybrid srtt_low maps to RTprop and srtt_max maps to MaxRTT");
+  WaveformWindowAnalysis lower_bound_window;
+  lower_bound_window.classification = WaveformClassification::kUnderload;
+  lower_bound_window.delivery_rate_stats_valid = true;
+  lower_bound_window.delivery_rate_min_bps = 80000000.0;
+  lower_bound_window.delivery_rate_max_bps = 120000000.0;
+  lower_bound_window.hybrid_decision.update_baseline_low = true;
+  lower_bound_window.hybrid_decision.update_rtprop_drate = true;
+  detector.ApplyFbbrHybridRegimeStateUpdates(
+      &lower_bound_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(2));
+  require(detector.adaptive_baseline_low_valid_ &&
+              detector.adaptive_baseline_low_.ToBitsPerSecond() ==
+                  80000000 &&
+              !detector.adaptive_baseline_up_valid_,
+          "N07/N09/N11/N15 lower bound source is window minimum DRate");
+  WaveformWindowAnalysis upper_bound_window;
+  upper_bound_window.classification = WaveformClassification::kOverload;
+  upper_bound_window.delivery_rate_stats_valid = true;
+  upper_bound_window.delivery_rate_min_bps = 90000000.0;
+  upper_bound_window.delivery_rate_max_bps = 150000000.0;
+  upper_bound_window.hybrid_decision.update_baseline_up = true;
+  detector.ApplyFbbrHybridRegimeStateUpdates(
+      &upper_bound_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(3));
+  require(detector.adaptive_baseline_up_valid_ &&
+              detector.adaptive_baseline_up_.ToBitsPerSecond() ==
+                  150000000,
+          "N02/N04/N05/N10/N14 upper bound source is window maximum DRate");
+  WaveformWindowAnalysis suppressed_bound_window = lower_bound_window;
+  suppressed_bound_window.classification =
+      WaveformClassification::kInconclusive;
+  suppressed_bound_window.delivery_rate_min_bps = 70000000.0;
+  detector.ApplyFbbrHybridRegimeStateUpdates(
+      &suppressed_bound_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(4));
+  require(detector.adaptive_baseline_low_.ToBitsPerSecond() == 80000000,
+          "inconclusive/suppressed windows cannot partially update bounds");
+  WaveformWindowAnalysis rtprop_contact_window = suppressed_bound_window;
+  rtprop_contact_window.classification_suppressed_for_retry = true;
+  rtprop_contact_window.hybrid_decision
+      .update_lower_bound_from_rtprop_min = true;
+  detector.ApplyFbbrHybridRegimeStateUpdates(
+      &rtprop_contact_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(5));
+  require(detector.adaptive_baseline_low_.ToBitsPerSecond() == 70000000 &&
+              detector.fbbr_hybrid_rtprop_drate_valid_ &&
+              detector.fbbr_hybrid_rtprop_drate_.ToBitsPerSecond() ==
+                  70000000 &&
+              detector.model_.MinRtt() ==
+                  TimeDelta::FromMilliseconds(40),
+          "RTprop-contact updates only the lower rate references and survives retry suppression");
+
+  RttStats fallback_rtt;
+  fallback_rtt.set_initial_rtt(TimeDelta::FromMilliseconds(40));
+  Random fallback_random;
+  QuicConnectionStats fallback_stats;
+  FBBRSender fallback_detector(
+      QuicTime::Zero(), &fallback_rtt, nullptr, 10, 1000,
+      &fallback_random, &fallback_stats, false, false, false, kFBBRHybrid);
+  fallback_detector.ConfigureFBBR(FBBRConfig());
+  fallback_detector.model_.ForceUpdateMinRtt(
+      TimeDelta::FromMilliseconds(40), reference_time);
+  WaveformWindowAnalysis half_bdp_window;
+  half_bdp_window.classification =
+      WaveformClassification::kInconclusive;
+  half_bdp_window.classification_suppressed_for_retry = true;
+  half_bdp_window.delivery_rate_stats_valid = true;
+  half_bdp_window.delivery_rate_min_bps = 60000000.0;
+  half_bdp_window.srtt_stats_valid = true;
+  half_bdp_window.srtt_min_ms = 35.0;
+  half_bdp_window.hybrid_decision
+      .update_lower_bound_from_low_inflight = true;
+  fallback_detector.ApplyFbbrHybridRegimeStateUpdates(
+      &half_bdp_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(6));
+  require(fallback_detector.model_.MinRtt() ==
+              TimeDelta::FromMilliseconds(35) &&
+              fallback_detector.adaptive_baseline_low_valid_ &&
+              fallback_detector.adaptive_baseline_low_
+                      .ToBitsPerSecond() == 60000000 &&
+              fallback_detector.fbbr_hybrid_rtprop_drate_valid_ &&
+              fallback_detector.fbbr_hybrid_rtprop_drate_
+                      .ToBitsPerSecond() == 60000000 &&
+              !fallback_detector.adaptive_baseline_up_valid_ &&
+              !fallback_detector.fbbr_hybrid_max_rtt_valid_,
+          "half-BDP fallback refreshes RTprop and only the two lower rate references");
+
+  FBBRSender probe_version_detector(
+      QuicTime::Zero(), &fallback_rtt, nullptr, 10, 1000,
+      &fallback_random, &fallback_stats, false, false, false, kFBBRHybrid);
+  probe_version_detector.ConfigureFBBR(FBBRConfig());
+  const QuicTime cruise_source_time =
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(10);
+  probe_version_detector.PublishHybridSrttLow(
+      TimeDelta::FromMilliseconds(40), cruise_source_time, false);
+  probe_version_detector.PublishHybridLowerBound(
+      QuicBandwidth::FromBitsPerSecond(80000000), cruise_source_time);
+  probe_version_detector.StartHybridStableObservation(
+      HybridStableObservationSource::kProbeRtt,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(20));
+  probe_version_detector.fbbr_hybrid_stable_observation_round_done_ = true;
+  probe_version_detector.fbbr_hybrid_stable_observation_min_rtt_ =
+      TimeDelta::FromMilliseconds(35);
+  probe_version_detector.fbbr_hybrid_stable_post_round_rate_samples_bps_ =
+      {30000000, 50000000, 40000000, 100000000};
+  probe_version_detector.MaybeFinishHybridStableObservation(
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(220), true);
+  const bool lower_probe_replaced_both =
+      probe_version_detector.fbbr_hybrid_srtt_low_ ==
+          TimeDelta::FromMilliseconds(35) &&
+      probe_version_detector.adaptive_baseline_low_.ToBitsPerSecond() ==
+          40000000 &&
+      probe_version_detector.fbbr_hybrid_rtprop_drate_.ToBitsPerSecond() ==
+          40000000;
+  probe_version_detector.StartHybridStableObservation(
+      HybridStableObservationSource::kProbeRtt,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(300));
+  probe_version_detector.fbbr_hybrid_stable_observation_round_done_ = true;
+  probe_version_detector.fbbr_hybrid_stable_observation_min_rtt_ =
+      TimeDelta::FromMilliseconds(45);
+  probe_version_detector.fbbr_hybrid_stable_post_round_rate_samples_bps_ =
+      {20000000, 25000000, 30000000};
+  probe_version_detector.MaybeFinishHybridStableObservation(
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(500), true);
+  require(lower_probe_replaced_both &&
+              probe_version_detector.fbbr_hybrid_srtt_low_ ==
+                  TimeDelta::FromMilliseconds(45) &&
+              probe_version_detector.adaptive_baseline_low_
+                      .ToBitsPerSecond() == 40000000 &&
+              probe_version_detector.fbbr_hybrid_rtprop_drate_
+                      .ToBitsPerSecond() == 40000000,
+          "newer ProbeRTT always versions srtt_low, but replaces both lower-rate references only when RTprop is lower");
+  detector.ApplyFbbrHybridRegimeStateUpdates(
+      &lower_bound_window,
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(6));
+  detector.adaptive_previous_cruise_max_bw_valid_ = true;
+  detector.adaptive_previous_cruise_max_bw_ =
+      QuicBandwidth::FromBitsPerSecond(1000000000);
+  detector.EnterCruise(
+      QuicTime::Zero() + TimeDelta::FromMilliseconds(7));
+  require(detector.adaptive_baseline_low_valid_ &&
+              detector.adaptive_baseline_low_.ToBitsPerSecond() ==
+                  80000000 &&
+              detector.adaptive_baseline_up_valid_ &&
+              detector.adaptive_baseline_up_.ToBitsPerSecond() ==
+                  150000000 &&
+              detector.fbbr_hybrid_rtprop_drate_valid_ &&
+              detector.fbbr_hybrid_rtprop_drate_.ToBitsPerSecond() ==
+                  80000000 &&
+              detector.fbbr_hybrid_max_rtt_valid_ &&
+              detector.fbbr_hybrid_max_rtt_ms_ == 85.0 &&
+              detector.model_.MinRtt() ==
+                  TimeDelta::FromMilliseconds(40) &&
+              detector.adaptive_bounds_inherited_this_cruise_,
+          "Hybrid inherits low/up, RTpropDRate, MaxRTT, and RTprop without a MaxBw gate");
   WaveformWindowAnalysis retry_window;
   retry_window.fbbr_hybrid_pipeline = true;
-  retry_window.classification = WaveformClassification::kFullLoad;
+  retry_window.classification = WaveformClassification::kOverload;
   retry_window.unsuppressed_classification =
-      WaveformClassification::kFullLoad;
-  retry_window.hybrid_decision.rule_id = "N18";
+      WaveformClassification::kOverload;
+  retry_window.hybrid_decision.rule_id = "N16";
   retry_window.invalid_reason = "none";
   retry_window.hybrid_features.srtt.wave.input_valid = true;
   retry_window.hybrid_features.drate.wave.input_valid = true;
@@ -2563,7 +2941,7 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
               retry_window.drate_no_wave_streak == 1 &&
               !retry_window.classification_suppressed_for_retry,
           "first no-wave window only increments independent streaks");
-  retry_window.classification = WaveformClassification::kFullLoad;
+  retry_window.classification = WaveformClassification::kOverload;
   retry_window.invalid_reason = "none";
   retry_window.window_first_cycle_id = 2;
   retry_window.window_second_cycle_id = 3;
@@ -2574,8 +2952,8 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
               retry_window.state_updates_suppressed_for_retry &&
               retry_window.classification ==
                   WaveformClassification::kInconclusive,
-          "second no-wave window enters retry and freezes its N18 result");
-  retry_window.classification = WaveformClassification::kFullLoad;
+          "second no-wave window enters retry and freezes its N16 result");
+  retry_window.classification = WaveformClassification::kOverload;
   retry_window.classification_suppressed_for_retry = false;
   retry_window.state_updates_suppressed_for_retry = false;
   retry_window.no_wave_triggered = false;
@@ -2605,11 +2983,28 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
   const double period_s = 0.20;
   const double dt_s = 0.005;
   const size_t sample_count = 80;
+  const size_t samples_per_period =
+      static_cast<size_t>(std::llround(period_s / dt_s));
   std::vector<bool> signal_valid(sample_count, true);
   std::vector<double> smooth_sine(sample_count, 0.0);
   std::vector<double> abrupt_jitter(sample_count, 0.0);
+  std::vector<double> positive_half_wave(sample_count, 0.0);
+  std::vector<double> negative_half_wave(sample_count, 0.0);
   std::vector<double> one_way(sample_count, 0.0);
   std::vector<double> single_spike(sample_count, 100.0);
+  auto fill_half_cycle = [&](std::vector<double>* wave, bool positive) {
+    for (size_t cycle = 0; cycle < 2; ++cycle) {
+      const size_t begin = cycle * samples_per_period;
+      for (size_t i = 0; i < samples_per_period; ++i) {
+        if (i < 8) {
+          (*wave)[begin + i] = positive ? 100.0 + 6.0 * i
+                                        : 148.0 - 6.0 * i;
+        } else {
+          (*wave)[begin + i] = positive ? 148.0 : 100.0;
+        }
+      }
+    }
+  };
   for (size_t i = 0; i < sample_count; ++i) {
     smooth_sine[i] = 100.0 + 10.0 * std::sin(
         2.0 * M_PI * i * dt_s / period_s);
@@ -2618,12 +3013,23 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
     one_way[i] = 100.0 + static_cast<double>(i % 40);
   }
   single_spike[20] = 180.0;
+  fill_half_cycle(&positive_half_wave, true);
+  fill_half_cycle(&negative_half_wave, false);
   const WaveActivityFeatures smooth_wave =
       detector.DetectOrdinaryWaveActivity(
           smooth_sine, signal_valid, dt_s, period_s);
   const WaveActivityFeatures jitter_wave =
       detector.DetectOrdinaryWaveActivity(
           abrupt_jitter, signal_valid, dt_s, period_s);
+  const WaveActivityFeatures positive_half_strict =
+      detector.DetectOrdinaryWaveActivity(
+          positive_half_wave, signal_valid, dt_s, period_s);
+  const WaveActivityFeatures positive_half_relaxed =
+      detector.DetectOrdinaryWaveActivity(
+          positive_half_wave, signal_valid, dt_s, period_s, true);
+  const WaveActivityFeatures negative_half_relaxed =
+      detector.DetectOrdinaryWaveActivity(
+          negative_half_wave, signal_valid, dt_s, period_s, true);
   const WaveActivityFeatures one_way_wave =
       detector.DetectOrdinaryWaveActivity(
           one_way, signal_valid, dt_s, period_s);
@@ -2633,6 +3039,9 @@ bool FBBRSender::RunFbbrHybridSelfTest(std::ostream& os) {
   require(smooth_wave.input_valid && !smooth_wave.has_wave &&
               jitter_wave.input_valid && jitter_wave.has_wave,
           "ordinary-wave detector separates smooth periodic motion from abrupt round trips");
+  require(positive_half_strict.input_valid && !positive_half_strict.has_wave &&
+              positive_half_relaxed.has_wave && negative_half_relaxed.has_wave,
+          "ordinary-wave detector accepts a single positive or negative half-cycle when enabled");
   require(!one_way_wave.has_wave && !spike_wave.has_wave,
           "ordinary-wave return and robust-amplitude gates reject drift and one spike");
 
@@ -2756,6 +3165,11 @@ float FBBRSender::GetProbeBwCwndGain(
 }
 
 bool FBBRSender::BaseShouldOscillate() const {
+  if (IsFbbrHybrid() &&
+      fbbr_hybrid_stable_observation_source_ ==
+          HybridStableObservationSource::kCruiseFallback) {
+    return false;
+  }
   if (in_cruise_ &&
       cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform &&
       (current_injection_baseline_bw_.IsZero() ||
@@ -3053,7 +3467,14 @@ void FBBRSender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
   current_cruise_rtprop_updated_ = false;
   previous_cruise_rtprop_updated_ = false;
-  cruise_rtprop_at_entry_ = model_.MinRtt();
+  // Replace the constructor's initial-RTT placeholder once, using the first
+  // path sample learned before Cruise.  After this bootstrap, only explicit
+  // trusted Cruise/ProbeRTT publications version srtt_low.
+  InitializeHybridSrttLowFromModel();
+  cruise_rtprop_at_entry_ =
+      IsFbbrHybrid() && fbbr_hybrid_srtt_low_valid_
+          ? fbbr_hybrid_srtt_low_
+          : model_.MinRtt();
   ++cruise_id_;
   cruise_start_time_ = now;
   trusted_bw_cleared_on_cruise_start_ = false;
@@ -3065,7 +3486,13 @@ void FBBRSender::EnterCruise(QuicTime now) {
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
   adaptive_cruise_start_max_bw_ = model_.MaxBandwidth();
   adaptive_bounds_inherited_this_cruise_ = false;
-  if (UsesAdaptiveLoadJudgment()) {
+  if (IsFbbrHybrid()) {
+    // Hybrid connection state is deliberately independent of the current
+    // MaxBw generation.  Once learned, baseline_low/up survive every Cruise,
+    // just like RTpropDRate, MaxRTT, and the BBR model's RTprop.
+    adaptive_bounds_inherited_this_cruise_ =
+        adaptive_baseline_low_valid_ || adaptive_baseline_up_valid_;
+  } else if (UsesAdaptiveLoadJudgment()) {
     const double current_max_bw_bps = static_cast<double>(
         adaptive_cruise_start_max_bw_.ToBitsPerSecond());
     const double previous_max_bw_bps = static_cast<double>(
@@ -3097,6 +3524,31 @@ void FBBRSender::EnterCruise(QuicTime now) {
   }
   initial_cruise_baseline_bw_ = current_native_max_bw;
   current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
+  if (IsFbbrHybrid() && ShouldStartFbbrHybridLowerBoundSearch(
+          cruise_id_, adaptive_baseline_low_valid_,
+          fbbr_hybrid_rtprop_drate_valid_)) {
+    fbbr_hybrid_lower_bound_search_active_ = true;
+    // The search is connection state.  Do not let the next Cruise's MaxBw
+    // initialization undo reductions already made in the third Cruise.
+    if (!fbbr_hybrid_lower_bound_search_baseline_.IsZero() &&
+        fbbr_hybrid_lower_bound_search_baseline_ <
+            current_injection_baseline_bw_) {
+      current_injection_baseline_bw_ =
+          fbbr_hybrid_lower_bound_search_baseline_;
+    } else {
+      fbbr_hybrid_lower_bound_search_baseline_ =
+          current_injection_baseline_bw_;
+    }
+    if (fbbr_hybrid_lower_bound_search_bdp_ == 0) {
+      fbbr_hybrid_lower_bound_search_bdp_ = HybridTrustedBdp();
+      if (fbbr_hybrid_lower_bound_search_bdp_ == 0) {
+        fbbr_hybrid_lower_bound_search_bdp_ = model_.BDP();
+      }
+    }
+  } else if (IsFbbrHybrid() && adaptive_baseline_low_valid_ &&
+             fbbr_hybrid_rtprop_drate_valid_) {
+    ResetHybridLowerBoundSearch();
+  }
   current_probe_amplitude_bps_ = GetCurrentAmplitudeBps();
   waveform_initial_probe_amplitude_bps_ = current_probe_amplitude_bps_;
   ResetMaxBwAttenuationEstimator();
@@ -3108,7 +3560,7 @@ void FBBRSender::EnterCruise(QuicTime now) {
   fbbr_hybrid_last_counted_window_second_cycle_id_ = 0;
   fbbr_hybrid_rolling_retry_count_ = 0;
   fbbr_hybrid_regime_ii_seen_this_cruise_ = false;
-  fbbr_hybrid_probed_bw_ = QuicBandwidth::Zero();
+  fbbr_hybrid_trusted_bw_ = QuicBandwidth::Zero();
   current_probe_bw_phase_gain_ =
       cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform
           ? 1.0
@@ -3171,13 +3623,259 @@ void FBBRSender::ResetCruiseWindowState() {
   }
 }
 
+void FBBRSender::InitializeHybridSrttLowFromModel() {
+  if (fbbr_hybrid_srtt_low_valid_ &&
+      fbbr_hybrid_srtt_low_source_time_ != QuicTime::Zero()) {
+    return;
+  }
+  const TimeDelta model_rtprop = model_.MinRtt();
+  if (model_rtprop.IsZero() || model_rtprop.IsInfinite()) {
+    return;
+  }
+  fbbr_hybrid_srtt_low_valid_ = true;
+  fbbr_hybrid_srtt_low_ = model_rtprop;
+  fbbr_hybrid_srtt_low_source_time_ = model_.MinRttTimestamp();
+}
+
+QuicByteCount FBBRSender::HybridTrustedBdp() const {
+  if (!IsFbbrHybrid() || !fbbr_hybrid_srtt_low_valid_ ||
+      fbbr_hybrid_srtt_low_.IsZero() ||
+      fbbr_hybrid_srtt_low_.IsInfinite()) {
+    return 0;
+  }
+  QuicBandwidth bandwidth = model_.MaxBandwidth();
+  if (bandwidth.IsZero() || bandwidth.IsInfinite()) {
+    bandwidth = BandwidthEstimate();
+  }
+  if (bandwidth.IsZero() || bandwidth.IsInfinite()) {
+    return 0;
+  }
+  return bandwidth * fbbr_hybrid_srtt_low_;
+}
+
+QuicByteCount FBBRSender::AdjustProbeRttInflightTarget(
+    QuicByteCount native_target) const {
+  const QuicByteCount trusted_bdp = HybridTrustedBdp();
+  if (trusted_bdp == 0) {
+    return native_target;
+  }
+  return static_cast<QuicByteCount>(
+      static_cast<long double>(trusted_bdp) *
+      Params().probe_rtt_inflight_target_bdp_fraction);
+}
+
+void FBBRSender::StartHybridStableObservation(
+    HybridStableObservationSource source,
+    QuicTime stable_start) {
+  CancelHybridStableObservation();
+  fbbr_hybrid_stable_observation_source_ = source;
+  fbbr_hybrid_stable_observation_start_ = stable_start;
+  fbbr_hybrid_stable_observation_round_done_ = false;
+  fbbr_hybrid_stable_observation_min_rtt_ = TimeDelta::Infinite();
+}
+
+void FBBRSender::ObserveHybridStableSample(
+    const Bbr2CongestionEvent& congestion_event) {
+  if (fbbr_hybrid_stable_observation_source_ ==
+          HybridStableObservationSource::kNone ||
+      congestion_event.event_time <
+          fbbr_hybrid_stable_observation_start_) {
+    return;
+  }
+  if (!congestion_event.sample_min_rtt.IsZero() &&
+      !congestion_event.sample_min_rtt.IsInfinite() &&
+      (fbbr_hybrid_stable_observation_min_rtt_.IsInfinite() ||
+       congestion_event.sample_min_rtt <
+           fbbr_hybrid_stable_observation_min_rtt_)) {
+    fbbr_hybrid_stable_observation_min_rtt_ =
+        congestion_event.sample_min_rtt;
+  }
+  if (congestion_event.sample_valid &&
+      !congestion_event.sample_max_bandwidth.IsZero() &&
+      !congestion_event.sample_max_bandwidth.IsInfinite()) {
+    const int64_t sample_bps =
+        congestion_event.sample_max_bandwidth.ToBitsPerSecond();
+    if (sample_bps > 0) {
+      fbbr_hybrid_stable_rate_samples_bps_.push_back(sample_bps);
+      if (fbbr_hybrid_stable_observation_round_done_) {
+        fbbr_hybrid_stable_post_round_rate_samples_bps_.push_back(
+            sample_bps);
+      }
+    }
+  }
+  // The ACK that closes the first packet-timed round is still a transition
+  // sample.  Only subsequent DRE samples enter the preferred estimator.
+  if (congestion_event.end_of_round_trip) {
+    fbbr_hybrid_stable_observation_round_done_ = true;
+  }
+}
+
+QuicBandwidth FBBRSender::ComputeHybridStableDeliveryRate(
+    const std::vector<int64_t>& post_round_samples_bps,
+    const std::vector<int64_t>& all_samples_bps) {
+  const std::vector<int64_t>& preferred =
+      post_round_samples_bps.empty() ? all_samples_bps
+                                     : post_round_samples_bps;
+  if (preferred.empty()) {
+    return QuicBandwidth::Zero();
+  }
+  std::vector<int64_t> ordered = preferred;
+  const size_t lower_middle = (ordered.size() - 1) / 2;
+  std::nth_element(ordered.begin(), ordered.begin() + lower_middle,
+                   ordered.end());
+  return ordered[lower_middle] > 0
+             ? QuicBandwidth::FromBitsPerSecond(ordered[lower_middle])
+             : QuicBandwidth::Zero();
+}
+
+void FBBRSender::PublishHybridLowerBound(QuicBandwidth delivery_rate,
+                                         QuicTime source_time) {
+  if (delivery_rate.IsZero() || delivery_rate.IsInfinite() ||
+      source_time == QuicTime::Zero()) {
+    return;
+  }
+  fbbr_hybrid_rtprop_drate_ = delivery_rate;
+  fbbr_hybrid_rtprop_drate_valid_ = true;
+  fbbr_hybrid_rtprop_drate_source_cruise_id_ =
+      static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+  fbbr_hybrid_rtprop_drate_source_time_ = source_time;
+  adaptive_baseline_low_ = delivery_rate;
+  adaptive_baseline_low_valid_ = true;
+  fbbr_hybrid_baseline_low_source_time_ = source_time;
+}
+
+void FBBRSender::PublishHybridSrttLow(TimeDelta rtprop,
+                                      QuicTime source_time,
+                                      bool from_probe_rtt) {
+  if (rtprop.IsZero() || rtprop.IsInfinite() ||
+      source_time == QuicTime::Zero()) {
+    return;
+  }
+  if (fbbr_hybrid_srtt_low_valid_ &&
+      source_time <= fbbr_hybrid_srtt_low_source_time_) {
+    return;
+  }
+  fbbr_hybrid_srtt_low_valid_ = true;
+  fbbr_hybrid_srtt_low_ = rtprop;
+  fbbr_hybrid_srtt_low_source_time_ = source_time;
+  model_.ForceUpdateMinRtt(rtprop, source_time);
+  current_cruise_rtprop_updated_ = true;
+  QUIC_DVLOG(2) << "FBBR-Hybrid: srtt_low/RTprop refreshed from "
+                << (from_probe_rtt ? "ProbeRTT" : "Cruise")
+                << " to " << rtprop << " @ " << source_time;
+}
+
+void FBBRSender::CancelHybridStableObservation() {
+  fbbr_hybrid_stable_observation_source_ =
+      HybridStableObservationSource::kNone;
+  fbbr_hybrid_stable_observation_start_ = QuicTime::Zero();
+  fbbr_hybrid_stable_observation_round_done_ = false;
+  fbbr_hybrid_stable_observation_min_rtt_ = TimeDelta::Infinite();
+  fbbr_hybrid_stable_rate_samples_bps_.clear();
+  fbbr_hybrid_stable_post_round_rate_samples_bps_.clear();
+}
+
+void FBBRSender::ResetHybridLowerBoundSearch() {
+  fbbr_hybrid_lower_bound_search_active_ = false;
+  fbbr_hybrid_lower_bound_search_baseline_ = QuicBandwidth::Zero();
+  fbbr_hybrid_lower_bound_search_bdp_ = 0;
+  CancelHybridStableObservation();
+}
+
+void FBBRSender::MaybeFinishHybridStableObservation(QuicTime now,
+                                                     bool force_finish) {
+  const HybridStableObservationSource source =
+      fbbr_hybrid_stable_observation_source_;
+  if (source == HybridStableObservationSource::kNone ||
+      now == QuicTime::Zero()) {
+    return;
+  }
+  const bool duration_done = now >= fbbr_hybrid_stable_observation_start_ +
+      TimeDelta::FromMilliseconds(kFbbrHybridStableObservationDurationMs);
+  if (!force_finish &&
+      (!duration_done || !fbbr_hybrid_stable_observation_round_done_)) {
+    return;
+  }
+
+  const TimeDelta observed_rtprop =
+      fbbr_hybrid_stable_observation_min_rtt_;
+  const QuicBandwidth observed_rate = ComputeHybridStableDeliveryRate(
+      fbbr_hybrid_stable_post_round_rate_samples_bps_,
+      fbbr_hybrid_stable_rate_samples_bps_);
+  const bool observed_rtprop_valid = !observed_rtprop.IsZero() &&
+      !observed_rtprop.IsInfinite();
+  if (source == HybridStableObservationSource::kCruiseFallback &&
+      (!observed_rtprop_valid || observed_rate.IsZero())) {
+    // Do not abandon a cross-Cruise platform just because the first eligible
+    // completion event did not carry both halves of the paired observation.
+    return;
+  }
+  const bool prior_srtt_low_valid = fbbr_hybrid_srtt_low_valid_;
+  const TimeDelta prior_srtt_low = fbbr_hybrid_srtt_low_;
+  CancelHybridStableObservation();
+
+  if (observed_rtprop_valid) {
+    PublishHybridSrttLow(observed_rtprop, now,
+                         source == HybridStableObservationSource::kProbeRtt);
+  }
+  if (source == HybridStableObservationSource::kProbeRtt) {
+    const bool probe_found_lower_rtprop = prior_srtt_low_valid &&
+        !observed_rtprop.IsZero() && !observed_rtprop.IsInfinite() &&
+        prior_srtt_low > observed_rtprop;
+    if (observed_rtprop_valid && !observed_rate.IsZero() &&
+        (!adaptive_baseline_low_valid_ ||
+         !fbbr_hybrid_rtprop_drate_valid_ || probe_found_lower_rtprop)) {
+      PublishHybridLowerBound(observed_rate, now);
+    }
+  } else if (!observed_rtprop.IsZero() &&
+             !observed_rtprop.IsInfinite() &&
+             !observed_rate.IsZero()) {
+    // Cruise fallback is a transaction: only a completed 200ms + one-round
+    // low-flight platform may publish both RTprop and its paired DRate.
+    PublishHybridLowerBound(observed_rate, now);
+  }
+  if (adaptive_baseline_low_valid_ && fbbr_hybrid_rtprop_drate_valid_) {
+    ResetHybridLowerBoundSearch();
+  }
+}
+
 void FBBRSender::OnCongestionEventStarted(
     const Bbr2CongestionEvent& congestion_event) {
   // PROBE_UP and the reference BBR-R logic judge the entry flight before the
   // ACK/loss event that triggers the phase transition.
   latest_congestion_event_prior_inflight_ =
       congestion_event.prior_bytes_in_flight;
-  if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
+  latest_congestion_event_prior_inflight_valid_ = true;
+  latest_congestion_event_inflight_ = congestion_event.bytes_in_flight;
+  latest_congestion_event_inflight_valid_ = true;
+  bool stable_observation_started_this_event = false;
+  if (IsFbbrHybrid() && mode_ == Bbr2Mode::PROBE_RTT) {
+    const Bbr2ProbeRttMode::DebugState probe_state =
+        ExportDebugState().probe_rtt;
+    if (probe_state.exit_time != QuicTime::Zero() &&
+        fbbr_hybrid_stable_observation_source_ !=
+            HybridStableObservationSource::kProbeRtt) {
+      StartHybridStableObservation(
+          HybridStableObservationSource::kProbeRtt,
+          probe_state.exit_time - Params().probe_rtt_duration);
+      stable_observation_started_this_event = true;
+    }
+  } else if (IsFbbrHybrid() &&
+             fbbr_hybrid_lower_bound_search_active_ &&
+             fbbr_hybrid_stable_observation_source_ ==
+                 HybridStableObservationSource::kNone &&
+             IsBelowHalfBdp(congestion_event.bytes_in_flight,
+                            fbbr_hybrid_lower_bound_search_bdp_)) {
+    StartHybridStableObservation(
+        HybridStableObservationSource::kCruiseFallback,
+        congestion_event.event_time);
+    model_.RestartRoundEarly();
+    stable_observation_started_this_event = true;
+  }
+  if (!stable_observation_started_this_event) {
+    ObserveHybridStableSample(congestion_event);
+  }
+  if (!IsFbbrHybrid() && in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
       GetCurrentProbeBwPhase() ==
           Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
       model_.MinRtt() != cruise_rtprop_at_entry_) {
@@ -3503,6 +4201,8 @@ const char* FBBRSender::PacingBaseSourceName(
       return "TRUSTED_BW";
     case FBBRPacingBaseSource::kWaveformCruiseBaseline:
       return "WAVEFORM_CRUISE_BASELINE";
+    case FBBRPacingBaseSource::kHybridLowerBoundSearch:
+      return "HYBRID_LOWER_BOUND_SEARCH";
     default:
       return "NATIVE_BBR";
   }
@@ -3790,6 +4490,7 @@ void FBBRSender::OnCongestionEvent(
   for (const auto& ack : acked_packets) {
     acked_bytes += ack.bytes_acked;
   }
+  const Bbr2Mode mode_before_event = mode_;
 
   // FBBR and FBBR-adaptive share this path. Keep the ACK-rate sample raw for
   // waveform analysis, but remove the currently estimated positive waveform
@@ -3806,6 +4507,33 @@ void FBBRSender::OnCongestionEvent(
                                 event_time,
                                 acked_packets,
                                 lost_packets);
+
+  if (IsFbbrHybrid()) {
+    if (mode_before_event != Bbr2Mode::PROBE_RTT &&
+        mode_ == Bbr2Mode::PROBE_RTT &&
+        fbbr_hybrid_stable_observation_source_ ==
+            HybridStableObservationSource::kCruiseFallback) {
+      // Native ProbeRTT is the stronger measurement transaction.  Its cwnd
+      // cap takes over from an unfinished Cruise fallback platform.
+      CancelHybridStableObservation();
+    }
+    if (mode_ == Bbr2Mode::PROBE_RTT &&
+        fbbr_hybrid_stable_observation_source_ ==
+            HybridStableObservationSource::kNone) {
+      const Bbr2ProbeRttMode::DebugState probe_state =
+          ExportDebugState().probe_rtt;
+      if (probe_state.exit_time != QuicTime::Zero()) {
+        StartHybridStableObservation(
+            HybridStableObservationSource::kProbeRtt,
+            probe_state.exit_time - Params().probe_rtt_duration);
+      }
+    }
+    const bool probe_rtt_just_finished =
+        mode_before_event == Bbr2Mode::PROBE_RTT &&
+        mode_ != Bbr2Mode::PROBE_RTT;
+    MaybeFinishHybridStableObservation(event_time,
+                                       probe_rtt_just_finished);
+  }
 
   if (mode_ != Bbr2Mode::PROBE_BW) {
     ClearTrustedBw("non_probe_bw");
@@ -3900,12 +4628,22 @@ QuicBandwidth FBBRSender::PacingRate(
       IsCruisePhase(phase) && in_cruise_ &&
       waveform_cruise_state_ != WaveformCruiseState::kDisabled &&
       !current_injection_baseline_bw_.IsZero();
+  const bool use_hybrid_search_cap = IsFbbrHybrid() &&
+      fbbr_hybrid_stable_observation_source_ ==
+          HybridStableObservationSource::kCruiseFallback &&
+      !fbbr_hybrid_lower_bound_search_baseline_.IsZero() &&
+      !use_waveform_cruise_baseline;
 
   if (use_waveform_cruise_baseline) {
     pacing_base_bw = current_injection_baseline_bw_;
     pacing_base_source =
         FBBRPacingBaseSource::kWaveformCruiseBaseline;
     trusted_bw_application_phase_ = "CRUISE";
+  } else if (use_hybrid_search_cap) {
+    pacing_base_bw = fbbr_hybrid_lower_bound_search_baseline_;
+    pacing_base_source =
+        FBBRPacingBaseSource::kHybridLowerBoundSearch;
+    trusted_bw_application_phase_ = "HYBRID_SEARCH";
   } else if (use_trusted_bw) {
     pacing_base_bw = trusted_bw_;
     pacing_base_source = FBBRPacingBaseSource::kTrustedBw;
@@ -3918,6 +4656,9 @@ QuicBandwidth FBBRSender::PacingRate(
   if (use_waveform_cruise_baseline) {
     current_probe_bw_phase_gain_ = 1.0;
     baseline_pacing = current_injection_baseline_bw_;
+  } else if (use_hybrid_search_cap) {
+    baseline_pacing = std::min(
+        native_pacing, fbbr_hybrid_lower_bound_search_baseline_);
   } else if (use_trusted_bw) {
     baseline_pacing =
         static_cast<float>(phase_gain) * pacing_base_bw;
@@ -3958,7 +4699,7 @@ QuicBandwidth FBBRSender::PacingRate(
   const QuicBandwidth final_pacing =
       QuicBandwidth::FromBitsPerSecond(static_cast<uint64_t>(final_bps));
   const QuicBandwidth returned_pacing =
-      (!should_oscillate && !use_trusted_bw &&
+      (!should_oscillate && !use_trusted_bw && !use_hybrid_search_cap &&
        !use_waveform_cruise_baseline)
           ? native_pacing
           : final_pacing;
@@ -4042,7 +4783,9 @@ FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
     const FbbrHybridRegimeFeatures& features,
     const FbbrRegimeContext& context) {
   FbbrHybridDecision decision;
-  auto decide = [&decision](WaveformClassification classification,
+  auto finalize = [](FbbrHybridDecision value) { return value; };
+  auto decide = [&decision, &finalize](
+                            WaveformClassification classification,
                             const char* rule,
                             bool update_max_rtt,
                             bool refresh_rtprop,
@@ -4052,7 +4795,11 @@ FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
     decision.update_max_rtt = update_max_rtt;
     decision.refresh_rtprop = refresh_rtprop;
     decision.update_rtprop_drate = update_rtprop_drate;
-    return decision;
+    // Keep bound updates tied to explicit rule flags so fallback rules such
+    // as N12/N16 cannot silently invent a bound.
+    decision.update_baseline_up = update_max_rtt;
+    decision.update_baseline_low = update_rtprop_drate;
+    return finalize(decision);
   };
   auto max_exceeded = [&]() {
     return features.srtt_stats_valid && context.max_rtt_valid &&
@@ -4064,11 +4811,43 @@ FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
         std::isfinite(features.srtt_min_ms) &&
         features.srtt_min_ms < context.rtprop_ms;
   };
+  auto fallback_overload_signal = [&](bool* valid) {
+    const bool srtt_threshold_valid = features.srtt_stats_valid &&
+        context.max_rtt_valid && context.rtprop_valid &&
+        std::isfinite(features.srtt_mean_ms) &&
+        features.srtt_mean_ms > 0.0 &&
+        std::isfinite(context.max_rtt_ms) &&
+        std::isfinite(context.rtprop_ms) &&
+        context.max_rtt_ms >= context.rtprop_ms &&
+        context.rtprop_ms > 0.0;
+    const bool inflight_threshold_valid =
+        features.inflight_bdp_valid && features.bdp_bytes > 0;
+    *valid = srtt_threshold_valid || inflight_threshold_valid;
+    if (srtt_threshold_valid) {
+      const double threshold_ms =
+          context.rtprop_ms + (context.max_rtt_ms - context.rtprop_ms) / 4.0;
+      if (features.srtt_mean_ms > threshold_ms) {
+        return true;
+      }
+    }
+    return inflight_threshold_valid &&
+           IsAtLeastElevenTenthsBdp(features.inflight_bytes,
+                                    features.bdp_bytes);
+  };
 
-  switch (features.selected_clip_case) {
+  // A horizontal cut is meaningful only as a clipped part of an otherwise
+  // observable SRTT oscillation. A single positive or negative half-cycle
+  // still counts as ordinary SRTT wave activity; raw line evidence without
+  // that activity must use the no-cut fallback tree, where the
+  // existing retry mechanism can increase the sender-rate excitation.
+  const SrttClipCase effective_clip_case =
+      features.srtt.wave.input_valid && features.srtt.wave.has_wave
+          ? features.selected_clip_case
+          : SrttClipCase::kNone;
+  switch (effective_clip_case) {
     case SrttClipCase::kU1PositiveShoulder:
       if (features.drate.periodic == PeriodicSimilarityResult::kInvalidInput) {
-        return decision;
+        return finalize(decision);
       }
       return features.drate.periodic == PeriodicSimilarityResult::kMatch
           ? decide(WaveformClassification::kFullLoad, "N01",
@@ -4077,7 +4856,7 @@ FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
                    true, false, false);
     case SrttClipCase::kU2LongTopLine:
       if (features.drate.periodic == PeriodicSimilarityResult::kInvalidInput) {
-        return decision;
+        return finalize(decision);
       }
       return features.drate.periodic == PeriodicSimilarityResult::kMatch
           ? decide(WaveformClassification::kFullLoad, "N03",
@@ -4088,65 +4867,71 @@ FBBRSender::FbbrHybridDecision FBBRSender::ClassifyFbbrHybridRegime(
       return decide(WaveformClassification::kOverload, "N05",
                     true, false, false);
     case SrttClipCase::kL1NegativeShoulder:
-      if (!features.drate.wave.input_valid) {
-        return decision;
-      }
-      if (features.drate.wave.has_wave) {
-        return decide(WaveformClassification::kUnderload, "N06",
-                      false, true, true);
-      }
-      if (max_exceeded()) {
-        return decide(WaveformClassification::kOverload, "N07",
-                      false, false, false);
-      }
-      if (min_below_rtprop()) {
-        return decide(WaveformClassification::kUnderload, "N08",
-                      false, false, false);
-      }
-      return decide(WaveformClassification::kFullLoad, "N09",
+      return decide(WaveformClassification::kFullLoad, "N06",
                     false, false, false);
     case SrttClipCase::kL2LongBottomLine:
-      return decide(WaveformClassification::kUnderload, "N10",
-                    false, true, true);
+      if (!features.drate.wave.input_valid) {
+        return finalize(decision);
+      }
+      if (features.drate.wave.has_wave) {
+        return decide(WaveformClassification::kUnderload, "N07",
+                      false, true, true);
+      }
+      return decide(WaveformClassification::kFullLoad, "N08",
+                    false, false, false);
     case SrttClipCase::kL3RepeatedBottomClip:
-      return decide(WaveformClassification::kUnderload, "N11",
-                    false, true, true);
+      return decide(WaveformClassification::kUnderload, "N09",
+                    false, false, true);
     case SrttClipCase::kNone:
       break;
   }
 
   if (!features.srtt.wave.input_valid) {
-    return decision;
+    return finalize(decision);
   }
   if (features.srtt.wave.has_wave) {
     if (max_exceeded()) {
-      return decide(WaveformClassification::kOverload, "N12",
-                    false, false, false);
+      return decide(WaveformClassification::kOverload, "N10",
+                    true, false, false);
     }
     if (min_below_rtprop()) {
-      return decide(WaveformClassification::kUnderload, "N13",
-                    false, false, false);
+      return decide(WaveformClassification::kUnderload, "N11",
+                    false, true, true);
     }
-    return decide(WaveformClassification::kFullLoad, "N14",
-                  false, false, false);
+    bool threshold_valid = false;
+    const bool overload =
+        fallback_overload_signal(&threshold_valid);
+    if (!threshold_valid) {
+      return finalize(decision);
+    }
+    return decide(overload ? WaveformClassification::kOverload
+                           : WaveformClassification::kFullLoad,
+                  "N12", false, false, false);
   }
-  if (!features.drate.wave.input_valid) {
-    return decision;
+  if (features.drate.periodic == PeriodicSimilarityResult::kInvalidInput) {
+    return finalize(decision);
   }
-  if (features.drate.wave.has_wave) {
-    return decide(WaveformClassification::kUnderload, "N15",
+  if (features.drate.periodic == PeriodicSimilarityResult::kMatch) {
+    return decide(WaveformClassification::kUnderload, "N13",
                   false, false, false);
   }
   if (max_exceeded()) {
-    return decide(WaveformClassification::kOverload, "N16",
-                  false, false, false);
+    return decide(WaveformClassification::kOverload, "N14",
+                  true, false, false);
   }
   if (min_below_rtprop()) {
-    return decide(WaveformClassification::kUnderload, "N17",
-                  false, false, false);
+    return decide(WaveformClassification::kUnderload, "N15",
+                  false, true, true);
   }
-  return decide(WaveformClassification::kFullLoad, "N18",
-                false, false, false);
+  bool threshold_valid = false;
+  const bool overload =
+      fallback_overload_signal(&threshold_valid);
+  if (!threshold_valid) {
+    return finalize(decision);
+  }
+  return decide(overload ? WaveformClassification::kOverload
+                         : WaveformClassification::kFullLoad,
+                "N16", false, false, false);
 }
 
 FBBRSender::FbbrHybridActuatorResult
@@ -4155,6 +4940,11 @@ FBBRSender::ComputeFbbrHybridInjectionBaseline(
     double mindrate_bps,
     double maxdrate_bps,
     double meandrate_bps,
+    bool baseline_low_valid,
+    double baseline_low_bps,
+    bool baseline_up_valid,
+    double baseline_up_bps,
+    double current_baseline_bps,
     bool rtprop_drate_valid,
     double rtprop_drate_bps,
     double midpoint_trigger_ratio,
@@ -4176,19 +4966,44 @@ FBBRSender::ComputeFbbrHybridInjectionBaseline(
   result.reference_gap_bps = reference_valid
       ? maxdrate_bps - rtprop_drate_bps
       : 0.0;
-  result.midpoint_triggered = reference_valid &&
+  const bool midpoint_eligible = reference_valid &&
       result.swing_bps > midpoint_trigger_ratio * result.reference_gap_bps;
   const double midpoint = mindrate_bps + result.swing_bps / 2.0;
+  result.bracket_valid = baseline_low_valid && baseline_up_valid &&
+      std::isfinite(baseline_low_bps) && baseline_low_bps > 0.0 &&
+      std::isfinite(baseline_up_bps) &&
+      baseline_up_bps > baseline_low_bps;
   if (classification == WaveformClassification::kFullLoad) {
-    result.next_baseline_bps = meandrate_bps;
-    result.update_probed_bw = true;
-    result.probed_bw_bps = meandrate_bps;
+    result.update_trusted_bw = true;
+    result.trusted_bw_bps = meandrate_bps;
+    result.valid = true;
+    return result;
   } else if (classification == WaveformClassification::kUnderload) {
-    result.next_baseline_bps = result.midpoint_triggered
-        ? midpoint : maxdrate_bps;
+    result.update_baseline = true;
+    result.bracket_target_bps = result.bracket_valid
+        ? baseline_low_bps + (baseline_up_bps - baseline_low_bps) / 2.0
+        : 0.0;
+    result.bracket_triggered = result.bracket_valid &&
+        std::isfinite(current_baseline_bps) &&
+        current_baseline_bps < result.bracket_target_bps;
+    result.midpoint_triggered = !result.bracket_triggered &&
+        midpoint_eligible;
+    result.next_baseline_bps = result.bracket_triggered
+        ? result.bracket_target_bps
+        : (result.midpoint_triggered ? midpoint : maxdrate_bps);
   } else {
-    result.next_baseline_bps = result.midpoint_triggered
-        ? midpoint : mindrate_bps;
+    result.update_baseline = true;
+    result.bracket_target_bps = result.bracket_valid
+        ? baseline_low_bps + (baseline_up_bps - baseline_low_bps) / 4.0
+        : 0.0;
+    result.bracket_triggered = result.bracket_valid &&
+        std::isfinite(current_baseline_bps) &&
+        current_baseline_bps > result.bracket_target_bps;
+    result.midpoint_triggered = !result.bracket_triggered &&
+        midpoint_eligible;
+    result.next_baseline_bps = result.bracket_triggered
+        ? result.bracket_target_bps
+        : (result.midpoint_triggered ? midpoint : mindrate_bps);
   }
   result.next_baseline_bps =
       std::max(minimum_rate_bps, result.next_baseline_bps);
@@ -4242,7 +5057,8 @@ FBBRSender::DetectOrdinaryWaveActivity(
     const std::vector<double>& values,
     const std::vector<bool>& valid,
     double sample_step_s,
-    double period_s) const {
+    double period_s,
+    bool allow_half_cycle_wave) const {
   WaveActivityFeatures result;
   if (values.size() != valid.size() || sample_step_s <= 0.0 ||
       period_s <= 0.0) {
@@ -4324,14 +5140,25 @@ FBBRSender::DetectOrdinaryWaveActivity(
             waveform_activity_min_active_step_ratio_ * valid_steps)));
     const bool active_ok = active_steps >= required_steps;
     const double path = up_change + down_change;
-    const bool return_ok = amplitude > 0.0 &&
+    const bool full_wave_ok = amplitude > 0.0 &&
         up_change >= waveform_activity_min_directional_change_ratio_ *
                          amplitude &&
         down_change >= waveform_activity_min_directional_change_ratio_ *
                            amplitude &&
         path >= waveform_activity_min_significant_path_ratio_ * amplitude &&
         reversals >= waveform_activity_min_slope_reversals_;
-    const bool has_wave = amplitude_ok && active_ok && return_ok;
+    const bool positive_half_ok = allow_half_cycle_wave && amplitude > 0.0 &&
+        up_change >= waveform_activity_min_directional_change_ratio_ *
+                         amplitude &&
+        down_change <= 0.25 * amplitude &&
+        path >= waveform_activity_min_significant_path_ratio_ * amplitude;
+    const bool negative_half_ok = allow_half_cycle_wave && amplitude > 0.0 &&
+        down_change >= waveform_activity_min_directional_change_ratio_ *
+                           amplitude &&
+        up_change <= 0.25 * amplitude &&
+        path >= waveform_activity_min_significant_path_ratio_ * amplitude;
+    const bool has_wave = amplitude_ok && active_ok &&
+        (full_wave_ok || positive_half_ok || negative_half_ok);
     if (has_wave) {
       result.has_wave = true;
       result.active_cycle_mask |= static_cast<uint8_t>(1u << cycle);
@@ -7426,6 +8253,30 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
             fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
       : 0.0;
   result.rtprop_drate_after_bps = result.rtprop_drate_before_bps;
+  result.hybrid_baseline_low_before_valid = adaptive_baseline_low_valid_;
+  result.hybrid_baseline_low_before_bps = adaptive_baseline_low_valid_
+      ? static_cast<double>(adaptive_baseline_low_.ToBitsPerSecond()) : 0.0;
+  result.hybrid_baseline_low_after_valid =
+      result.hybrid_baseline_low_before_valid;
+  result.hybrid_baseline_low_after_bps =
+      result.hybrid_baseline_low_before_bps;
+  result.hybrid_baseline_up_before_valid = adaptive_baseline_up_valid_;
+  result.hybrid_baseline_up_before_bps = adaptive_baseline_up_valid_
+      ? static_cast<double>(adaptive_baseline_up_.ToBitsPerSecond()) : 0.0;
+  result.hybrid_baseline_up_after_valid =
+      result.hybrid_baseline_up_before_valid;
+  result.hybrid_baseline_up_after_bps =
+      result.hybrid_baseline_up_before_bps;
+  const TimeDelta current_rtprop = fbbr_hybrid_srtt_low_valid_
+      ? fbbr_hybrid_srtt_low_ : model_.MinRtt();
+  result.hybrid_srtt_low_rtprop_valid = !current_rtprop.IsZero();
+  result.hybrid_srtt_low_rtprop_ms =
+      result.hybrid_srtt_low_rtprop_valid
+          ? static_cast<double>(current_rtprop.ToMicroseconds()) / 1000.0
+          : 0.0;
+  result.hybrid_srtt_max_max_rtt_valid = fbbr_hybrid_max_rtt_valid_;
+  result.hybrid_srtt_max_max_rtt_ms = fbbr_hybrid_max_rtt_valid_
+      ? fbbr_hybrid_max_rtt_ms_ : 0.0;
   if (window_end <= window_start || cruise_modulation_freq_hz_ <= 0.0 ||
       probe_epoch_rtt_.IsZero()) {
     result.invalid_reason = "invalid_hybrid_window";
@@ -7522,7 +8373,12 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
   features.estimated_srate_period_s = srate_period_s;
   features.srtt_stats_valid = result.srtt_stats_valid;
   features.srtt_min_ms = result.srtt_min_ms;
+  features.srtt_mean_ms = result.srtt_mean_ms;
   features.srtt_max_ms = result.srtt_max_ms;
+  features.inflight_bytes = latest_congestion_event_inflight_;
+  features.bdp_bytes = model_.BDP();
+  features.inflight_bdp_valid =
+      latest_congestion_event_inflight_valid_ && features.bdp_bytes > 0;
   features.drate_stats_valid = result.delivery_rate_stats_valid;
   features.mindrate_bps = result.delivery_rate_min_bps;
   features.maxdrate_bps = result.delivery_rate_max_bps;
@@ -7629,7 +8485,7 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
       &drate_clean_valid, &drate_periodic_valid, &drate_continuous);
 
   features.srtt.wave = DetectOrdinaryWaveActivity(
-      srtt.values, srtt_clean_valid, sample_step_s, period_s);
+      srtt.values, srtt_clean_valid, sample_step_s, period_s, true);
   // PDF: DRate ordinary-wave detection always uses the raw valid view.
   features.drate.wave = DetectOrdinaryWaveActivity(
       drate.values, drate.valid, sample_step_s, period_s);
@@ -7773,6 +8629,22 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
       features.drate.longest_bottom_line_ratio_of_period >
           fbbr_regime_long_bottom_horizontal_duration_ratio_;
 
+  const bool srtt_horizontal_candidate =
+      features.srtt.positive_shoulder || features.srtt.long_top_line ||
+      features.srtt.repeated_top_clip || features.srtt.negative_shoulder ||
+      features.srtt.long_bottom_line || features.srtt.repeated_bottom_clip;
+  const bool srtt_wave_coexists =
+      features.srtt.wave.input_valid && features.srtt.wave.has_wave;
+  if (srtt_horizontal_candidate && !srtt_wave_coexists) {
+    features.clip_candidate_rejected_to_wave_fallback = true;
+    features.srtt.positive_shoulder = false;
+    features.srtt.negative_shoulder = false;
+    features.srtt.long_top_line = false;
+    features.srtt.long_bottom_line = false;
+    features.srtt.repeated_top_clip = false;
+    features.srtt.repeated_bottom_clip = false;
+  }
+
   const bool srtt_upper_verified = features.srtt.positive_shoulder ||
       features.srtt.long_top_line || features.srtt.repeated_top_clip;
   const bool srtt_lower_verified = features.srtt.negative_shoulder ||
@@ -7814,12 +8686,12 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
   } else {
     features.fallback_entered = true;
     features.clip_candidate_rejected_to_wave_fallback =
+        features.clip_candidate_rejected_to_wave_fallback ||
         features.srtt.suspected_top_candidate ||
         features.srtt.suspected_bottom_candidate;
   }
   features.input_valid = result.srtt_input_valid &&
                          result.drate_input_valid;
-  const TimeDelta current_rtprop = model_.MinRtt();
   FbbrRegimeContext context;
   context.max_rtt_valid = fbbr_hybrid_max_rtt_valid_;
   context.max_rtt_ms = fbbr_hybrid_max_rtt_ms_;
@@ -8472,8 +9344,13 @@ void FBBRSender::RefreshRtpropFromTrueBottomClip(
               (time - QuicTime::Zero()).ToMicroseconds()) /
               1000000.0;
   };
-  const TimeDelta rtprop_before = model_.MinRtt();
-  const QuicTime timestamp_before = model_.MinRttTimestamp();
+  const TimeDelta rtprop_before =
+      IsFbbrHybrid() && fbbr_hybrid_srtt_low_valid_
+          ? fbbr_hybrid_srtt_low_ : model_.MinRtt();
+  const QuicTime timestamp_before =
+      IsFbbrHybrid() && fbbr_hybrid_srtt_low_valid_
+          ? fbbr_hybrid_srtt_low_source_time_
+          : model_.MinRttTimestamp();
   analysis->true_bottom_clip_rtprop_before_ms = rtprop_before.IsZero()
       ? 0.0
       : static_cast<double>(rtprop_before.ToMicroseconds()) / 1000.0;
@@ -8490,9 +9367,13 @@ void FBBRSender::RefreshRtpropFromTrueBottomClip(
              std::llround(analysis->srtt_min_ms * 1000.0)));
   const TimeDelta bottom_min_rtt =
       TimeDelta::FromMicroseconds(minimum_rtt_us);
-  model_.ForceUpdateMinRtt(bottom_min_rtt, now);
-  if (in_cruise_) {
-    current_cruise_rtprop_updated_ = true;
+  if (IsFbbrHybrid()) {
+    PublishHybridSrttLow(bottom_min_rtt, now, false);
+  } else {
+    model_.ForceUpdateMinRtt(bottom_min_rtt, now);
+    if (in_cruise_) {
+      current_cruise_rtprop_updated_ = true;
+    }
   }
 
   analysis->true_bottom_clip_rtprop_refresh_applied = true;
@@ -8591,14 +9472,34 @@ void FBBRSender::UpdateFbbrHybridRetryState(
 void FBBRSender::ApplyFbbrHybridRegimeStateUpdates(
     WaveformWindowAnalysis* trace_analysis,
     QuicTime now) {
-  if (trace_analysis == nullptr ||
-      trace_analysis->classification_suppressed_for_retry ||
-      trace_analysis->classification ==
-          WaveformClassification::kInconclusive) {
+  if (trace_analysis == nullptr) {
     return;
   }
   const FbbrHybridDecision& decision = trace_analysis->hybrid_decision;
-  if (decision.update_max_rtt && trace_analysis->srtt_stats_valid &&
+  const bool classification_usable =
+      !trace_analysis->classification_suppressed_for_retry &&
+      trace_analysis->classification !=
+          WaveformClassification::kInconclusive;
+  const bool rtprop_min_lower_bound_usable =
+      decision.update_lower_bound_from_rtprop_min &&
+      trace_analysis->delivery_rate_stats_valid &&
+      std::isfinite(trace_analysis->delivery_rate_min_bps) &&
+      trace_analysis->delivery_rate_min_bps > 0.0;
+  const bool low_inflight_lower_bound_usable =
+      decision.update_lower_bound_from_low_inflight &&
+      trace_analysis->delivery_rate_stats_valid &&
+      std::isfinite(trace_analysis->delivery_rate_min_bps) &&
+      trace_analysis->delivery_rate_min_bps > 0.0 &&
+      trace_analysis->srtt_stats_valid &&
+      std::isfinite(trace_analysis->srtt_min_ms) &&
+      trace_analysis->srtt_min_ms > 0.0;
+  const bool independent_lower_bound_usable =
+      rtprop_min_lower_bound_usable || low_inflight_lower_bound_usable;
+  if (!classification_usable && !independent_lower_bound_usable) {
+    return;
+  }
+  if (classification_usable && decision.update_max_rtt &&
+      trace_analysis->srtt_stats_valid &&
       std::isfinite(trace_analysis->srtt_max_ms) &&
       trace_analysis->srtt_max_ms > 0.0) {
     fbbr_hybrid_max_rtt_valid_ = true;
@@ -8606,16 +9507,18 @@ void FBBRSender::ApplyFbbrHybridRegimeStateUpdates(
     fbbr_hybrid_max_rtt_source_cruise_id_ =
         static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
   }
-  if (decision.refresh_rtprop && trace_analysis->srtt_stats_valid &&
+  if (((classification_usable && decision.refresh_rtprop) ||
+       low_inflight_lower_bound_usable) &&
+      trace_analysis->srtt_stats_valid &&
       std::isfinite(trace_analysis->srtt_min_ms) &&
       trace_analysis->srtt_min_ms > 0.0 && now != QuicTime::Zero()) {
     const TimeDelta refreshed = TimeDelta::FromMicroseconds(
         std::max<int64_t>(1, static_cast<int64_t>(std::llround(
             trace_analysis->srtt_min_ms * 1000.0))));
-    model_.ForceUpdateMinRtt(refreshed, now);
-    current_cruise_rtprop_updated_ = true;
+    PublishHybridSrttLow(refreshed, now, false);
   }
-  if (decision.update_rtprop_drate &&
+  if ((classification_usable ? decision.update_rtprop_drate
+                             : independent_lower_bound_usable) &&
       trace_analysis->delivery_rate_stats_valid &&
       std::isfinite(trace_analysis->delivery_rate_min_bps) &&
       trace_analysis->delivery_rate_min_bps > 0.0) {
@@ -8625,6 +9528,29 @@ void FBBRSender::ApplyFbbrHybridRegimeStateUpdates(
         !fbbr_hybrid_rtprop_drate_.IsZero();
     fbbr_hybrid_rtprop_drate_source_cruise_id_ =
         static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
+    fbbr_hybrid_rtprop_drate_source_time_ = now;
+  }
+  if ((classification_usable ? decision.update_baseline_low
+                             : independent_lower_bound_usable) &&
+      trace_analysis->delivery_rate_stats_valid &&
+      std::isfinite(trace_analysis->delivery_rate_min_bps) &&
+      trace_analysis->delivery_rate_min_bps > 0.0) {
+    // adaptive_change.pdf: verified lower-cut Regime I windows source the
+    // Adaptive lower bracket from the window's minimum delivery rate.
+    adaptive_baseline_low_ =
+        BandwidthFromBps(trace_analysis->delivery_rate_min_bps);
+    adaptive_baseline_low_valid_ = !adaptive_baseline_low_.IsZero();
+    fbbr_hybrid_baseline_low_source_time_ = now;
+  }
+  if (classification_usable && decision.update_baseline_up &&
+      trace_analysis->delivery_rate_stats_valid &&
+      std::isfinite(trace_analysis->delivery_rate_max_bps) &&
+      trace_analysis->delivery_rate_max_bps > 0.0) {
+    // adaptive_change.pdf: verified upper-cut Regime III windows source the
+    // Adaptive upper bracket from the window's maximum delivery rate.
+    adaptive_baseline_up_ =
+        BandwidthFromBps(trace_analysis->delivery_rate_max_bps);
+    adaptive_baseline_up_valid_ = !adaptive_baseline_up_.IsZero();
   }
   trace_analysis->max_rtt_after_ms = fbbr_hybrid_max_rtt_valid_
       ? fbbr_hybrid_max_rtt_ms_ : 0.0;
@@ -8633,6 +9559,16 @@ void FBBRSender::ApplyFbbrHybridRegimeStateUpdates(
           ? static_cast<double>(
                 fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
           : 0.0;
+  trace_analysis->hybrid_baseline_low_after_valid =
+      adaptive_baseline_low_valid_;
+  trace_analysis->hybrid_baseline_low_after_bps =
+      adaptive_baseline_low_valid_
+          ? static_cast<double>(adaptive_baseline_low_.ToBitsPerSecond())
+          : 0.0;
+  trace_analysis->hybrid_baseline_up_after_valid =
+      adaptive_baseline_up_valid_;
+  trace_analysis->hybrid_baseline_up_after_bps = adaptive_baseline_up_valid_
+      ? static_cast<double>(adaptive_baseline_up_.ToBitsPerSecond()) : 0.0;
 }
 
 void FBBRSender::ApplyFbbrHybridClassification(
@@ -8644,8 +9580,114 @@ void FBBRSender::ApplyFbbrHybridClassification(
   const double amplitude_before_bps =
       static_cast<double>(current_probe_amplitude_bps_);
   ++waveform_decision_count_;
+  const bool lower_bound_search_required =
+      fbbr_hybrid_lower_bound_search_active_ &&
+      (!adaptive_baseline_low_valid_ ||
+       !fbbr_hybrid_rtprop_drate_valid_);
+  if (lower_bound_search_required) {
+    const bool rtprop_contact =
+        trace_analysis.hybrid_srtt_low_rtprop_valid &&
+        trace_analysis.srtt_stats_valid &&
+        std::isfinite(trace_analysis.srtt_min_ms) &&
+        trace_analysis.srtt_min_ms > 0.0 &&
+        std::isfinite(trace_analysis.hybrid_srtt_low_rtprop_ms) &&
+        trace_analysis.hybrid_srtt_low_rtprop_ms > 0.0 &&
+        std::abs(trace_analysis.srtt_min_ms -
+                 trace_analysis.hybrid_srtt_low_rtprop_ms) <= 1e-9;
+    const bool observation_usable =
+        trace_analysis.delivery_rate_stats_valid &&
+        std::isfinite(trace_analysis.delivery_rate_min_bps) &&
+        trace_analysis.delivery_rate_min_bps > 0.0;
+    if (rtprop_contact && observation_usable) {
+      // The search stop observation is intentionally transactional: suppress
+      // all regime side effects, then publish exactly the lower-bound state
+      // requested by the stop condition.
+      trace_analysis.classification_suppressed_for_retry = true;
+      trace_analysis.state_updates_suppressed_for_retry = true;
+      trace_analysis.hybrid_decision = FbbrHybridDecision();
+      trace_analysis.hybrid_decision
+          .update_lower_bound_from_rtprop_min = true;
+      ApplyFbbrHybridRegimeStateUpdates(&trace_analysis, now);
+      ResetHybridLowerBoundSearch();
+      waveform_last_action_ =
+          "HYBRID_LOWER_BOUND_SEARCH_RTPROP_CONTACT";
+      waveform_last_invalid_reason_ = "none";
+      waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+      waveform_last_raw_delta_bw_bps_ = 0.0;
+      waveform_last_applied_delta_bw_bps_ = 0.0;
+      EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                              baseline_before_bps, amplitude_before_bps);
+      ScheduleWaveformCollectionAfterSettle(now, false);
+      return;
+    }
+
+    if (fbbr_hybrid_stable_observation_source_ ==
+        HybridStableObservationSource::kCruiseFallback) {
+      // Once low flight is reached, keep the same pacing platform across
+      // Cruise/phase boundaries.  RTprop and DRate are published only by the
+      // completed 200ms + one packet-timed-round transaction.
+      waveform_last_action_ = "HYBRID_LOWER_BOUND_STABLE_PLATFORM_HOLD";
+      waveform_last_invalid_reason_ = "none";
+      waveform_last_delta_source_ = kWaveformDeltaSourceNone;
+      waveform_last_raw_delta_bw_bps_ = 0.0;
+      waveform_last_applied_delta_bw_bps_ = 0.0;
+      EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                              baseline_before_bps, amplitude_before_bps);
+      return;
+    }
+
+    const double next_baseline_bps =
+        ComputeFbbrHybridLowerBoundSearchBaseline(
+            baseline_before_bps,
+            static_cast<double>(minimum_pacing_rate_bps_));
+    current_injection_baseline_bw_ =
+        BandwidthFromBps(next_baseline_bps);
+    fbbr_hybrid_lower_bound_search_baseline_ =
+        current_injection_baseline_bw_;
+    const double retained_ratio = baseline_before_bps > 0.0
+        ? next_baseline_bps / baseline_before_bps : 1.0;
+    if (current_probe_amplitude_bps_ > 0 && retained_ratio < 1.0) {
+      current_probe_amplitude_bps_ = std::max<uint64_t>(
+          1, static_cast<uint64_t>(std::llround(
+                 retained_ratio * current_probe_amplitude_bps_)));
+    }
+    if (fbbr_hybrid_lower_bound_search_step_count_ <
+        std::numeric_limits<uint32_t>::max()) {
+      ++fbbr_hybrid_lower_bound_search_step_count_;
+    }
+    if (std::abs(next_baseline_bps - baseline_before_bps) > 0.5 &&
+        baseline_adjustment_count_ < std::numeric_limits<uint32_t>::max()) {
+      ++baseline_adjustment_count_;
+    }
+    trace_analysis.delta_source = "HYBRID_BBR_R_0P8_DRAIN";
+    trace_analysis.raw_delta_bw_bps =
+        std::max(0.0, baseline_before_bps - next_baseline_bps);
+    trace_analysis.applied_delta_bw_bps =
+        trace_analysis.raw_delta_bw_bps;
+    waveform_last_delta_source_ = trace_analysis.delta_source;
+    waveform_last_raw_delta_bw_bps_ =
+        trace_analysis.raw_delta_bw_bps;
+    waveform_last_applied_delta_bw_bps_ =
+        trace_analysis.applied_delta_bw_bps;
+    waveform_last_action_ = "HYBRID_LOWER_BOUND_SEARCH_REDUCE_0P8";
+    waveform_last_invalid_reason_ = "none";
+    ScheduleWaveformCollectionAfterSettle(now, false);
+    EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
+                            baseline_before_bps, amplitude_before_bps);
+    return;
+  }
+  if (fbbr_hybrid_lower_bound_search_active_) {
+    ResetHybridLowerBoundSearch();
+  }
   if (analysis.classification == WaveformClassification::kInconclusive) {
-    waveform_last_action_ = "HYBRID_RETRY_WITHOUT_SIDE_EFFECTS";
+    // The RTprop-contact lower-bound observation is independent of waveform
+    // classification.  Apply only that explicitly marked side effect before
+    // retrying; the state-update helper still suppresses all other effects.
+    ApplyFbbrHybridRegimeStateUpdates(&trace_analysis, now);
+    waveform_last_action_ =
+        analysis.hybrid_decision.update_lower_bound_from_rtprop_min
+            ? "HYBRID_RTPROP_MIN_UPDATE_AND_RETRY"
+            : "HYBRID_RETRY_WITHOUT_SIDE_EFFECTS";
     waveform_last_invalid_reason_ = analysis.invalid_reason;
     waveform_last_delta_source_ = kWaveformDeltaSourceNone;
     waveform_last_raw_delta_bw_bps_ = 0.0;
@@ -8666,7 +9708,7 @@ void FBBRSender::ApplyFbbrHybridClassification(
   }
   // Work out the post-decision DRate reference without committing it yet.
   // The hybrid pipeline is transactional: an invalid actuator input must not
-  // partially update MaxRTT, RTprop, or RTpropDRate.
+  // partially update MaxRTT, RTprop, RTpropDRate, or baseline_low/up.
   const bool prospective_rtprop_drate_valid =
       analysis.hybrid_decision.update_rtprop_drate
           ? (std::isfinite(analysis.delivery_rate_min_bps) &&
@@ -8679,12 +9721,41 @@ void FBBRSender::ApplyFbbrHybridClassification(
                  ? static_cast<double>(
                        fbbr_hybrid_rtprop_drate_.ToBitsPerSecond())
                  : 0.0);
+  const bool prospective_baseline_low_valid =
+      analysis.hybrid_decision.update_baseline_low
+          ? (std::isfinite(analysis.delivery_rate_min_bps) &&
+             analysis.delivery_rate_min_bps > 0.0)
+          : adaptive_baseline_low_valid_;
+  const double prospective_baseline_low_bps =
+      analysis.hybrid_decision.update_baseline_low
+          ? analysis.delivery_rate_min_bps
+          : (adaptive_baseline_low_valid_
+                 ? static_cast<double>(
+                       adaptive_baseline_low_.ToBitsPerSecond())
+                 : 0.0);
+  const bool prospective_baseline_up_valid =
+      analysis.hybrid_decision.update_baseline_up
+          ? (std::isfinite(analysis.delivery_rate_max_bps) &&
+             analysis.delivery_rate_max_bps > 0.0)
+          : adaptive_baseline_up_valid_;
+  const double prospective_baseline_up_bps =
+      analysis.hybrid_decision.update_baseline_up
+          ? analysis.delivery_rate_max_bps
+          : (adaptive_baseline_up_valid_
+                 ? static_cast<double>(
+                       adaptive_baseline_up_.ToBitsPerSecond())
+                 : 0.0);
   const FbbrHybridActuatorResult actuator =
       ComputeFbbrHybridInjectionBaseline(
           analysis.classification,
           analysis.delivery_rate_min_bps,
           analysis.delivery_rate_max_bps,
           analysis.delivery_rate_mean_bps,
+          prospective_baseline_low_valid,
+          prospective_baseline_low_bps,
+          prospective_baseline_up_valid,
+          prospective_baseline_up_bps,
+          baseline_before_bps,
           prospective_rtprop_drate_valid,
           prospective_rtprop_drate_bps,
           fbbr_regime_actuator_midpoint_trigger_ratio_,
@@ -8699,40 +9770,51 @@ void FBBRSender::ApplyFbbrHybridClassification(
     return;
   }
   ApplyFbbrHybridRegimeStateUpdates(&trace_analysis, now);
-  current_injection_baseline_bw_ =
-      BandwidthFromBps(actuator.next_baseline_bps);
-  const double baseline_delta =
-      std::abs(actuator.next_baseline_bps - baseline_before_bps);
+  if (actuator.update_baseline) {
+    current_injection_baseline_bw_ =
+        BandwidthFromBps(actuator.next_baseline_bps);
+  }
+  const double baseline_delta = actuator.update_baseline
+      ? std::abs(actuator.next_baseline_bps - baseline_before_bps)
+      : 0.0;
   if (baseline_delta > 0.5 &&
       baseline_adjustment_count_ < std::numeric_limits<uint32_t>::max()) {
     ++baseline_adjustment_count_;
   }
-  if (actuator.update_probed_bw) {
+  if (actuator.update_trusted_bw) {
     fbbr_hybrid_regime_ii_seen_this_cruise_ = true;
-    fbbr_hybrid_probed_bw_ =
-        BandwidthFromBps(actuator.probed_bw_bps);
-    fbbr_latest_trusted_bw_ = fbbr_hybrid_probed_bw_;
-    fbbr_smoothed_trusted_bw_ = fbbr_hybrid_probed_bw_;
-    fbbr_smoothed_trusted_bw_valid_ = !fbbr_hybrid_probed_bw_.IsZero();
-    trusted_bw_candidate_ = fbbr_hybrid_probed_bw_;
+    fbbr_hybrid_trusted_bw_ =
+        BandwidthFromBps(actuator.trusted_bw_bps);
+    fbbr_latest_trusted_bw_ = fbbr_hybrid_trusted_bw_;
+    fbbr_smoothed_trusted_bw_ = fbbr_hybrid_trusted_bw_;
+    fbbr_smoothed_trusted_bw_valid_ = !fbbr_hybrid_trusted_bw_.IsZero();
+    trusted_bw_candidate_ = fbbr_hybrid_trusted_bw_;
     trusted_bw_candidate_source_ = kTrustedBwSourceFbbrWindowMean;
     trusted_baseline_locked_ = !trusted_bw_candidate_.IsZero();
     if (trusted_baseline_locked_) {
       ++trusted_bw_candidate_update_count_;
     }
-    trace_analysis.latest_trusted_bw_bps = actuator.probed_bw_bps;
-    trace_analysis.smoothed_trusted_bw_bps = actuator.probed_bw_bps;
+    trace_analysis.latest_trusted_bw_bps = actuator.trusted_bw_bps;
+    trace_analysis.smoothed_trusted_bw_bps = actuator.trusted_bw_bps;
   }
   trace_analysis.hybrid_swing_bps = actuator.swing_bps;
   trace_analysis.hybrid_reference_gap_bps = actuator.reference_gap_bps;
+  trace_analysis.hybrid_bracket_valid = actuator.bracket_valid;
+  trace_analysis.hybrid_bracket_target_bps = actuator.bracket_target_bps;
+  trace_analysis.hybrid_bracket_triggered = actuator.bracket_triggered;
   trace_analysis.hybrid_midpoint_triggered =
       actuator.midpoint_triggered;
-  trace_analysis.delta_source = analysis.classification ==
-          WaveformClassification::kFullLoad
-      ? kWaveformDeltaSourceFbbrTrustedBw
-      : (analysis.classification == WaveformClassification::kUnderload
-          ? kWaveformDeltaSourceFbbrWindowMaximum
-          : kWaveformDeltaSourceFbbrWindowMinimum);
+  trace_analysis.delta_source =
+      !actuator.update_baseline
+          ? kWaveformDeltaSourceNone
+          : actuator.bracket_triggered
+              ? kWaveformDeltaSourceHybridAdaptiveBracket
+              : actuator.midpoint_triggered
+                  ? kWaveformDeltaSourceHybridRtpropDrateMidpoint
+                  : (analysis.classification ==
+                             WaveformClassification::kUnderload
+                         ? kWaveformDeltaSourceFbbrWindowMaximum
+                         : kWaveformDeltaSourceFbbrWindowMinimum);
   trace_analysis.raw_delta_bw_bps = baseline_delta;
   trace_analysis.applied_delta_bw_bps = baseline_delta;
   waveform_last_delta_source_ = trace_analysis.delta_source;
@@ -8740,16 +9822,20 @@ void FBBRSender::ApplyFbbrHybridClassification(
   waveform_last_applied_delta_bw_bps_ = baseline_delta;
   waveform_last_invalid_reason_ = "none";
   if (analysis.classification == WaveformClassification::kFullLoad) {
-    waveform_last_action_ = "HYBRID_REGIME_II_USE_TIME_MEAN";
+    waveform_last_action_ = "HYBRID_REGIME_II_UPDATE_TRUSTED_BW";
   } else if (analysis.classification == WaveformClassification::kUnderload) {
     underload_located_ = true;
-    waveform_last_action_ = actuator.midpoint_triggered
-        ? "HYBRID_REGIME_I_USE_MIDPOINT"
-        : "HYBRID_REGIME_I_USE_MAXIMUM";
+    waveform_last_action_ = actuator.bracket_triggered
+        ? "HYBRID_REGIME_I_USE_ADAPTIVE_HALF_GAP"
+        : actuator.midpoint_triggered
+            ? "HYBRID_REGIME_I_USE_RTPROP_DRATE_MIDPOINT"
+            : "HYBRID_REGIME_I_USE_MAXIMUM";
   } else {
-    waveform_last_action_ = actuator.midpoint_triggered
-        ? "HYBRID_REGIME_III_USE_MIDPOINT"
-        : "HYBRID_REGIME_III_USE_MINIMUM";
+    waveform_last_action_ = actuator.bracket_triggered
+        ? "HYBRID_REGIME_III_USE_ADAPTIVE_QUARTER_GAP"
+        : actuator.midpoint_triggered
+            ? "HYBRID_REGIME_III_USE_RTPROP_DRATE_MIDPOINT"
+            : "HYBRID_REGIME_III_USE_MINIMUM";
   }
   ScheduleWaveformCollectionAfterSettle(now, false);
   EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
@@ -9660,14 +10746,32 @@ void FBBRSender::EmitWaveformSearchTrace(
       << analysis.hybrid_features.drate.response_srate_period_error_ratio << ","
       << analysis.hybrid_features.srtt.edge_mask_ratio << ","
       << analysis.hybrid_features.drate.edge_mask_ratio << ","
+      << (analysis.hybrid_features.inflight_bdp_valid ? "true" : "false") << ","
+      << analysis.hybrid_features.inflight_bytes << ","
+      << analysis.hybrid_features.bdp_bytes << ","
       << (fbbr_hybrid_max_rtt_valid_ ? "true" : "false") << ","
       << analysis.max_rtt_before_ms << ","
       << analysis.max_rtt_after_ms << ","
       << (fbbr_hybrid_rtprop_drate_valid_ ? "true" : "false") << ","
       << analysis.rtprop_drate_before_bps << ","
       << analysis.rtprop_drate_after_bps << ","
+      << (analysis.hybrid_baseline_low_before_valid ? "true" : "false") << ","
+      << analysis.hybrid_baseline_low_before_bps << ","
+      << (analysis.hybrid_baseline_low_after_valid ? "true" : "false") << ","
+      << analysis.hybrid_baseline_low_after_bps << ","
+      << (analysis.hybrid_baseline_up_before_valid ? "true" : "false") << ","
+      << analysis.hybrid_baseline_up_before_bps << ","
+      << (analysis.hybrid_baseline_up_after_valid ? "true" : "false") << ","
+      << analysis.hybrid_baseline_up_after_bps << ","
+      << (analysis.hybrid_srtt_low_rtprop_valid ? "true" : "false") << ","
+      << analysis.hybrid_srtt_low_rtprop_ms << ","
+      << (analysis.hybrid_srtt_max_max_rtt_valid ? "true" : "false") << ","
+      << analysis.hybrid_srtt_max_max_rtt_ms << ","
       << analysis.hybrid_swing_bps << ","
       << analysis.hybrid_reference_gap_bps << ","
+      << (analysis.hybrid_bracket_valid ? "true" : "false") << ","
+      << analysis.hybrid_bracket_target_bps << ","
+      << (analysis.hybrid_bracket_triggered ? "true" : "false") << ","
       << (analysis.hybrid_midpoint_triggered ? "true" : "false") << ","
       << analysis.window_first_cycle_id << ","
       << analysis.window_second_cycle_id << ","
@@ -10575,7 +11679,25 @@ void FBBRSender::EmitCruiseSummaryTrace(QuicTime now) const {
 		      << latest_waveform_underload_srtt_mean_ms_ << ","
 		      << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
 		      << ","
-		      << latest_waveform_overload_srtt_mean_ms_;
+		      << latest_waveform_overload_srtt_mean_ms_ << ","
+		      << (IsFbbrHybrid() && adaptive_baseline_low_valid_
+		              ? "true" : "false") << ","
+		      << (IsFbbrHybrid() && adaptive_baseline_low_valid_
+		              ? adaptive_baseline_low_.ToBitsPerSecond() : 0) << ","
+		      << (IsFbbrHybrid() && adaptive_baseline_up_valid_
+		              ? "true" : "false") << ","
+		      << (IsFbbrHybrid() && adaptive_baseline_up_valid_
+		              ? adaptive_baseline_up_.ToBitsPerSecond() : 0) << ","
+		      << (IsFbbrHybrid() && fbbr_hybrid_srtt_low_valid_
+		              ? "true" : "false") << ","
+		      << (IsFbbrHybrid() && fbbr_hybrid_srtt_low_valid_
+		              ? static_cast<double>(fbbr_hybrid_srtt_low_.ToMicroseconds()) /
+		                    1000.0
+		              : 0.0) << ","
+		      << (IsFbbrHybrid() && fbbr_hybrid_max_rtt_valid_
+		              ? "true" : "false") << ","
+		      << (IsFbbrHybrid() && fbbr_hybrid_max_rtt_valid_
+		              ? fbbr_hybrid_max_rtt_ms_ : 0.0);
   cruise_load_trace_cb_(cruise_start_s,
                         cruise_end_s,
                         0.0,

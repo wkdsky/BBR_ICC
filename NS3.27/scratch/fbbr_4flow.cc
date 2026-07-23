@@ -1028,7 +1028,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
 	    cmd.AddValue("waveformCruiseSelfTest", "Run deterministic time-waveform CRUISE self-test and exit", g_waveform_cruise_self_test);
 	    cmd.AddValue("fbbrBaselineSelfTest", "Run FBBR window-baseline self-test and exit", g_fbbr_baseline_self_test);
-	    cmd.AddValue("fbbrHybridSelfTest", "Run FBBR-hybrid N01-N18 and boundary self-test and exit", g_fbbr_hybrid_self_test);
+	    cmd.AddValue("fbbrHybridSelfTest", "Run FBBR-hybrid N01-N16 and boundary self-test and exit", g_fbbr_hybrid_self_test);
 	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_fbbr_config.cruise_detector_mode);
 	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_fbbr_config.waveform_recv_signal_mode);
 	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_fbbr_config.waveform_initial_settle_rtt_mult);

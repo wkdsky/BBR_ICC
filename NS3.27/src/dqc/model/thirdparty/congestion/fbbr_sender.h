@@ -55,6 +55,7 @@ enum class FBBRPacingBaseSource {
   kNativeBbr,
   kTrustedBw,
   kWaveformCruiseBaseline,
+  kHybridLowerBoundSearch,
 };
 
 enum class FBBRCruiseDetectorMode {
@@ -701,7 +702,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool fallback_entered = false;
     bool srtt_stats_valid = false;
     double srtt_min_ms = 0.0;
+    double srtt_mean_ms = 0.0;
     double srtt_max_ms = 0.0;
+    bool inflight_bdp_valid = false;
+    QuicByteCount inflight_bytes = 0;
+    QuicByteCount bdp_bytes = 0;
     bool drate_stats_valid = false;
     double mindrate_bps = 0.0;
     double maxdrate_bps = 0.0;
@@ -723,15 +728,29 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool update_max_rtt = false;
     bool refresh_rtprop = false;
     bool update_rtprop_drate = false;
+    // Lower-bound search transaction flag. The N01-N16 classifier does not
+    // set it; search code may set it after detecting an RTprop contact.
+    bool update_lower_bound_from_rtprop_min = false;
+    // Third-Cruise lower-bound search fallback: once flight drains below
+    // half a BDP, the window minimum supplies the lower rate bound and the
+    // window minimum SRTT becomes the new RTprop.
+    bool update_lower_bound_from_low_inflight = false;
+    // Only explicit upper/lower-bound rules set these. N12/N16 never do.
+    bool update_baseline_low = false;
+    bool update_baseline_up = false;
   };
 
   struct FbbrHybridActuatorResult {
     bool valid = false;
+    bool update_baseline = false;
     double next_baseline_bps = 0.0;
-    bool update_probed_bw = false;
-    double probed_bw_bps = 0.0;
+    bool update_trusted_bw = false;
+    double trusted_bw_bps = 0.0;
     double swing_bps = 0.0;
     double reference_gap_bps = 0.0;
+    bool bracket_valid = false;
+    double bracket_target_bps = 0.0;
+    bool bracket_triggered = false;
     bool midpoint_triggered = false;
   };
 
@@ -828,8 +847,23 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double max_rtt_after_ms = 0.0;
     double rtprop_drate_before_bps = 0.0;
     double rtprop_drate_after_bps = 0.0;
+    bool hybrid_baseline_low_before_valid = false;
+    double hybrid_baseline_low_before_bps = 0.0;
+    bool hybrid_baseline_low_after_valid = false;
+    double hybrid_baseline_low_after_bps = 0.0;
+    bool hybrid_baseline_up_before_valid = false;
+    double hybrid_baseline_up_before_bps = 0.0;
+    bool hybrid_baseline_up_after_valid = false;
+    double hybrid_baseline_up_after_bps = 0.0;
+    bool hybrid_srtt_low_rtprop_valid = false;
+    double hybrid_srtt_low_rtprop_ms = 0.0;
+    bool hybrid_srtt_max_max_rtt_valid = false;
+    double hybrid_srtt_max_max_rtt_ms = 0.0;
     double hybrid_swing_bps = 0.0;
     double hybrid_reference_gap_bps = 0.0;
+    bool hybrid_bracket_valid = false;
+    double hybrid_bracket_target_bps = 0.0;
+    bool hybrid_bracket_triggered = false;
     bool hybrid_midpoint_triggered = false;
     PlateauDetectionResult plateau;
     CycleCompletenessResult drate_without_middle_completeness;
@@ -867,6 +901,33 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                            float cwnd_gain) const override;
   void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event) override;
+  QuicByteCount AdjustProbeRttInflightTarget(
+      QuicByteCount native_target) const override;
+  bool RequireProbeRttRound() const override { return IsFbbrHybrid(); }
+  bool MarkProbeRttAppLimited() const override { return IsFbbrHybrid(); }
+
+  enum class HybridStableObservationSource {
+    kNone,
+    kProbeRtt,
+    kCruiseFallback,
+  };
+  void InitializeHybridSrttLowFromModel();
+  QuicByteCount HybridTrustedBdp() const;
+  void StartHybridStableObservation(HybridStableObservationSource source,
+                                    QuicTime stable_start);
+  void ObserveHybridStableSample(
+      const Bbr2CongestionEvent& congestion_event);
+  void MaybeFinishHybridStableObservation(QuicTime now, bool force_finish);
+  void CancelHybridStableObservation();
+  void ResetHybridLowerBoundSearch();
+  void PublishHybridLowerBound(QuicBandwidth delivery_rate,
+                               QuicTime source_time);
+  void PublishHybridSrttLow(TimeDelta rtprop,
+                            QuicTime source_time,
+                            bool from_probe_rtt);
+  static QuicBandwidth ComputeHybridStableDeliveryRate(
+      const std::vector<int64_t>& post_round_samples_bps,
+      const std::vector<int64_t>& all_samples_bps);
 
   Bbr2ProbeBwMode::CyclePhase GetCurrentProbeBwPhase() const;
   bool BaseShouldOscillate() const;
@@ -1190,6 +1251,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       double mindrate_bps,
       double maxdrate_bps,
       double meandrate_bps,
+      bool baseline_low_valid,
+      double baseline_low_bps,
+      bool baseline_up_valid,
+      double baseline_up_bps,
+      double current_baseline_bps,
       bool rtprop_drate_valid,
       double rtprop_drate_bps,
       double midpoint_trigger_ratio,
@@ -1198,7 +1264,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       const std::vector<double>& values,
       const std::vector<bool>& valid,
       double sample_step_s,
-      double period_s) const;
+      double period_s,
+      bool allow_half_cycle_wave = false) const;
   std::vector<ContinuousHorizontalEvidence>
   DetectContinuousHorizontalSegments(
       const std::vector<double>& values,
@@ -1290,6 +1357,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool rtprop_probe_down_active_;
   TimeDelta cruise_rtprop_at_entry_;
   QuicByteCount latest_congestion_event_prior_inflight_;
+  bool latest_congestion_event_prior_inflight_valid_;
+  QuicByteCount latest_congestion_event_inflight_;
+  bool latest_congestion_event_inflight_valid_;
   double cruise_modulation_freq_hz_;
   QuicTime cruise_start_time_;
   QuicTime next_cruise_window_start_;
@@ -1350,6 +1420,21 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool fbbr_hybrid_rtprop_drate_valid_;
   QuicBandwidth fbbr_hybrid_rtprop_drate_;
   uint64_t fbbr_hybrid_rtprop_drate_source_cruise_id_;
+  QuicTime fbbr_hybrid_rtprop_drate_source_time_;
+  QuicTime fbbr_hybrid_baseline_low_source_time_;
+  bool fbbr_hybrid_srtt_low_valid_;
+  TimeDelta fbbr_hybrid_srtt_low_;
+  QuicTime fbbr_hybrid_srtt_low_source_time_;
+  bool fbbr_hybrid_lower_bound_search_active_;
+  QuicBandwidth fbbr_hybrid_lower_bound_search_baseline_;
+  uint32_t fbbr_hybrid_lower_bound_search_step_count_;
+  QuicByteCount fbbr_hybrid_lower_bound_search_bdp_;
+  HybridStableObservationSource fbbr_hybrid_stable_observation_source_;
+  QuicTime fbbr_hybrid_stable_observation_start_;
+  bool fbbr_hybrid_stable_observation_round_done_;
+  TimeDelta fbbr_hybrid_stable_observation_min_rtt_;
+  std::vector<int64_t> fbbr_hybrid_stable_rate_samples_bps_;
+  std::vector<int64_t> fbbr_hybrid_stable_post_round_rate_samples_bps_;
   uint8_t fbbr_hybrid_srtt_no_wave_streak_;
   uint8_t fbbr_hybrid_drate_no_wave_streak_;
   bool fbbr_hybrid_wave_fidelity_enhancement_active_;
@@ -1357,7 +1442,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   uint64_t fbbr_hybrid_last_counted_window_second_cycle_id_;
   uint32_t fbbr_hybrid_rolling_retry_count_;
   bool fbbr_hybrid_regime_ii_seen_this_cruise_;
-  QuicBandwidth fbbr_hybrid_probed_bw_;
+  QuicBandwidth fbbr_hybrid_trusted_bw_;
   uint32_t floor_clip_confirmation_count_;
   int waveform_last_clip_direction_;
   uint32_t waveform_decision_count_;

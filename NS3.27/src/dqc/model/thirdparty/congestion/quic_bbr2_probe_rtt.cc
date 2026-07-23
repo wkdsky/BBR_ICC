@@ -13,6 +13,7 @@ void Bbr2ProbeRttMode::Enter(QuicTime /*now*/,
   model_->set_pacing_gain(1.0);
   model_->set_cwnd_gain(1.0);
   exit_time_ = QuicTime::Zero();
+  round_done_ = false;
 }
 
 Bbr2Mode Bbr2ProbeRttMode::OnCongestionEvent(
@@ -21,11 +22,21 @@ Bbr2Mode Bbr2ProbeRttMode::OnCongestionEvent(
     const AckedPacketVector& /*acked_packets*/,
     const LostPacketVector& /*lost_packets*/,
     const Bbr2CongestionEvent& congestion_event) {
+  if (sender_->MarkProbeRttAppLimited()) {
+    // Current BBR deliberately prevents its controlled low-rate ProbeRTT
+    // samples from lowering the path-capacity model.  FBBR-Hybrid consumes
+    // those samples only in a separate RTpropDRate estimator.
+    model_->OnApplicationLimited();
+  }
   if (exit_time_ == QuicTime::Zero()) {
     if (congestion_event.bytes_in_flight <= InflightTarget() ||
         congestion_event.bytes_in_flight <=
             sender_->GetMinimumCongestionWindow()) {
       exit_time_ = congestion_event.event_time + Params().probe_rtt_duration;
+      round_done_ = !sender_->RequireProbeRttRound();
+      if (!round_done_) {
+        model_->RestartRoundEarly();
+      }
       QUIC_DVLOG(2) << sender_ << " PROBE_RTT exit time set to " << exit_time_
                     << ". bytes_inflight:" << congestion_event.bytes_in_flight
                     << ", inflight_target:" << InflightTarget()
@@ -36,13 +47,19 @@ Bbr2Mode Bbr2ProbeRttMode::OnCongestionEvent(
     return Bbr2Mode::PROBE_RTT;
   }
 
-  return congestion_event.event_time > exit_time_ ? Bbr2Mode::PROBE_BW
-                                                  : Bbr2Mode::PROBE_RTT;
+  if (sender_->RequireProbeRttRound() &&
+      congestion_event.end_of_round_trip) {
+    round_done_ = true;
+  }
+  return congestion_event.event_time > exit_time_ && round_done_
+             ? Bbr2Mode::PROBE_BW
+             : Bbr2Mode::PROBE_RTT;
 }
 
 QuicByteCount Bbr2ProbeRttMode::InflightTarget() const {
-  return model_->BDP(model_->MaxBandwidth(),
-                     Params().probe_rtt_inflight_target_bdp_fraction);
+  const QuicByteCount native_target = model_->BDP(
+      model_->MaxBandwidth(), Params().probe_rtt_inflight_target_bdp_fraction);
+  return sender_->AdjustProbeRttInflightTarget(native_target);
 }
 
 QuicLimits<QuicByteCount> Bbr2ProbeRttMode::GetCwndLimits() const {
@@ -54,7 +71,7 @@ QuicLimits<QuicByteCount> Bbr2ProbeRttMode::GetCwndLimits() const {
 Bbr2Mode Bbr2ProbeRttMode::OnExitQuiescence(
     QuicTime now,
     QuicTime /*quiescence_start_time*/) {
-  if (now > exit_time_) {
+  if (now > exit_time_ && round_done_) {
     return Bbr2Mode::PROBE_BW;
   }
   return Bbr2Mode::PROBE_RTT;
@@ -64,6 +81,7 @@ Bbr2ProbeRttMode::DebugState Bbr2ProbeRttMode::ExportDebugState() const {
   DebugState s;
   s.inflight_target = InflightTarget();
   s.exit_time = exit_time_;
+  s.round_done = round_done_;
   return s;
 }
 
@@ -71,6 +89,7 @@ std::ostream& operator<<(std::ostream& os,
                          const Bbr2ProbeRttMode::DebugState& state) {
   os << "[PROBE_RTT] inflight_target: " << state.inflight_target << "\n";
   os << "[PROBE_RTT] exit_time: " << state.exit_time << "\n";
+  os << "[PROBE_RTT] round_done: " << state.round_done << "\n";
   return os;
 }
 

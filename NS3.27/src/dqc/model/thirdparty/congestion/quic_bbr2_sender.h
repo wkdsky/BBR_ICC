@@ -129,6 +129,16 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   QuicByteCount GetTargetBytesInflight() const;
   bool IsProbeRttEnabled() const { return enable_probe_rtt_; }
 
+  // Optional ProbeRTT policy hooks.  Defaults preserve the native BBRv2
+  // behavior in this tree; experiments that need the current BBR ProbeRTT
+  // semantics can opt in without changing other congestion controllers.
+  virtual QuicByteCount AdjustProbeRttInflightTarget(
+      QuicByteCount native_target) const {
+    return native_target;
+  }
+  virtual bool RequireProbeRttRound() const { return false; }
+  virtual bool MarkProbeRttAppLimited() const { return false; }
+
   bool IsBandwidthOverestimateAvoidanceEnabled() const {
     return model_.IsBandwidthOverestimateAvoidanceEnabled();
   }

@@ -1,15 +1,20 @@
 /**
- * Open-loop triangle-probe experiment with a TCP CUBIC cross flow.
+ * Open-loop triangle-probe experiment with smooth paced background traffic.
  *
- * The active interval is split into three equal load regimes:
- *   Regime I:   180 Mbps probe baseline, no CUBIC cross traffic
- *   Regime II:  180 Mbps probe baseline plus a 220 Mbps CUBIC application
- *   Regime III: 520 Mbps probe baseline plus the CUBIC application
+ * The probe baseline rises linearly from 180 to about 293 Mbps through the
+ * first two Regimes, then follows a slope-continuous curve to 520 Mbps in
+ * Regime III.  The three equal Regimes are analysis windows rather than
+ * traffic-control steps.  A continuously active UDP background flow grows
+ * smoothly from zero to about 163 Mbps in Regime I, follows a smooth
+ * hump-shaped aggregate-load envelope in Regime II, then fades to zero under
+ * a roughly 402 Mbps aggregate-rate target in Regime III.  Its smoothly changing
+ * inverse-triangle component preserves a visible delivered-rate response
+ * while residual aggregate modulation drives the requested SRTT regimes.
  *
  * Probe target rate:
  *   triangle modulation: same waveform as FreqCCv3 CalculateOscillationOffset()
  *   modulation frequency: 5 Hz
- *   modulation peak amplitude: 80 Mbps
+ *   send-rate modulation: constant 200 Mbps peak-to-peak
  *
  * Topology:
  *   n0 ---- 400 Mbps, 20 ms one-way delay ---- n1
@@ -52,17 +57,30 @@ double g_buffer_bdp = 4.0;
 bool g_bdp_uses_rtt = true;
 
 double g_start_rate_mbps = 180.0;
+double g_regime_iii_start_rate_mbps = 293.333333;
 double g_end_rate_mbps = 520.0;
+double g_regime_iii_knee_fraction = 0.266667;
+double g_regime_iii_knee_rate_mbps = 465.0;
+double g_regime_iii_knee_slope_mbps_per_s = 40.0;
 double g_triangle_freq_hz = 5.0;
-double g_triangle_amp_mbps = 80.0;
+double g_triangle_amp_mbps = 100.0;
 
-double g_cubic_app_rate_mbps = 220.0;
-uint32_t g_cubic_packet_size_bytes = 1448;
+double g_cross_regime_i_rate_mbps = 163.333;
+double g_cross_regime_ii_control_start_mbps = 163.333;
+double g_cross_regime_ii_end_rate_mbps = 106.667;
+double g_cross_regime_ii_hump_mbps = 20.0;
+double g_cross_regime_i_antiphase_start_fraction = 0.75;
+double g_cross_regime_ii_antiphase_gain = 0.40;
+double g_cross_end_rate_mbps = 0.0;
+double g_cross_regime_iii_antiphase_gain = 0.40;
+double g_cross_regime_iii_transition_fraction = 0.10;
+double g_cross_regime_iii_target_aggregate_mbps = 402.0;
+uint32_t g_cross_packet_size_bytes = 1448;
 
 uint32_t g_packet_size_bytes = 1200;
 uint32_t g_flow_id = 1;
 uint16_t g_udp_port = 5000;
-uint16_t g_cubic_port = 5001;
+uint16_t g_cross_port = 5001;
 
 double g_trace_interval_ms = 10.0;
 std::string g_trace_path = "traces/open_loop_p2p_rate_ramp";
@@ -110,7 +128,11 @@ class OpenLoopRampSender : public Application
     void Configure(Address peer,
                    uint32_t packet_size_bytes,
                    double start_rate_mbps,
+                   double regime_iii_start_rate_mbps,
                    double end_rate_mbps,
+                   double regime_iii_knee_fraction,
+                   double regime_iii_knee_rate_mbps,
+                   double regime_iii_knee_slope_mbps_per_s,
                    double start_time_s,
                    double duration_s,
                    double triangle_freq_hz,
@@ -120,7 +142,13 @@ class OpenLoopRampSender : public Application
         m_peer = peer;
         m_packetSizeBytes = packet_size_bytes;
         m_startRateMbps = start_rate_mbps;
+        m_regimeIIIStartRateMbps = regime_iii_start_rate_mbps;
         m_endRateMbps = end_rate_mbps;
+        m_regimeIIIKneeFraction =
+            std::max(0.05, std::min(0.95, regime_iii_knee_fraction));
+        m_regimeIIIKneeRateMbps = regime_iii_knee_rate_mbps;
+        m_regimeIIIKneeSlopeMbpsPerS =
+            std::max(0.0, regime_iii_knee_slope_mbps_per_s);
         m_startTimeS = start_time_s;
         m_durationS = duration_s;
         m_triangleFreqHz = triangle_freq_hz;
@@ -143,6 +171,11 @@ class OpenLoopRampSender : public Application
         return m_startTimeS + m_durationS;
     }
 
+    double GetTriangleAmplitudeMbps() const
+    {
+        return m_triangleAmpMbps;
+    }
+
     double GetElapsedSeconds(double now_s) const
     {
         return std::max(0.0, now_s - m_startTimeS);
@@ -154,9 +187,64 @@ class OpenLoopRampSender : public Application
         {
             return 0.0;
         }
-        const double regime_duration_s = m_durationS / 3.0;
         const double elapsed_s = std::min(GetElapsedSeconds(now_s), m_durationS);
-        return elapsed_s < 2.0 * regime_duration_s ? m_startRateMbps : m_endRateMbps;
+        if (m_durationS <= 0.0)
+        {
+            return m_endRateMbps;
+        }
+
+        const double regime_duration_s = m_durationS / 3.0;
+        const double regime_iii_start_s = 2.0 * regime_duration_s;
+        if (elapsed_s <= regime_iii_start_s || regime_duration_s <= 0.0)
+        {
+            const double progress = elapsed_s / std::max(regime_iii_start_s, 1e-9);
+            return m_startRateMbps +
+                   (m_regimeIIIStartRateMbps - m_startRateMbps) * progress;
+        }
+
+        // Two slope-continuous cubic Hermite segments rapidly but smoothly
+        // finish the upper-clipping transition.  The knee is aligned with the
+        // desired right-hand visible-oscillation margin, while the long tail
+        // remains monotone and ends with zero slope.
+        const double x = std::min(1.0, (elapsed_s - regime_iii_start_s) / regime_duration_s);
+        const double pre_regime_slope_mbps_per_s =
+            (m_regimeIIIStartRateMbps - m_startRateMbps) /
+            std::max(regime_iii_start_s, 1e-9);
+        const auto hermite = [](double local_x,
+                                double start_value,
+                                double end_value,
+                                double start_tangent,
+                                double end_tangent) {
+            const double x2 = local_x * local_x;
+            const double x3 = x2 * local_x;
+            const double h00 = 2.0 * x3 - 3.0 * x2 + 1.0;
+            const double h10 = x3 - 2.0 * x2 + local_x;
+            const double h01 = -2.0 * x3 + 3.0 * x2;
+            const double h11 = x3 - x2;
+            return h00 * start_value + h10 * start_tangent +
+                   h01 * end_value + h11 * end_tangent;
+        };
+
+        if (x <= m_regimeIIIKneeFraction)
+        {
+            const double segment_fraction = m_regimeIIIKneeFraction;
+            const double local_x = x / segment_fraction;
+            const double segment_duration_s = regime_duration_s * segment_fraction;
+            return hermite(local_x,
+                           m_regimeIIIStartRateMbps,
+                           m_regimeIIIKneeRateMbps,
+                           pre_regime_slope_mbps_per_s * segment_duration_s,
+                           m_regimeIIIKneeSlopeMbpsPerS * segment_duration_s);
+        }
+
+        const double segment_fraction = 1.0 - m_regimeIIIKneeFraction;
+        const double local_x = (x - m_regimeIIIKneeFraction) / segment_fraction;
+        const double segment_duration_s = regime_duration_s * segment_fraction;
+        return hermite(local_x,
+                       m_regimeIIIKneeRateMbps,
+                       m_endRateMbps,
+                       m_regimeIIIKneeSlopeMbpsPerS * segment_duration_s,
+                       0.0);
     }
 
     double GetTriangleValueAt(double now_s) const
@@ -188,7 +276,8 @@ class OpenLoopRampSender : public Application
         {
             return 0.0;
         }
-        return ClampNonNegative(baseline_mbps + m_triangleAmpMbps * GetTriangleValueAt(now_s));
+        return ClampNonNegative(baseline_mbps +
+                                m_triangleAmpMbps * GetTriangleValueAt(now_s));
     }
 
   private:
@@ -270,10 +359,14 @@ class OpenLoopRampSender : public Application
 
     uint32_t m_packetSizeBytes{1200};
     double m_startRateMbps{100.0};
+    double m_regimeIIIStartRateMbps{293.333333};
     double m_endRateMbps{450.0};
+    double m_regimeIIIKneeFraction{0.266667};
+    double m_regimeIIIKneeRateMbps{465.0};
+    double m_regimeIIIKneeSlopeMbpsPerS{40.0};
     double m_durationS{30.0};
     double m_triangleFreqHz{5.0};
-    double m_triangleAmpMbps{80.0};
+    double m_triangleAmpMbps{100.0};
     uint32_t m_flowId{1};
 
     double m_startTimeS{0.0};
@@ -282,19 +375,252 @@ class OpenLoopRampSender : public Application
 
 NS_OBJECT_ENSURE_REGISTERED(OpenLoopRampSender);
 
+class SmoothCrossTrafficSender : public Application
+{
+  public:
+    static TypeId GetTypeId()
+    {
+        static TypeId tid = TypeId("ns3::SmoothCrossTrafficSender")
+                                .SetParent<Application>()
+                                .SetGroupName("Applications")
+                                .AddConstructor<SmoothCrossTrafficSender>();
+        return tid;
+    }
+
+    void Configure(Address peer,
+                   Ptr<OpenLoopRampSender> probe_sender,
+                   uint32_t packet_size_bytes,
+                   double regime_i_rate_mbps,
+                   double regime_ii_control_start_mbps,
+                   double regime_ii_end_rate_mbps,
+                   double regime_ii_hump_mbps,
+                   double regime_ii_antiphase_gain,
+                   double end_rate_mbps,
+                   double regime_iii_antiphase_gain,
+                   double regime_iii_transition_fraction,
+                   double regime_iii_target_aggregate_mbps,
+                   double data_start_time_s)
+    {
+        m_peer = peer;
+        m_probeSender = probe_sender;
+        m_packetSizeBytes = packet_size_bytes;
+        m_regimeIRateMbps = regime_i_rate_mbps;
+        m_regimeIIControlStartMbps = regime_ii_control_start_mbps;
+        m_regimeIIEndRateMbps = regime_ii_end_rate_mbps;
+        m_regimeIIHumpMbps = std::max(0.0, regime_ii_hump_mbps);
+        m_regimeIIAntiphaseGain = std::max(0.0, regime_ii_antiphase_gain);
+        m_endRateMbps = end_rate_mbps;
+        m_regimeIIIAntiphaseGain = std::max(0.0, regime_iii_antiphase_gain);
+        m_regimeIIITransitionFraction =
+            std::max(0.01, std::min(1.0, regime_iii_transition_fraction));
+        m_regimeIIITargetAggregateMbps = regime_iii_target_aggregate_mbps;
+        m_dataStartTimeS = data_start_time_s;
+    }
+
+    uint64_t GetTotalTxBytes() const
+    {
+        return m_totalTxBytes;
+    }
+
+    double GetTargetRateMbpsAt(double now_s) const
+    {
+        if (m_probeSender == nullptr)
+        {
+            return 0.0;
+        }
+        const double start_s = m_probeSender->GetStartTimeSeconds();
+        const double duration_s = m_probeSender->GetStopTimeSeconds() - start_s;
+        if (now_s < start_s || duration_s <= 0.0)
+        {
+            return 0.0;
+        }
+        const double elapsed_s = std::min(now_s - start_s, duration_s);
+        const double regime_duration_s = duration_s / 3.0;
+        double mean_rate_mbps = m_regimeIIEndRateMbps;
+        if (elapsed_s < regime_duration_s)
+        {
+            const double x = std::max(0.0, elapsed_s / regime_duration_s);
+            // A fourth-order terminal Hermite curve stays below the link
+            // threshold until the final Regime-I cycles while retaining zero
+            // slope at the 3 s boundary.  Thus every cycle before the boundary
+            // still touches the queue floor, but the first cycle after it does
+            // not.
+            const double x2 = x * x;
+            const double x4 = x2 * x2;
+            const double late_rise = x4 * (5.0 - 4.0 * x);
+            mean_rate_mbps = m_regimeIRateMbps * late_rise;
+
+            // Introduce the inverse component only as the bottleneck is first
+            // reached.  This keeps the delivered probe modulation constant
+            // while retaining a large aggregate triangle that drives SRTT.
+            const double transition_span = std::max(
+                0.01,
+                1.0 - g_cross_regime_i_antiphase_start_fraction);
+            const double antiphase_x = std::max(
+                0.0,
+                std::min(1.0,
+                         (x - g_cross_regime_i_antiphase_start_fraction) /
+                             transition_span));
+            const double antiphase_smoothstep =
+                antiphase_x * antiphase_x * (3.0 - 2.0 * antiphase_x);
+            const double probe_triangle_offset_mbps =
+                m_probeSender->GetTargetRateMbpsAt(now_s) -
+                m_probeSender->GetBaselineRateMbpsAt(now_s);
+            mean_rate_mbps -= m_regimeIIAntiphaseGain * antiphase_smoothstep *
+                              probe_triangle_offset_mbps;
+        }
+        else if (elapsed_s < 2.0 * regime_duration_s)
+        {
+            const double x = (elapsed_s - regime_duration_s) / regime_duration_s;
+            // The linear part exactly cancels the probe-baseline slope.  The
+            // sin^2 hump fills the 4-BDP queue with zero extra-load slope at
+            // both boundaries, avoiding the former kink at 6 s.
+            const double linear_control_rate_mbps =
+                m_regimeIIControlStartMbps +
+                (m_regimeIIEndRateMbps - m_regimeIIControlStartMbps) * x;
+            const double hump = std::sin(M_PI * x);
+            mean_rate_mbps = linear_control_rate_mbps +
+                             m_regimeIIHumpMbps * hump * hump;
+
+            const double probe_triangle_offset_mbps =
+                m_probeSender->GetTargetRateMbpsAt(now_s) -
+                m_probeSender->GetBaselineRateMbpsAt(now_s);
+            mean_rate_mbps -=
+                m_regimeIIAntiphaseGain * probe_triangle_offset_mbps;
+        }
+        else
+        {
+            const double x = (elapsed_s - 2.0 * regime_duration_s) / regime_duration_s;
+            const double join_x = std::min(1.0, x / m_regimeIIITransitionFraction);
+            const double join_smoothstep = join_x * join_x * (3.0 - 2.0 * join_x);
+            const double probe_baseline_mbps =
+                m_probeSender->GetBaselineRateMbpsAt(now_s);
+            const double controlled_rate_mbps = std::max(
+                m_endRateMbps,
+                m_regimeIIITargetAggregateMbps - probe_baseline_mbps);
+            mean_rate_mbps = m_regimeIIEndRateMbps +
+                             (controlled_rate_mbps - m_regimeIIEndRateMbps) *
+                                 join_smoothstep;
+
+            const double probe_triangle_offset_mbps =
+                m_probeSender->GetTargetRateMbpsAt(now_s) -
+                m_probeSender->GetBaselineRateMbpsAt(now_s);
+            double effective_antiphase_gain =
+                m_regimeIIAntiphaseGain +
+                (m_regimeIIIAntiphaseGain - m_regimeIIAntiphaseGain) *
+                    join_smoothstep;
+            const double maximum_inverse_offset_mbps =
+                std::abs(effective_antiphase_gain) *
+                m_probeSender->GetTriangleAmplitudeMbps();
+            if (maximum_inverse_offset_mbps > 0.0)
+            {
+                const double availability_scale =
+                    std::min(1.0, mean_rate_mbps / maximum_inverse_offset_mbps);
+                effective_antiphase_gain *= availability_scale;
+            }
+            mean_rate_mbps -= effective_antiphase_gain * probe_triangle_offset_mbps;
+        }
+        return ClampNonNegative(mean_rate_mbps);
+    }
+
+  private:
+    void StartApplication() override
+    {
+        m_running = true;
+        m_totalTxBytes = 0;
+        m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+        m_socket->Connect(m_peer);
+        const double delay_s = std::max(0.0, m_dataStartTimeS - Simulator::Now().GetSeconds());
+        m_sendEvent = Simulator::Schedule(Seconds(delay_s),
+                                          &SmoothCrossTrafficSender::SendPacket,
+                                          this);
+    }
+
+    void StopApplication() override
+    {
+        m_running = false;
+        if (m_sendEvent.IsRunning())
+        {
+            Simulator::Cancel(m_sendEvent);
+        }
+        if (m_socket != nullptr)
+        {
+            m_socket->Close();
+            m_socket = nullptr;
+        }
+    }
+
+    void SendPacket()
+    {
+        if (!m_running || m_socket == nullptr)
+        {
+            return;
+        }
+
+        const double rate_mbps = GetTargetRateMbpsAt(Simulator::Now().GetSeconds());
+        if (rate_mbps < 0.1)
+        {
+            m_sendEvent = Simulator::Schedule(MilliSeconds(1),
+                                               &SmoothCrossTrafficSender::SendPacket,
+                                               this);
+            return;
+        }
+
+        const int sent_bytes = m_socket->Send(Create<Packet>(m_packetSizeBytes));
+        if (sent_bytes > 0)
+        {
+            m_totalTxBytes += static_cast<uint64_t>(sent_bytes);
+        }
+
+        if (sent_bytes <= 0)
+        {
+            m_sendEvent = Simulator::Schedule(MicroSeconds(100),
+                                               &SmoothCrossTrafficSender::SendPacket,
+                                               this);
+            return;
+        }
+
+        const double interval_s =
+            static_cast<double>(m_packetSizeBytes) * 8.0 / (rate_mbps * 1000000.0);
+        m_sendEvent = Simulator::Schedule(Seconds(interval_s),
+                                           &SmoothCrossTrafficSender::SendPacket,
+                                           this);
+    }
+
+    Ptr<Socket> m_socket;
+    Ptr<OpenLoopRampSender> m_probeSender;
+    Address m_peer;
+    EventId m_sendEvent;
+    bool m_running{false};
+    uint32_t m_packetSizeBytes{1448};
+    double m_regimeIRateMbps{100.0};
+    double m_regimeIIControlStartMbps{138.0};
+    double m_regimeIIEndRateMbps{52.0};
+    double m_regimeIIHumpMbps{20.0};
+    double m_regimeIIAntiphaseGain{0.20};
+    double m_endRateMbps{40.0};
+    double m_regimeIIIAntiphaseGain{0.40};
+    double m_regimeIIITransitionFraction{0.10};
+    double m_regimeIIITargetAggregateMbps{402.0};
+    double m_dataStartTimeS{0.0};
+    uint64_t m_totalTxBytes{0};
+};
+
+NS_OBJECT_ENSURE_REGISTERED(SmoothCrossTrafficSender);
+
 class OpenLoopRateTracer
 {
   public:
     OpenLoopRateTracer(Ptr<OpenLoopRampSender> sender,
                        Ptr<PacketSink> probe_sink,
-                       Ptr<PacketSink> cubic_sink,
+                       Ptr<PacketSink> cross_sink,
                        const std::string& folder,
                        const std::string& trace_name,
                        double interval_s,
                        double stop_time_s)
         : m_sender(sender),
           m_probeSink(probe_sink),
-          m_cubicSink(cubic_sink),
+          m_crossSink(cross_sink),
           m_intervalS(interval_s),
           m_stopTimeS(stop_time_s)
     {
@@ -304,7 +630,7 @@ class OpenLoopRateTracer
         {
             m_stream << "#time_s\tbaseline_mbps\ttriangle_value\ttarget_mbps"
                      << "\ttx_mbps\trx_mbps\ttotal_tx_bytes\ttotal_rx_bytes"
-                     << "\tcubic_rx_mbps\taggregate_rx_mbps\ttotal_cubic_rx_bytes"
+                     << "\tcross_rx_mbps\taggregate_rx_mbps\ttotal_cross_rx_bytes"
                      << std::endl;
         }
     }
@@ -314,7 +640,7 @@ class OpenLoopRateTracer
         m_lastSampleS = Simulator::Now().GetSeconds();
         m_lastTxBytes = m_sender != nullptr ? m_sender->GetTotalTxBytes() : 0;
         m_lastProbeRxBytes = m_probeSink != nullptr ? m_probeSink->GetTotalRx() : 0;
-        m_lastCubicRxBytes = m_cubicSink != nullptr ? m_cubicSink->GetTotalRx() : 0;
+        m_lastCrossRxBytes = m_crossSink != nullptr ? m_crossSink->GetTotalRx() : 0;
         WriteSample();
     }
 
@@ -322,7 +648,7 @@ class OpenLoopRateTracer
     void WriteSample()
     {
         if (!m_stream.is_open() || m_sender == nullptr || m_probeSink == nullptr ||
-            m_cubicSink == nullptr)
+            m_crossSink == nullptr)
         {
             return;
         }
@@ -330,15 +656,15 @@ class OpenLoopRateTracer
         const double now_s = Simulator::Now().GetSeconds();
         const uint64_t total_tx_bytes = m_sender->GetTotalTxBytes();
         const uint64_t total_probe_rx_bytes = m_probeSink->GetTotalRx();
-        const uint64_t total_cubic_rx_bytes = m_cubicSink->GetTotalRx();
+        const uint64_t total_cross_rx_bytes = m_crossSink->GetTotalRx();
         const double delta_s = std::max(1e-9, now_s - m_lastSampleS);
         const double tx_mbps =
             static_cast<double>(total_tx_bytes - m_lastTxBytes) * 8.0 / delta_s / 1000000.0;
         const double probe_rx_mbps =
             static_cast<double>(total_probe_rx_bytes - m_lastProbeRxBytes) * 8.0 /
             delta_s / 1000000.0;
-        const double cubic_rx_mbps =
-            static_cast<double>(total_cubic_rx_bytes - m_lastCubicRxBytes) * 8.0 /
+        const double cross_rx_mbps =
+            static_cast<double>(total_cross_rx_bytes - m_lastCrossRxBytes) * 8.0 /
             delta_s / 1000000.0;
 
         m_stream << std::fixed << std::setprecision(6)
@@ -350,14 +676,14 @@ class OpenLoopRateTracer
                  << probe_rx_mbps << "\t"
                  << total_tx_bytes << "\t"
                  << total_probe_rx_bytes << "\t"
-                 << cubic_rx_mbps << "\t"
-                 << (probe_rx_mbps + cubic_rx_mbps) << "\t"
-                 << total_cubic_rx_bytes << std::endl;
+                 << cross_rx_mbps << "\t"
+                 << (probe_rx_mbps + cross_rx_mbps) << "\t"
+                 << total_cross_rx_bytes << std::endl;
 
         m_lastSampleS = now_s;
         m_lastTxBytes = total_tx_bytes;
         m_lastProbeRxBytes = total_probe_rx_bytes;
-        m_lastCubicRxBytes = total_cubic_rx_bytes;
+        m_lastCrossRxBytes = total_cross_rx_bytes;
 
         if (now_s + m_intervalS <= m_stopTimeS)
         {
@@ -367,14 +693,14 @@ class OpenLoopRateTracer
 
     Ptr<OpenLoopRampSender> m_sender;
     Ptr<PacketSink> m_probeSink;
-    Ptr<PacketSink> m_cubicSink;
+    Ptr<PacketSink> m_crossSink;
     std::fstream m_stream;
     double m_intervalS{0.01};
     double m_stopTimeS{30.0};
     double m_lastSampleS{0.0};
     uint64_t m_lastTxBytes{0};
     uint64_t m_lastProbeRxBytes{0};
-    uint64_t m_lastCubicRxBytes{0};
+    uint64_t m_lastCrossRxBytes{0};
 };
 
 class QueueDropTracer
@@ -477,13 +803,33 @@ WriteScenarioConfig(const std::string& folder,
            << "queue_bytes\t" << queue_bytes << std::endl
            << "regime_duration_s\t" << (g_sender_duration_s / 3.0) << std::endl
            << "start_rate_mbps\t" << g_start_rate_mbps << std::endl
+           << "regime_iii_start_rate_mbps\t" << g_regime_iii_start_rate_mbps << std::endl
            << "end_rate_mbps\t" << g_end_rate_mbps << std::endl
+           << "regime_iii_knee_fraction\t" << g_regime_iii_knee_fraction << std::endl
+           << "regime_iii_knee_rate_mbps\t" << g_regime_iii_knee_rate_mbps << std::endl
+           << "regime_iii_knee_slope_mbps_per_s\t"
+           << g_regime_iii_knee_slope_mbps_per_s << std::endl
            << "triangle_freq_hz\t" << g_triangle_freq_hz << std::endl
            << "triangle_amp_mbps\t" << g_triangle_amp_mbps << std::endl
-           << "cubic_start_time_s\t"
-           << (g_sender_start_time_s + g_sender_duration_s / 3.0) << std::endl
-           << "cubic_app_rate_mbps\t" << g_cubic_app_rate_mbps << std::endl
-           << "cubic_packet_size_bytes\t" << g_cubic_packet_size_bytes << std::endl
+           << "srate_peak_to_peak_mbps\t" << (2.0 * g_triangle_amp_mbps) << std::endl
+           << "cross_start_time_s\t" << g_sender_start_time_s << std::endl
+           << "cross_regime_i_rate_mbps\t" << g_cross_regime_i_rate_mbps << std::endl
+           << "cross_regime_ii_control_start_mbps\t"
+           << g_cross_regime_ii_control_start_mbps << std::endl
+           << "cross_regime_ii_end_rate_mbps\t" << g_cross_regime_ii_end_rate_mbps << std::endl
+           << "cross_regime_ii_hump_mbps\t" << g_cross_regime_ii_hump_mbps << std::endl
+           << "cross_regime_i_antiphase_start_fraction\t"
+           << g_cross_regime_i_antiphase_start_fraction << std::endl
+           << "cross_regime_ii_antiphase_gain\t"
+           << g_cross_regime_ii_antiphase_gain << std::endl
+           << "cross_end_rate_mbps\t" << g_cross_end_rate_mbps << std::endl
+           << "cross_regime_iii_antiphase_gain\t"
+           << g_cross_regime_iii_antiphase_gain << std::endl
+           << "cross_regime_iii_transition_fraction\t"
+           << g_cross_regime_iii_transition_fraction << std::endl
+           << "cross_regime_iii_target_aggregate_mbps\t"
+           << g_cross_regime_iii_target_aggregate_mbps << std::endl
+           << "cross_packet_size_bytes\t" << g_cross_packet_size_bytes << std::endl
            << "packet_size_bytes\t" << g_packet_size_bytes << std::endl
            << "trace_interval_ms\t" << g_trace_interval_ms << std::endl;
 }
@@ -496,8 +842,8 @@ RunScenario()
         ComputeBdpQueueBytes(link_bps, g_one_way_delay_ms, g_buffer_bdp, g_bdp_uses_rtt);
     const double sim_stop_s = g_sender_start_time_s + g_sender_duration_s + g_drain_time_s;
     const double regime_duration_s = g_sender_duration_s / 3.0;
-    const double cubic_start_s = g_sender_start_time_s + regime_duration_s;
-    const double active_stop_s = g_sender_start_time_s + g_sender_duration_s;
+    const double cross_start_s = g_sender_start_time_s;
+    const double cross_stop_s = g_sender_start_time_s + g_sender_duration_s;
 
     SetQueueOccupancyTraceFolder(g_trace_path);
     const std::string trace_folder = GetQueueOccupancyTraceFolder();
@@ -505,13 +851,6 @@ RunScenario()
 
     NodeContainer nodes;
     nodes.Create(2);
-
-    Config::SetDefault("ns3::TcpL4Protocol::SocketType",
-                       TypeIdValue(TcpCubic::GetTypeId()));
-    Config::SetDefault("ns3::TcpSocket::SegmentSize",
-                       UintegerValue(g_cubic_packet_size_bytes));
-    Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(32 * 1024 * 1024));
-    Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(32 * 1024 * 1024));
 
     InternetStackHelper internet;
     internet.Install(nodes);
@@ -546,33 +885,23 @@ RunScenario()
     sink_apps.Stop(Seconds(sim_stop_s));
     Ptr<PacketSink> sink = DynamicCast<PacketSink>(sink_apps.Get(0));
 
-    PacketSinkHelper cubic_sink_helper(
-        "ns3::TcpSocketFactory",
-        InetSocketAddress(Ipv4Address::GetAny(), g_cubic_port));
-    ApplicationContainer cubic_sink_apps = cubic_sink_helper.Install(nodes.Get(1));
-    cubic_sink_apps.Start(Seconds(0.0));
-    cubic_sink_apps.Stop(Seconds(sim_stop_s));
-    Ptr<PacketSink> cubic_sink = DynamicCast<PacketSink>(cubic_sink_apps.Get(0));
-
-    OnOffHelper cubic_source(
-        "ns3::TcpSocketFactory",
-        InetSocketAddress(interfaces.GetAddress(1), g_cubic_port));
-    cubic_source.SetAttribute("PacketSize", UintegerValue(g_cubic_packet_size_bytes));
-    cubic_source.SetAttribute("DataRate",
-                              DataRateValue(DataRate(ToBps(g_cubic_app_rate_mbps))));
-    cubic_source.SetAttribute("OnTime",
-                              StringValue("ns3::ConstantRandomVariable[Constant=1]"));
-    cubic_source.SetAttribute("OffTime",
-                              StringValue("ns3::ConstantRandomVariable[Constant=0]"));
-    ApplicationContainer cubic_source_apps = cubic_source.Install(nodes.Get(0));
-    cubic_source_apps.Start(Seconds(cubic_start_s));
-    cubic_source_apps.Stop(Seconds(active_stop_s));
+    PacketSinkHelper cross_sink_helper(
+        "ns3::UdpSocketFactory",
+        InetSocketAddress(Ipv4Address::GetAny(), g_cross_port));
+    ApplicationContainer cross_sink_apps = cross_sink_helper.Install(nodes.Get(1));
+    cross_sink_apps.Start(Seconds(0.0));
+    cross_sink_apps.Stop(Seconds(sim_stop_s));
+    Ptr<PacketSink> cross_sink = DynamicCast<PacketSink>(cross_sink_apps.Get(0));
 
     Ptr<OpenLoopRampSender> sender = CreateObject<OpenLoopRampSender>();
     sender->Configure(InetSocketAddress(interfaces.GetAddress(1), g_udp_port),
                       g_packet_size_bytes,
                       g_start_rate_mbps,
+                      g_regime_iii_start_rate_mbps,
                       g_end_rate_mbps,
+                      g_regime_iii_knee_fraction,
+                      g_regime_iii_knee_rate_mbps,
+                      g_regime_iii_knee_slope_mbps_per_s,
                       g_sender_start_time_s,
                       g_sender_duration_s,
                       g_triangle_freq_hz,
@@ -582,17 +911,35 @@ RunScenario()
     sender->SetStartTime(Seconds(g_sender_start_time_s));
     sender->SetStopTime(Seconds(g_sender_start_time_s + g_sender_duration_s));
 
+    Ptr<SmoothCrossTrafficSender> cross_sender = CreateObject<SmoothCrossTrafficSender>();
+    cross_sender->Configure(InetSocketAddress(interfaces.GetAddress(1), g_cross_port),
+                            sender,
+                            g_cross_packet_size_bytes,
+                            g_cross_regime_i_rate_mbps,
+                            g_cross_regime_ii_control_start_mbps,
+                            g_cross_regime_ii_end_rate_mbps,
+                            g_cross_regime_ii_hump_mbps,
+                            g_cross_regime_ii_antiphase_gain,
+                            g_cross_end_rate_mbps,
+                            g_cross_regime_iii_antiphase_gain,
+                            g_cross_regime_iii_transition_fraction,
+                            g_cross_regime_iii_target_aggregate_mbps,
+                            cross_start_s);
+    nodes.Get(0)->AddApplication(cross_sender);
+    cross_sender->SetStartTime(Seconds(cross_start_s));
+    cross_sender->SetStopTime(Seconds(cross_stop_s));
+
     std::shared_ptr<OpenLoopRateTracer> rate_tracer =
         std::make_shared<OpenLoopRateTracer>(sender,
                                              sink,
-                                             cubic_sink,
+                                             cross_sink,
                                              trace_folder,
                                              g_trace_name,
                                              g_trace_interval_ms / 1000.0,
                                              sim_stop_s);
     Simulator::Schedule(Seconds(g_sender_start_time_s), &OpenLoopRateTracer::Start, rate_tracer.get());
 
-    std::cout << "=== Open-loop triangle probe plus TCP CUBIC experiment ===" << std::endl;
+    std::cout << "=== Continuous triangle probe plus smooth background traffic ===" << std::endl;
     std::cout << "sender_duration=" << g_sender_duration_s << "s, sim_stop=" << sim_stop_s
               << "s" << std::endl;
     std::cout << "link=" << g_link_bw_mbps << "Mbps, one_way_delay=" << g_one_way_delay_ms
@@ -603,12 +950,22 @@ RunScenario()
               << "," << 2.0 * regime_duration_s << "),["
               << 2.0 * regime_duration_s << "," << g_sender_duration_s << ")s"
               << std::endl;
-    std::cout << "probe_baseline=" << g_start_rate_mbps << "," << g_start_rate_mbps
-              << "," << g_end_rate_mbps
-              << "Mbps, triangle_freq=" << g_triangle_freq_hz
-              << "Hz, triangle_amp=" << g_triangle_amp_mbps << "Mbps" << std::endl;
-    std::cout << "cubic_start=" << cubic_start_s
-              << "s, cubic_app_rate=" << g_cubic_app_rate_mbps << "Mbps" << std::endl;
+    std::cout << "probe_baseline_continuous=" << g_start_rate_mbps << "->"
+              << g_regime_iii_start_rate_mbps << "@6s->" << g_end_rate_mbps
+              << "Mbps (Regime-III knee=" << g_regime_iii_knee_rate_mbps << "Mbps at "
+              << g_regime_iii_knee_fraction << ")"
+              << ", triangle_freq=" << g_triangle_freq_hz
+              << "Hz, constant_triangle_amp=" << g_triangle_amp_mbps
+              << "Mbps (" << (2.0 * g_triangle_amp_mbps) << "Mbps peak-to-peak)"
+              << std::endl;
+    std::cout << "cross_active=" << cross_start_s << "->" << cross_stop_s
+              << "s, cross_curve=0->" << g_cross_regime_i_rate_mbps << "->"
+              << "control(" << g_cross_regime_ii_control_start_mbps << ")->"
+              << g_cross_regime_ii_end_rate_mbps << "->" << g_cross_end_rate_mbps
+              << "Mbps, regime_ii_hump=" << g_cross_regime_ii_hump_mbps
+              << ", antiphase_gain=" << g_cross_regime_ii_antiphase_gain
+              << ", regime_iii_antiphase_gain=" << g_cross_regime_iii_antiphase_gain
+              << std::endl;
     std::cout << "packet_size=" << g_packet_size_bytes << " bytes" << std::endl;
     std::cout << "trace_folder=" << trace_folder << std::endl;
     std::cout << "=========================================" << std::endl;
@@ -622,7 +979,8 @@ RunScenario()
               << ", drop_bytes=" << drop_tracer->GetDropBytes() << std::endl;
     std::cout << "total_tx_bytes=" << sender->GetTotalTxBytes()
               << ", total_rx_bytes=" << sink->GetTotalRx()
-              << ", total_cubic_rx_bytes=" << cubic_sink->GetTotalRx() << std::endl;
+              << ", total_cross_tx_bytes=" << cross_sender->GetTotalTxBytes()
+              << ", total_cross_rx_bytes=" << cross_sink->GetTotalRx() << std::endl;
 }
 
 } // namespace
@@ -643,21 +1001,60 @@ main(int argc, char* argv[])
     cmd.AddValue("bdp_uses_rtt", "Use RTT rather than one-way delay for BDP queue sizing", g_bdp_uses_rtt);
 
     cmd.AddValue("start_rate_mbps",
-                 "Triangle-probe baseline in Regimes I and II",
+                 "Initial triangle-probe baseline",
                  g_start_rate_mbps);
+    cmd.AddValue("regime_iii_start_rate_mbps",
+                 "Triangle-probe baseline at the second Regime boundary",
+                 g_regime_iii_start_rate_mbps);
     cmd.AddValue("end_rate_mbps",
-                 "Triangle-probe baseline in Regime III",
+                 "Final triangle-probe baseline reached by a smooth Regime-III curve",
                  g_end_rate_mbps);
+    cmd.AddValue("regime_iii_knee_fraction",
+                 "Normalized Regime-III time of the smooth fast-rise knee",
+                 g_regime_iii_knee_fraction);
+    cmd.AddValue("regime_iii_knee_rate_mbps",
+                 "Probe baseline at the Regime-III knee",
+                 g_regime_iii_knee_rate_mbps);
+    cmd.AddValue("regime_iii_knee_slope_mbps_per_s",
+                 "Probe-baseline slope shared by both sides of the Regime-III knee",
+                 g_regime_iii_knee_slope_mbps_per_s);
     cmd.AddValue("triangle_freq_hz", "Triangle modulation frequency in Hz", g_triangle_freq_hz);
     cmd.AddValue("triangle_amp_mbps", "Triangle modulation peak amplitude in Mbps", g_triangle_amp_mbps);
 
-    cmd.AddValue("cubic_app_rate_mbps",
-                 "TCP CUBIC application rate from Regime II onward",
-                 g_cubic_app_rate_mbps);
-    cmd.AddValue("cubic_packet_size_bytes",
-                 "TCP CUBIC application packet size",
-                 g_cubic_packet_size_bytes);
-    cmd.AddValue("cubic_port", "TCP CUBIC sink port", g_cubic_port);
+    cmd.AddValue("cross_regime_i_rate_mbps",
+                 "Background-flow rate reached smoothly at the first Regime boundary",
+                 g_cross_regime_i_rate_mbps);
+    cmd.AddValue("cross_regime_ii_control_start_mbps",
+                 "Initial Regime-II background-flow control-envelope rate",
+                 g_cross_regime_ii_control_start_mbps);
+    cmd.AddValue("cross_regime_ii_end_rate_mbps",
+                 "Background-flow rate at the second Regime boundary",
+                 g_cross_regime_ii_end_rate_mbps);
+    cmd.AddValue("cross_regime_ii_hump_mbps",
+                 "Smooth Regime-II aggregate-load hump amplitude",
+                 g_cross_regime_ii_hump_mbps);
+    cmd.AddValue("cross_regime_i_antiphase_start_fraction",
+                 "Regime-I fraction where the inverse-triangle background component starts",
+                 g_cross_regime_i_antiphase_start_fraction);
+    cmd.AddValue("cross_regime_ii_antiphase_gain",
+                 "Regime-II background-flow inverse-triangle gain",
+                 g_cross_regime_ii_antiphase_gain);
+    cmd.AddValue("cross_end_rate_mbps",
+                 "Background-flow rate reached smoothly at the experiment end",
+                 g_cross_end_rate_mbps);
+    cmd.AddValue("cross_regime_iii_antiphase_gain",
+                 "Regime-III background-flow inverse-triangle gain",
+                 g_cross_regime_iii_antiphase_gain);
+    cmd.AddValue("cross_regime_iii_transition_fraction",
+                 "Fraction of Regime III used to join target aggregate-load control",
+                 g_cross_regime_iii_transition_fraction);
+    cmd.AddValue("cross_regime_iii_target_aggregate_mbps",
+                 "Regime-III aggregate mean held while the background flow remains active",
+                 g_cross_regime_iii_target_aggregate_mbps);
+    cmd.AddValue("cross_packet_size_bytes",
+                 "Background UDP flow packet size",
+                 g_cross_packet_size_bytes);
+    cmd.AddValue("cross_port", "Background UDP sink port", g_cross_port);
 
     cmd.AddValue("packet_size_bytes", "UDP payload size in bytes", g_packet_size_bytes);
     cmd.AddValue("flow_id", "FlowIdTag used by queue occupancy trace", g_flow_id);

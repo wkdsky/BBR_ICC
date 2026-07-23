@@ -40,6 +40,7 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeRttMode final : public Bbr2ModeBase {
   struct QUIC_EXPORT_PRIVATE DebugState {
     QuicByteCount inflight_target;
     QuicTime exit_time = QuicTime::Zero();
+    bool round_done = false;
   };
 
   DebugState ExportDebugState() const;
@@ -50,6 +51,7 @@ class QUIC_EXPORT_PRIVATE Bbr2ProbeRttMode final : public Bbr2ModeBase {
   QuicByteCount InflightTarget() const;
 
   QuicTime exit_time_ = QuicTime::Zero();
+  bool round_done_ = false;
 };
 
 QUIC_EXPORT_PRIVATE std::ostream& operator<<(

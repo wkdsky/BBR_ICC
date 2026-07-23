@@ -6,7 +6,7 @@
 >
 > 本文目标：把 PDF 的判定图完整翻译为有固定优先级、可编码、可测试、可追踪的规则；本文不包含代码修改。
 >
-> **范围硬约束：本文把更新版 PDF 的 18 个确定性叶子编号为 N01-N18；这些判定以及“判定后调整注入基线/ProbedBw”的整条控制链只属于 `kFBBR`，不属于 `kFBBRAdaptive`，二者不得共用执行器。**
+> **范围硬约束：本文把更新版 PDF 的 16 个确定性叶子编号为 N01-N16；这些判定以及“判定后调整注入基线/TrustedBw”的整条控制链只属于 `kFBBR`，不属于 `kFBBRAdaptive`，二者不得共用执行器。**
 
 ## 1. 结论与改造边界
 
@@ -15,15 +15,15 @@
 1. 横切分类只看 SRTT，不再让 DRate 上横切直接决定 Regime。SRTT 上横切和下横切各只接受 PDF 明列的三种真实形态。
 2. 上/下横切候选只要不满足对应三种形态，就不算“已识别横切”，统一回退到 `SRTT has_wave` 主树；不能用一个兜底 `else` 强行判为重复横切。
 3. SRTT 负肩 L1 下，DRate 无普通波动不再直接判不确定，而是继续用 `srtt_max > MaxRTT`、`srtt_min < RTprop`、默认值分成 Regime III/I/II。
-4. 更新版共有 N01-N18 十八个确定性叶子；树内不再有“不确定叶子”，`INCONCLUSIVE` 只用于输入无效、覆盖不足或必须谓词无法计算。
+4. 更新版共有 N01-N16 十六个确定性叶子；树内不再有“不确定叶子”，`INCONCLUSIVE` 只用于输入无效、覆盖不足或必须谓词无法计算。
 5. 普通 DRate `has_wave` 明确忽略横切；DRate 周期性相似只把已验真的上横切作为硬否决，左右边缘线和顺位中间削平可以遮罩/简化处理。
 6. 增加两个连接级状态：`MaxRTT` 和 `RTpropDRate`。两者可跨 Cruise 继承，不再用现有 `srtt_up/srtt_low` 代替。
-7. Regime I/III 的下一注入基线改为 PDF 指定的 50% 摆幅公式；Regime II 同时把窗口平均 DRate 写入 pacing baseline 和 ProbedBw。
+7. Regime I/III 的下一注入基线改为 PDF 指定的 50% 摆幅公式；Regime II 只把窗口平均 DRate 写入 TrustedBw，pacing baseline 保持不变。
 8. 输入无效的不确定处理保持当前 `kFBBR` 的后探/放大迭代；新增脚注中的“任一信号连续两个窗口无波动”直接复用同一状态机，先每次只补一个周期并用最新两周期慢速滑动复判，仍无恢复才按 1.25 倍放大，任一信号恢复波动后退出。
 
 从结构上看，这版比旧树更合理，也更容易可靠实现：它先把“疑似横切”验真为六种有明确机制的形态，证据不足就回到普通波动而不是强行分类；SRTT 负责主形态，DRate 只在指定节点提供周期性或抖动佐证，信号角色不再混杂；上、下方向的 20%/30% 长度门和不同状态动作也被明确分开。这里的“更合理”是指假设更清楚、误判出口更安全、可测试性更强，不代表 20%/30% 等数值已经统计最优，仍需用第 10 节的合成与多 seed 回归校准。
 
-本次行为改造只作用于正式 `kFBBR`（构造参数 `fbbr_window_baseline=true`）。`kFBBRAdaptive` 和 `legacy_spectral` 保持现状。最多只能复用无状态、无控制副作用的底层信号工具，例如重采样、MAD、稳健斜率和自相关；N01-N18 分类器、MaxRTT/RTpropDRate 状态、50% 基线公式、Regime II ProbedBw 更新、两窗无波动触发状态以及第 6 节保留的 `kFBBR` 不确定迭代状态机都必须由 `kFBBR` 专属调用链拥有。
+本次行为改造只作用于正式 `kFBBR`（构造参数 `fbbr_window_baseline=true`）。`kFBBRAdaptive` 和 `legacy_spectral` 保持现状。最多只能复用无状态、无控制副作用的底层信号工具，例如重采样、MAD、稳健斜率和自相关；N01-N16 分类器、MaxRTT/RTpropDRate 状态、50% 基线公式、Regime II TrustedBw 更新、两窗无波动触发状态以及第 6 节保留的 `kFBBR` 不确定迭代状态机都必须由 `kFBBR` 专属调用链拥有。
 
 ## 2. PDF 判定语义的统一解释
 
@@ -32,7 +32,7 @@
 | PDF 名称 | 代码枚举建议 | 含义 | 控制方向 |
 |---|---|---|---|
 | Regime I | `kRegimeIUnderload` | 欠载 | 提高或居中注入基线 |
-| Regime II | `kRegimeIIFullLoad` | 满载/目标负载 | 基线和 ProbedBw 取窗口平均 DRate |
+| Regime II | `kRegimeIIFullLoad` | 满载/目标负载 | TrustedBw 取窗口平均 DRate；基线保持不变 |
 | Regime III | `kRegimeIIIOverload` | 过载 | 降低或居中注入基线 |
 | 不确定 | `kInconclusive` | 当前证据不足 | 不改基线；先补采一个周期，第二次仍不确定再调整探针幅度 |
 
@@ -396,7 +396,7 @@ middle_sequential = outside_continues
 4. 在该视图上检测顺位中间异常，只遮掉不与已保留肩部区间重叠的候选；
 5. SRTT 普通 `has_wave` 在上述清理视图上计算；DRate 普通 `has_wave` 则回到未遮罩的原始有效视图，只做缺失处理和三点中值去单点毛刺；
 6. `periodic_similar` 在保留原时间轴的 `periodic_mask` 上计算，但必须回看未遮罩的 `raw_clip_evidence`：已验真的上横切为硬否决；下横切、左右边缘线和顺位中间削平本身不否决，只能通过覆盖率与完整周期门间接使 periodic 失败；
-7. 分类器严格按 N01-N18 读取证据：横切子树只读六种已验真的 SRTT `raw_clip_evidence`，普通波动读取各自规定的输入视图，周期条件读取 `periodic_mask` 及原始上横切否决位；六种均未命中时直接进入 SRTT `has_wave` 回退树。
+7. 分类器严格按 N01-N16 读取证据：横切子树只读六种已验真的 SRTT `raw_clip_evidence`，普通波动读取各自规定的输入视图，周期条件读取 `periodic_mask` 及原始上横切否决位；六种均未命中时直接进入 SRTT `has_wave` 回退树。
 
 PDF 中“未命中有效横切后进入 SRTT 波动分支”描述的是**分类语义和证据优先级**。工程上可以提前构造清理视图，因为 U1/U2 也要读取处理后的 DRate `periodic_similar`；但绝不能原地删除原始连续段、重复短接触或肩部证据。分类器在 U3/L2/L3 可以短路不需要的 periodic 计算，但为了第 6.2 节跨窗触发，每个最终窗口仍必须计算 SRTT/DRate 两个普通 `has_wave` 及各自有效位，不能因已进入横切叶子就跳过。
 
@@ -416,28 +416,26 @@ SRTT 和 DRate 必须各自检测、各自遮罩。任何区间同时满足肩�
 
 ## 3. `kFBBR` 专属的新版完整有序判定树
 
-以下顺序就是代码顺序。任何一个叶子命中后立即返回。`DRate periodic` 指第 2.3 节三态谓词，`has_wave` 指第 2.4 节普通波动；表内所有“非 periodic”“无波动”都要求对应输入有效。更新版 PDF 有 18 个确定性叶子，不确定不编号。
+以下顺序就是代码顺序。任何一个叶子命中后立即返回。`DRate periodic` 指第 2.3 节三态谓词，`has_wave` 指第 2.4 节普通波动；表内所有“非 periodic”“无波动”都要求对应输入有效。2026-07-22 19:24 版 PDF 有 16 个确定性叶子，不确定不编号。
 
 | 优先级/规则号 | 条件 | 结果 | 同步状态动作 |
 |---:|---|---|---|
 | N01 | U1 SRTT 正半周期肩部削平；DRate periodic | Regime II | 无 |
-| N02 | U1；DRate 有效但非 periodic | Regime III | `MaxRTT = window_srtt_max` |
+| N02 | U1；DRate 有效但非 periodic | Regime III | `MaxRTT = window_srtt_max`；`baseline_up = maxdrate` |
 | N03 | U2 SRTT 连续上横切线 `L > 0.20T`；DRate periodic | Regime II | 无 |
-| N04 | U2；DRate 有效但非 periodic | Regime III | `MaxRTT = window_srtt_max` |
-| N05 | U3 SRTT 在同一假想上横切线反复出现多小段，首末包络 `>=0.50W` | Regime III | `MaxRTT = window_srtt_max` |
-| N06 | L1 SRTT 负半周期肩部削平；DRate has_wave | Regime I | 刷新 RTprop；`RTpropDRate = mindrate` |
-| N07 | L1；DRate 无普通波动；`srtt_max > MaxRTT` | Regime III | 仅比较，不刷新下横切状态 |
-| N08 | 同 N07 前提且 N07 未命中；`srtt_min < RTprop` | Regime I | 仅比较，不刷新下横切状态 |
-| N09 | L1；DRate 无普通波动；max/min 均未越界 | Regime II | 无 |
-| N10 | L2 SRTT 连续下横切线 `L > 0.30T` | Regime I | 保留既有 RTprop 刷新；`RTpropDRate = mindrate` |
-| N11 | L3 SRTT 在同一假想下横切线反复出现多小段，首末包络 `>=0.50W` | Regime I | 刷新 RTprop；`RTpropDRate = mindrate` |
-| N12 | 六种横切均未命中；SRTT has_wave；`srtt_max > MaxRTT` | Regime III | 仅比较 |
-| N13 | 同 N12 前提且 N12 未命中；`srtt_min < RTprop` | Regime I | 仅比较 |
-| N14 | SRTT has_wave，N12/N13 均未命中 | Regime II | 无 |
-| N15 | 六种横切均未命中；SRTT 无波动；DRate has_wave | Regime I | 无 |
-| N16 | SRTT/DRate 均无波动；`srtt_max > MaxRTT` | Regime III | 仅比较 |
-| N17 | 同 N16 前提且 N16 未命中；`srtt_min < RTprop` | Regime I | 仅比较 |
-| N18 | SRTT/DRate 均无波动，N16/N17 均未命中 | Regime II | 无 |
+| N04 | U2；DRate 有效但非 periodic | Regime III | `MaxRTT = window_srtt_max`；`baseline_up = maxdrate` |
+| N05 | U3 SRTT 在同一假想上横切线反复出现多小段，首末包络 `>=0.50W` | Regime III | `MaxRTT = window_srtt_max`；`baseline_up = maxdrate` |
+| N06 | L1 SRTT 负半周期肩部削平，且仍可识别 SRTT 周期波动 | Regime II | 无 |
+| N07 | L2 SRTT 连续下横切线 `L > 0.30T`；DRate 有普通波动 | Regime I | 刷新 RTprop；`RTpropDRate = mindrate`；`baseline_low = mindrate` |
+| N08 | L2；DRate 无普通波动 | Regime II | 无 |
+| N09 | L3 SRTT 在同一假想下横切线反复出现多小段，首末包络 `>=0.50W` | Regime I | RTprop 不变；`RTpropDRate = mindrate`；`baseline_low = mindrate` |
+| N10 | 六种横切均未命中；SRTT has_wave；`srtt_max > MaxRTT` | Regime III | `MaxRTT = window_srtt_max`；`baseline_up = maxdrate` |
+| N11 | 同 N10 前提且 N10 未命中；`srtt_min < RTprop` | Regime I | 刷新 RTprop；`RTpropDRate = mindrate`；`baseline_low = mindrate` |
+| N12 | SRTT has_wave，N10/N11 均未命中；若 `srtt_mean > RTprop + (MaxRTT - RTprop) / 4` 或 `inflight >= 1.1BDP` 则判过载，否则判满载 | Regime III / Regime II | 无 |
+| N13 | SRTT 无波动；DRate periodic | Regime I | 无 |
+| N14 | SRTT 无波动；DRate 非 periodic；`srtt_max > MaxRTT` | Regime III | `MaxRTT = window_srtt_max`；`baseline_up = maxdrate` |
+| N15 | 同 N14 前提且 N14 未命中；`srtt_min < RTprop` | Regime I | 刷新 RTprop；`RTpropDRate = mindrate`；`baseline_low = mindrate` |
+| N16 | SRTT 无波动，N13/N14/N15 均未命中；若 `srtt_mean > RTprop + (MaxRTT - RTprop) / 4` 或 `inflight >= 1.1BDP` 则判过载，否则判满载 | Regime III / Regime II | 无 |
 
 等价伪代码如下：
 
@@ -452,38 +450,42 @@ lower_case = first_match(L1_negative_shoulder,
 if upper_case == U1:
     if drate.periodic == INVALID_INPUT: return INCONCLUSIVE
     if drate.periodic == MATCH:         return II         # N01
-    else:                              return III+MAXRTT # N02
+    else:                              return III+MAXRTT+baseline_up # N02
 else if upper_case == U2:
     if drate.periodic == INVALID_INPUT: return INCONCLUSIVE
     if drate.periodic == MATCH:         return II         # N03
-    else:                              return III+MAXRTT # N04
+    else:                              return III+MAXRTT+baseline_up # N04
 else if upper_case == U3:
-    return III + SET_MAX_RTT                                # N05
+    return III + SET_MAX_RTT + SET_BASELINE_UP              # N05
 else if lower_case == L1:
+    return II                                               # N06
+else if lower_case == L2:
     if !drate.wave_input_valid: return INCONCLUSIVE
     if drate.has_wave:
-        return I + REFRESH_RTPROP + SET_RTPROP_DRATE        # N06
+        return I + REFRESH_RTPROP + SET_RTPROP_DRATE + SET_BASELINE_LOW # N07
     else:
-        if max_rtt_valid and srtt.max > MaxRTT: return III # N07
-        else if rtprop_valid and srtt.min < RTprop: return I # N08
-        else: return II                                     # N09
-else if lower_case == L2:
-    return I + REFRESH_RTPROP + SET_RTPROP_DRATE             # N10
+        return II                                           # N08
 else if lower_case == L3:
-    return I + REFRESH_RTPROP + SET_RTPROP_DRATE             # N11
+    return I + SET_RTPROP_DRATE + SET_BASELINE_LOW           # N09
 else:
     # 包括：完全没有横切，以及有疑似横切但不属于 U1-U3/L1-L3
     if !srtt.wave_input_valid: return INCONCLUSIVE
     if srtt.has_wave:
-        if max_rtt_valid and srtt.max > MaxRTT: return III   # N12
-        else if rtprop_valid and srtt.min < RTprop: return I # N13
-        else: return II                                      # N14
+        if max_rtt_valid and srtt.max > MaxRTT: return III + SET_MAX_RTT + SET_BASELINE_UP # N10
+        else if rtprop_valid and srtt.min < RTprop: return I + REFRESH_RTPROP + SET_RTPROP_DRATE + SET_BASELINE_LOW # N11
+        else:
+            if mean_bounds_and_inflight_bdp_invalid: return INCONCLUSIVE
+            if srtt.mean > RTprop + (MaxRTT - RTprop) / 4 or inflight >= 1.1*BDP: return III # N12
+            else: return II                                  # N12
     else:
-        if !drate.wave_input_valid: return INCONCLUSIVE
-        if drate.has_wave: return I                           # N15
-        else if max_rtt_valid and srtt.max > MaxRTT: return III # N16
-        else if rtprop_valid and srtt.min < RTprop: return I # N17
-        else: return II                                      # N18
+        if drate.periodic == INVALID_INPUT: return INCONCLUSIVE
+        if drate.periodic == MATCH: return I                 # N13
+        else if max_rtt_valid and srtt.max > MaxRTT: return III + SET_MAX_RTT + SET_BASELINE_UP # N14
+        else if rtprop_valid and srtt.min < RTprop: return I + REFRESH_RTPROP + SET_RTPROP_DRATE + SET_BASELINE_LOW # N15
+        else:
+            if mean_bounds_and_inflight_bdp_invalid: return INCONCLUSIVE
+            if srtt.mean > RTprop + (MaxRTT - RTprop) / 4 or inflight >= 1.1*BDP: return III # N16
+            else: return II                                  # N16
 ```
 
 ### 3.1 冲突时的确定性处理
@@ -493,7 +495,7 @@ else:
 - DRate 上/下横切不产生分类优先级，不能触发 MaxRTT、RTprop 或 RTpropDRate；普通 `drate_has_wave` 完全忽略横切，只有 DRate 上横切否决其 `periodic_similar`。
 - SRTT 有效上、下形态同时出现：上横切子树优先，同时记录 `both_clip_directions`。
 - 上横切内部 `U1 > U2 > U3`；下横切内部 `L1 > L2 > L3`。同一组横切证据满足多个形态时只记录最高优先级 rule。
-- 疑似上/下横切没有通过对应三形态时，不产生冲突优先级，必须回退到 N12-N18；不能把“存在 candidate”当成“存在 accepted clip”。
+- 疑似上/下横切没有通过对应三形态时，不产生冲突优先级，必须回退到 N10-N16；不能把“存在 candidate”当成“存在 accepted clip”。
 - DRate `periodic_similar=true` 与 DRate 已验真上横切互斥；与下横切、左右边缘线或已遮罩 middle 同时存在不构成不变量违规，只要周期完整性仍通过。
 
 ## 4. `kFBBR` 专属连接级状态和生命周期
@@ -511,18 +513,18 @@ uint64_t rtprop_drate_source_cruise_id_;
 
 状态更新规则：
 
-- 所有更新都发生在第 6.2 节跨窗触发检查之后；若当前窗口因 `TWO_WINDOW_NO_WAVE` 被转入重试，即使纯分类器返回 N02/N04/N05 或 N06/N10/N11，也只写 trace，不执行任何状态副作用。
-- N02/N04/N05 命中且窗口 SRTT 统计有效时，直接赋值 `MaxRTT = window_srtt_max`；这是“本次上横切过载窗口内的最大值”，不是与旧值再取 max。N01/N03 为 Regime II，不更新 MaxRTT。
-- N06/N10/N11 命中且 DRate 统计有效时，在执行既有下横切 RTprop 刷新后赋值 `RTpropDRate = mindrate`。L1 下 DRate 无波动得到的 N07/N08/N09 只做 MaxRTT/RTprop 比较，不刷新 RTprop，也不写 RTpropDRate。
-- 每轮 `EnterCruise()` 的初始 pacing baseline 明确取进入该轮时的 Native BBR `MaxBandwidth()` 快照；该值无效时才回退到 `BandwidthEstimate()`。不能用上一轮 ProbedBw 或上一轮最终注入 baseline 作为新一轮起点。
+- 所有更新都发生在第 6.2 节跨窗触发检查之后；若当前窗口因 `TWO_WINDOW_NO_WAVE` 被转入重试，即使纯分类器返回带状态动作的 rule，也只写 trace，不执行任何状态副作用。
+- N02/N04/N05/N10/N14 命中且窗口 SRTT 统计有效、DRate 统计有效时，直接赋值 `MaxRTT = window_srtt_max` 并用 `maxdrate` 更新 `baseline_up`；这是“本次过载窗口内的最大值”，不是与旧值再取 max。N12/N16 无论判 Regime II 还是 Regime III，都不更新 MaxRTT、RTpropDRate、baseline_low 或 baseline_up。
+- N07/N11/N15 命中且 DRate 统计有效时，刷新 RTprop 后赋值 `RTpropDRate = mindrate`；N09 命中时 RTprop 保持不变，但仍赋值 `RTpropDRate = mindrate` 并更新 `baseline_low`。
+- 每轮 `EnterCruise()` 的初始 pacing baseline 明确取进入该轮时的 Native BBR `MaxBandwidth()` 快照；该值无效时才回退到 `BandwidthEstimate()`。不能用上一轮 TrustedBw 或上一轮最终注入 baseline 作为新一轮起点。
 - `EnterCruise()` 不清空二者，也不再使用“当前 MaxBw 与上一 Cruise 相差小于 25%”作为继承门槛。
-- 只在连接初始化/销毁时清空；路径变化时仍按 PDF 允许继承，直到新的 N02/N04/N05 或 N06/N10/N11 覆盖。
-- N07/N12/N16 在 `max_rtt_valid=false` 时跳过 MaxRTT 比较；N08/N13/N17 使用 BBR 模型当前有效 RTprop。相等不算大于或小于，继续落到后续条件，最终在各自子树默认 Regime II。
+- 只在连接初始化/销毁时清空；路径变化时继续继承，直到新的 N02/N04/N05/N10/N14 或 N07/N09/N11/N15 覆盖。
+- N10/N14 在 `max_rtt_valid=false` 时跳过 MaxRTT 比较；N11/N15 使用 BBR 模型当前有效 RTprop。相等不算大于或小于，继续落到后续条件。N12/N16 的回退过载条件为 `srtt_mean > RTprop + (MaxRTT - RTprop) / 4` 或 `inflight >= 1.1BDP`，BDP 使用 BBR 模型当前 `BDP()`：有 `TrustedBw` 覆盖时等价于 `TrustedBw * RTT`，没有 `TrustedBw` 时退化为原 BBRv2 的 `MaxBandwidth * RTT`。两个谓词至少一个可计算，否则返回不确定。
 - `RTpropDRate` 用于执行器前还要满足 `0 < RTpropDRate <= maxdrate`。继承值高于当前 `maxdrate` 时视为本窗口不可用，但不销毁保存值。
 
-注意：PDF 的“更新 RTprop 不变，增加记录 RTpropDRate”解释为保留当前下横切触发的 RTprop 更新机制，再增加 DRate 参考值；不是禁止更新 RTprop。副作用必须跟随最终选中的 N06/N10/N11，不能因为出现未通过 L1-L3 的疑似下横切，或 L1+DRate 无波动进入 N07/N08/N09，就提前更新。
+注意：PDF 的 L3 “RTprop 不变”解释为不改写 RTprop，但仍记录该窗口 `mindrate` 为低位速率参考。副作用必须跟随最终选中的 N07/N09/N11/N15，不能因为出现未通过 L1-L3 的疑似下横切而提前更新。
 
-## 5. `kFBBR` 专属的 Regime 到注入基线/ProbedBw 执行器
+## 5. `kFBBR` 专属的 Regime 到注入基线/TrustedBw 执行器
 
 > 本节是 PDF 中 `kFBBR` 判定结果的专属控制动作，不是 FBBR 系列通用执行器。即使 `kFBBRAdaptive` 内部存在名称相似的 underload/full-load/overload 状态，也不得把这些状态传入本节公式。
 
@@ -533,12 +535,12 @@ if algorithm_mode != kFBBR:
     forbidden: ClassifyFbbrRegimeV2()
     forbidden: ComputeFbbrV2InjectionBaseline()
     forbidden: ApplyFbbrV2RegimeDecision()
-    forbidden: update MaxRTT / RTpropDRate / PDF ProbedBw
+    forbidden: update MaxRTT / RTpropDRate / PDF TrustedBw
 ```
 
-`kFBBRAdaptive` 继续执行其现有 adaptive baseline step、delta/queue guard、确认计数和 ProbedBw 逻辑；本方案不改变它的控制量、停止条件或状态生命周期。
+`kFBBRAdaptive` 继续执行其现有 adaptive baseline step、delta/queue guard、确认计数和 TrustedBw 逻辑；本方案不改变它的控制量、停止条件或状态生命周期。
 
-执行顺序必须是 `纯分类 -> 第 6.2 节跨窗触发检查 -> 状态副作用 -> baseline/ProbedBw`。`TWO_WINDOW_NO_WAVE` 一旦在本窗触发，后两步整体跳过；不能先更新 MaxRTT/RTprop/ProbedBw 再进入重试。
+执行顺序必须是 `纯分类 -> 第 6.2 节跨窗触发检查 -> 状态副作用 -> baseline/TrustedBw`。`TWO_WINDOW_NO_WAVE` 一旦在本窗触发，后两步整体跳过；不能先更新 MaxRTT/RTprop/TrustedBw 再进入重试。
 
 所有统计量从同一份有效、等时间隔、未去趋势的 DRate 序列计算，避免当前按 ACK 事件逐样本平均造成 ACK 密集区权重过高：
 
@@ -564,13 +566,12 @@ next_baseline = use_midpoint ? midpoint : maxdrate
 ### 5.2 Regime II
 
 ```text
-next_baseline = meandrate
-ProbedBw      = meandrate
+TrustedBw = meandrate
 ```
 
-- 每个 Regime II 窗口都覆盖更新二者，直到本轮 Cruise 结束。
-- Regime I/III 不更新 ProbedBw；本轮从未出现 Regime II 时，不发布新的 FBBR ProbedBw，Cruise 后继续使用 Native BBR 回退。
-- Cruise 结束时发布最后一个有效 Regime II 的 ProbedBw 候选。
+- 每个 Regime II 窗口都覆盖更新 `TrustedBw`，直到本轮 Cruise 结束。
+- Regime I/III 窗口内不直接更新 TrustedBw；当前实现不启用非 Regime II 窗口的 `tmpBw` 兜底。
+- Cruise 结束时只发布最后一个有效 Regime II 的 TrustedBw 候选；若没有 Regime II 候选，则本轮不发布 TrustedBw。
 
 ### 5.3 Regime III
 
@@ -581,7 +582,7 @@ next_baseline = use_midpoint ? midpoint : mindrate
 ### 5.4 边界保护
 
 - `next_baseline = max(next_baseline, pacing.minimum_rate_mbps)`。
-- DRate 统计无效、非有限、`mindrate <= 0` 或 `maxdrate < mindrate` 时，本次控制动作降级为不确定，不修改 baseline/ProbedBw/MaxRTT/RTpropDRate。
+- DRate 统计无效、非有限、`mindrate <= 0` 或 `maxdrate < mindrate` 时，本次控制动作降级为不确定，不修改 baseline/TrustedBw/MaxRTT/RTpropDRate。
 - `RTpropDRate` 缺失或不满足 `RTpropDRate <= maxdrate` 时，`use_midpoint=false`：Regime I 取 `maxdrate`，Regime III 取 `mindrate`。
 - 基线改变后等待 1 SRTT，再从新探针 epoch 采集完整 `2T`；不能把改变前后的样本放进同一个判定窗。
 - PDF 没有“最多调整 8 次”的停止规则。对 `kFBBR`，`waveform.max_baseline_adjustments` 不应再改变分类/执行结果，可降为只告警计数；搜索一直持续到 Cruise 结束。这个变化不能作用于 `kFBBRAdaptive` 的现有停止/保护逻辑。
@@ -629,7 +630,7 @@ next_baseline = use_midpoint ? midpoint : mindrate
 
 ### 6.2 新增：连续两窗不波动后的保真增强与自适应幅度调制
 
-这是 13:07 PDF 新增的跨窗口规则，不是 N01-N18 中的新分类叶子。按补充口径，它**不另造一套保真评分或另一套增减幅控制器**，而是把“连续两窗不波动”转换为现有不确定状态机的一个新进入原因：
+这是 13:07 PDF 新增的跨窗口规则，不是 N01-N16 中的新分类叶子。按补充口径，它**不另造一套保真评分或另一套增减幅控制器**，而是把“连续两窗不波动”转换为现有不确定状态机的一个新进入原因：
 
 ```text
 retry_reason = INVALID_CLASSIFICATION_INPUT
@@ -642,7 +643,7 @@ TWO_WINDOW_NO_WAVE = (srtt_no_wave_streak >= 2)
 - 对 SRTT、DRate 分别维护 streak；任一信号连续两个有效、已最终化窗口为 `has_wave=false` 就触发，不能收紧为二者都连续两窗不波动。
 - 每个不同的 `window_second_cycle_id` 最多计数一次。某信号本窗有波动则其 streak 清零，无波动则加一；对应输入无效时该信号 streak 冻结。
 - “连续窗口”按判定时间顺序计算，不要求两个窗口来自相同 baseline；否则第一个确定结果改变 baseline 后会使该脚注事实上无法触发。新 Cruise 开始时才清零两个 streak。
-- 若状态机此前空闲，触发的第二个窗口视为“第一次不确定”；若已因输入无效处于重试中，只把 `TWO_WINDOW_NO_WAVE` OR 进 reason mask，不重置扩展/放大阶段。无论哪种情况，该触发窗的 N01-N18 结果只保留 trace，不执行 baseline、ProbedBw、MaxRTT、RTprop 或 RTpropDRate 副作用。
+- 若状态机此前空闲，触发的第二个窗口视为“第一次不确定”；若已因输入无效处于重试中，只把 `TWO_WINDOW_NO_WAVE` OR 进 reason mask，不重置扩展/放大阶段。无论哪种情况，该触发窗的 N01-N16 结果只保留 trace，不执行 baseline、TrustedBw、MaxRTT、RTprop 或 RTpropDRate 副作用。
 
 随后完全复用第 6.1 节的节奏，但**每次只向后补一个周期**：
 
@@ -654,7 +655,7 @@ TWO_WINDOW_NO_WAVE = (srtt_no_wave_streak >= 2)
 若 C2+C3 中 SRTT 或 DRate 任一恢复 has_wave：
   清除 TWO_WINDOW_NO_WAVE 和两个 streak
   if 本窗分类输入有效：
-      停止重试，接受 C2+C3 的 N01-N18 结果并执行对应副作用
+      停止重试，接受 C2+C3 的 N01-N16 结果并执行对应副作用
   else:
       只保留 INVALID_CLASSIFICATION_INPUT，继续原不确定重试
 
@@ -674,7 +675,7 @@ TWO_WINDOW_NO_WAVE = (srtt_no_wave_streak >= 2)
 
 因此“慢一点滚动”的量化含义是窗口起点和终点每次都只增加 `T`，相邻分析窗保留一个共同周期；严禁 `C1+C2 -> C3+C4` 这样一次跳过 `2T`。只有变幅时因为不能混用不同 probe epoch，才等待 1 SRTT 并重新收集两个全新周期。
 
-退出条件严格按 PDF：进入该模式后，后续有效滑窗中只要 `srtt_has_wave || drate_has_wave` 就清除 `TWO_WINDOW_NO_WAVE`，不要求触发它的那个信号单独恢复，也不要求两个信号同时恢复；退出时把两个 streak 一并清零，要求未来重新积满两窗才能再次触发。退出前 baseline 和所有判定副作用保持冻结；若退出窗分类输入有效，就恢复执行该窗分类；若仍有 `INVALID_CLASSIFICATION_INPUT`，则只按原输入无效重试继续。二者继续无波动时，即使 N16/N17/N18 能给出确定 Regime，也不提前退出。
+退出条件严格按 PDF：进入该模式后，后续有效滑窗中只要 `srtt_has_wave || drate_has_wave` 就清除 `TWO_WINDOW_NO_WAVE`，不要求触发它的那个信号单独恢复，也不要求两个信号同时恢复；退出时把两个 streak 一并清零，要求未来重新积满两窗才能再次触发。退出前 baseline 和所有判定副作用保持冻结；若退出窗分类输入有效，就恢复执行该窗分类；若仍有 `INVALID_CLASSIFICATION_INPUT`，则只按原输入无效重试继续。二者继续无波动时，即使普通回退树 N13-N16 能给出确定 Regime，也不提前退出。
 
 实现上复用同一组 `inconclusive_extension_count`、`inconclusive_amplification_count`、`current_probe_amplitude_bps` 和滚动窗口缓存，只新增位掩码 `retry_reason_mask`、两个 no-wave streak 与 `wave_fidelity_enhancement_active`。这样既落实 PDF 的保真增强/自适应幅度，又严格保持原 FBBR 的一次后探、第二次放大、1.25 倍增长和 2 倍封顶语义。整条路径只属于 `kFBBR`，`kFBBRAdaptive` 不读取。
 
@@ -814,7 +815,7 @@ struct FbbrRegimeContext {
 
 struct FbbrRegimeDecision {
   WaveformClassification classification;
-  const char* rule_id;               // N01..N18；输入无效时为空
+  const char* rule_id;               // N01..N16；输入无效时为空
   bool update_max_rtt;
   bool refresh_rtprop;
   bool update_rtprop_drate;
@@ -843,7 +844,7 @@ struct FbbrUnifiedRetryState {
 10. `ClassifyFbbrRegimeV2()`：`kFBBR` 专属，只执行第 3 节有序树，不读写成员变量。
 11. `ApplyFbbrV2RegimeStateUpdates()`：`kFBBR` 专属，按最终 rule 执行 MaxRTT、RTprop、RTpropDRate 动作。
 12. `ComputeFbbrV2InjectionBaseline()`：`kFBBR` 专属，只实现第 5 节公式。
-13. `ApplyFbbrV2RegimeDecision()`：`kFBBR` 专属，更新 pacing baseline/ProbedBw 并安排下一窗口。
+13. `ApplyFbbrV2RegimeDecision()`：`kFBBR` 专属，更新 pacing baseline/TrustedBw 并安排下一窗口。
 14. `UpdateFbbrNoWaveRetryState()`：按最终化窗口和唯一 `window_second_cycle_id` 更新两个 streak；达到两窗时产生 `TWO_WINDOW_NO_WAVE`，并将该窗送入现有不确定状态机。
 15. `AdvanceFbbrUnifiedRetryState()`：复用现有阶段；第一次失败保持 baseline/幅度/epoch、只补一个周期并在最新两个周期上复判，第二次失败按 1.25 倍变幅，变幅后统一等待 1 SRTT 并从两个新周期开始，2 倍封顶后继续单周期滚动。
 
@@ -864,13 +865,13 @@ else:
     enter/continue existing INVALID_INPUT retry
 ```
 
-不要继续把新版条件塞进现有 `ClassifyWaveformState()` 的 `adaptive_guard_enabled` 分支。应把 `kFBBR` 新树和执行器单独实现，现有分类/控制函数保留给 `kFBBRAdaptive`。只允许抽取返回信号数值或无状态特征的纯工具；任何会返回 baseline、修改 pacing/ProbedBw、写连接级状态或推进控制状态机的函数都禁止在二者之间复用。
+不要继续把新版条件塞进现有 `ClassifyWaveformState()` 的 `adaptive_guard_enabled` 分支。应把 `kFBBR` 新树和执行器单独实现，现有分类/控制函数保留给 `kFBBRAdaptive`。只允许抽取返回信号数值或无状态特征的纯工具；任何会返回 baseline、修改 pacing/TrustedBw、写连接级状态或推进控制状态机的函数都禁止在二者之间复用。
 
 建议在运行入口做一次显式所有权分派，而不是在共享执行函数内部不断判断 Adaptive 开关：
 
 ```cpp
 if (algorithm_ == kFBBR) {
-  RunFbbrV2RegimePipeline();       // PDF N01-N18 + actuator + unified retry
+  RunFbbrV2RegimePipeline();       // PDF N01-N16 + actuator + unified retry
 } else if (algorithm_ == kFBBRAdaptive) {
   RunFbbrAdaptivePipeline();       // 保持现有实现
 }
@@ -882,20 +883,20 @@ if (algorithm_ == kFBBR) {
 
 | 项目 | 当前 `kFBBR` | 新版要求 |
 |---|---|---|
-| 分类入口 | 与 Adaptive 共用 `R1-R6` | 独立 N01-N18 有序树 |
-| 判定后执行器 | 当前部分 baseline/decision 路径与 Adaptive 交织 | PDF 50% 公式和 Regime II ProbedBw 只允许 `kFBBR` 调用；不确定分支保留当前 FBBR 的后探/放大/滚动语义 |
+| 分类入口 | 与 Adaptive 共用 `R1-R6` | 独立 N01-N16 有序树 |
+| 判定后执行器 | 当前部分 baseline/decision 路径与 Adaptive 交织 | PDF 50% 公式和 Regime II TrustedBw 只允许 `kFBBR` 调用；不确定分支保留当前 FBBR 的后探/放大/滚动语义 |
 | 可复用范围 | 共享分类与控制分支 | 只复用重采样/MAD/斜率/相关等无状态信号工具，禁止复用控制副作用 |
 | 横切入口 | BIC/plateau/DRate 特征交织 | 只允许 SRTT U1-U3/L1-L3 六种验真形态进入横切子树；连续长线与同电平断续短接触分别提取；DRate 横切不分类 |
 | 横切验真失败 | 可能被兜底 clip/plateau 分支吸收 | 无条件回退到 SRTT `has_wave` 主树 |
 | 肩部削平 | `DetectDualSignalPlateaus()` 可要求另一信号同步相反肩斜率 | 只有 SRTT 正肩 U1/负肩 L1 进入分类；各自独立通过连续横切段标准，不要求 DRate 同步肩部 |
 | 顺位中间削平 | 先要求低斜率水平段，再检查前后同向 | 不要求水平；前后同向趋势中任何超过噪声/幅度门的局部斜率不符合均可遮罩 |
 | both-clipped | 当前可进入欠载且提前刷新 RTprop | 严格服从上分支优先级，副作用跟随最终 rule |
-| 满载定义 | SRTT 相似为主 | U1/U2 下由 DRate periodic 得到；波动回退树越界条件均未命中时默认 Regime II |
-| SRTT 波动回退 | 最近过/欠载窗口 SRTT 均值 `srtt_up/low` | 只比较当前窗口 `srtt_max > MaxRTT`、`srtt_min < RTprop`，不再比较 mean |
+| 满载定义 | SRTT 相似为主 | U1/U2 下由 DRate periodic 得到，L1 直接得到，L2 下由 DRate 无普通波动得到；N12/N16 回退叶子由当前窗口平均 SRTT 的 1/4 延迟阈值和 `inflight >= 1.1BDP` 共同决定 |
+| SRTT 波动回退 | 最近过/欠载窗口 SRTT 均值 `srtt_up/low` | 先比较当前窗口 `srtt_max > MaxRTT`、`srtt_min < RTprop`，最后用 `srtt_mean > RTprop + (MaxRTT - RTprop) / 4` 或 `inflight >= 1.1BDP` 区分 III/II |
 | 下横切参考 | 刷新 RTprop | 保持既有刷新，并新增 `RTpropDRate=mindrate` |
 | Regime I 基线 | 直接窗口 max DRate | 50% 公式：midpoint 或 max |
 | Regime III 基线 | 直接窗口 min DRate | 50% 公式：midpoint 或 min |
-| Regime II | 当前已取窗口 mean | baseline 和 ProbedBw 都持续取窗口 mean |
+| Regime II | 当前已取窗口 mean | TrustedBw 持续取窗口 mean；baseline 保持不变 |
 | 不确定 | 先补一周期，第二次不确定后放大探针 | 原样保留：每个幅度先后探 1 周期，再按 1.25 倍放大，封顶 2 倍后逐周期滚动 |
 | 连续无普通波动 | 无独立触发条件 | SRTT 或 DRate 任一连续两窗 `has_wave=false` 后转入原不确定状态机；每次只补 1 周期、最新两周期复判，任一恢复波动即退出 |
 | 跨 Cruise | srtt/baseline bounds 受 25% MaxBw 门控 | MaxRTT、RTpropDRate 无条件保留 |
@@ -1068,6 +1069,7 @@ estimated_srate_period_s,
 srtt_estimated_period_s,drate_estimated_period_s,
 srtt_srate_period_error_ratio,drate_srate_period_error_ratio,
 srtt_edge_mask_ratio,drate_edge_mask_ratio,
+hybrid_inflight_bdp_valid,hybrid_inflight_bytes,hybrid_bdp_bytes,
 srtt_middle_mask_ratio,drate_middle_mask_ratio,
 max_rtt_valid,max_rtt_before_ms,max_rtt_after_ms,
 rtprop_before_ms,rtprop_after_ms,
@@ -1075,7 +1077,7 @@ rtprop_drate_valid,rtprop_drate_before_bps,rtprop_drate_after_bps,
 mindrate_bps,maxdrate_bps,meandrate_bps,
 swing_bps,reference_gap_bps,midpoint_triggered,
 baseline_before_bps,baseline_after_bps,
-probed_bw_before_bps,probed_bw_after_bps,
+trusted_bw_before_bps,trusted_bw_after_bps,
 window_first_cycle_id,window_second_cycle_id,
 collection_window_periods,analysis_uses_later_two_cycles,
 prior_window_rule_id,prior_window_regime,
@@ -1092,8 +1094,8 @@ amplitude_before_bps,amplitude_after_bps
 
 还应增加运行时不变量告警：
 
-- `algorithm_mode != kFBBR` 却出现 `regime_rule_id=N01..N18`、`regime_pipeline_owner=fbbr_v2`、`regime_actuator_owner=fbbr_v2` 或保真增强状态；
-- `kFBBRAdaptive` 窗口触发第 5 节 midpoint/max/min/mean 公式、PDF ProbedBw 更新、MaxRTT/RTpropDRate 更新或第 6.2 节两窗无波动重试；Adaptive 自己原有的不确定重试行为不计为违规，但不得消费 N01-N18 的结果推进 `kFBBR` V2 状态机；
+- `algorithm_mode != kFBBR` 却出现 `regime_rule_id=N01..N16`、`regime_pipeline_owner=fbbr_v2`、`regime_actuator_owner=fbbr_v2` 或保真增强状态；
+- `kFBBRAdaptive` 窗口触发第 5 节 midpoint/max/min/mean 公式、PDF TrustedBw 更新、MaxRTT/RTpropDRate 更新或第 6.2 节两窗无波动重试；Adaptive 自己原有的不确定重试行为不计为违规，但不得消费 N01-N16 的结果推进 `kFBBR` V2 状态机；
 - `periodic_similar=true` 且同一信号存在已验真的**上**肩、连续上横线或重复上横切；反过来，只有下横切时把 periodic 无条件置 false 也应告警；
 - `periodic_similar=true` 但 `periodic_similarity_input_valid=false`、`T_srate` 无效，或 `abs(T_hat-T_srate)/T_srate > 0.20`；
 - `shoulder_clip=true` 但 `continuous_horizontal=false`、任一可观测横切边界未验真、半周期极值门失败，或对应的肩部残余周期骨架输入无效/不可识别；
@@ -1107,8 +1109,8 @@ amplitude_before_bps,amplitude_after_bps
 - U3/L3 的 contact cycle mask 不是 `0b11`、任一周期 contact 样本少于 2、总数/5% 证据量门失败、`contact_span/W < 0.50`、片段电平不一致、聚合近水平步长不足、边界通过率低于 75% 或反事实越界失败，却仍被设为 true；
 - U3/L3 读取了 `continuous_min_duration_ratio`、20%/30% 长线门，或因为最长/累计横切时长低而被直接拒绝；
 - DRate 横切证据直接产生 rule、Regime 或 MaxRTT/RTprop/RTpropDRate 副作用；
-- rule 为 N02/N04/N05 但窗口 SRTT max 无效；
-- rule 为 N06/N10/N11 但 mindrate 无效；
+- rule 为 N02/N04/N05/N10/N14 但窗口 SRTT max 或 maxdrate 无效；
+- rule 为 N07/N09/N11/N15 但 mindrate 无效；
 - U2 在 `L_top <= 0.20T` 时为 true，或 L2 在 `L_bottom <= 0.30T` 时为 true；
 - 上下 accepted case 同时存在却没有按上横切优先，或上方向仅为疑似候选时阻断了有效下横切；
 - baseline 改变后的窗口包含改变前样本；
@@ -1119,10 +1121,10 @@ amplitude_before_bps,amplitude_after_bps
 - 不确定期间 pacing baseline、调制频率或三角波形状发生变化；
 - SRTT 或 DRate 任一 no-wave streak 到 2 后没有以 `TWO_WINDOW_NO_WAVE` 进入现有不确定状态机，或把 PDF 的“或”错误实现为二者都到 2；
 - 输入无效的信号错误改变自身 no-wave streak、相同 `window_second_cycle_id` 被重复计数，或正常 baseline 变化错误清零 streak；
-- 触发窗仍执行了其 N01-N18 的 baseline/ProbedBw/MaxRTT/RTprop/RTpropDRate 副作用；
+- 触发窗仍执行了其 N01-N16 的 baseline/TrustedBw/MaxRTT/RTprop/RTpropDRate 副作用；
 - 增强模式的相邻重试窗不是 `C1+C2 -> C2+C3 -> C3+C4` 这样每次只前进一个周期，或在未变幅时跳成不重叠的 `C1+C2 -> C3+C4`；
 - 同一幅度下第一次单周期后探仍无恢复却没有按原不确定逻辑增幅，或幅度越出 `[A0,2.00A0]`；
-- 幅度改变后未新建 epoch/等待 1 SRTT，或保真增强修改了 baseline、ProbedBw、调制频率及分类状态；
+- 幅度改变后未新建 epoch/等待 1 SRTT，或保真增强修改了 baseline、TrustedBw、调制频率及分类状态；
 - 增强后任一信号恢复波动仍未退出，或退出窗没有恢复执行其正式分类与副作用；
 - 新 Cruise 未清零 no-wave streak/增强状态，或 `kFBBRAdaptive` 读取、写入这些状态。
 
@@ -1130,39 +1132,39 @@ amplitude_before_bps,amplitude_after_bps
 
 ### 10.1 纯分类单元测试
 
-对 N01-N18 每个叶子至少构造一个 `SignalRegimeFeatures` 用例，断言最终 Regime、精确 `rule_id`、MaxRTT/RTprop/RTpropDRate 副作用位，以及更低优先级的冲突特征不会改变结果。最小叶子矩阵如下：
+对 N01-N16 每个叶子至少构造一个 `SignalRegimeFeatures` 用例，断言最终 Regime、精确 `rule_id`、MaxRTT/RTprop/RTpropDRate 副作用位，以及更低优先级的冲突特征不会改变结果。最小叶子矩阵如下：
 
 | 输入 | 期望 rule/结果 | 期望状态动作 |
 |---|---|---|
 | U1 + DRate periodic | N01 / II | 无 |
-| U1 + DRate 有效非 periodic | N02 / III | 仅 MaxRTT |
+| U1 + DRate 有效非 periodic | N02 / III | MaxRTT + baseline_up |
 | U2 + DRate periodic | N03 / II | 无 |
-| U2 + DRate 有效非 periodic | N04 / III | 仅 MaxRTT |
-| U3 | N05 / III | 仅 MaxRTT |
-| L1 + DRate has_wave | N06 / I | RTprop + RTpropDRate |
-| L1 + DRate 无普通波动；max 越界 | N07 / III | 无 |
-| L1 + DRate 无普通波动；max 未越界、min 越界 | N08 / I | 无 |
-| L1 + DRate 无普通波动；max/min 均未越界 | N09 / II | 无 |
-| L2 | N10 / I | RTprop + RTpropDRate |
-| L3 | N11 / I | RTprop + RTpropDRate |
-| 无 accepted clip；SRTT has_wave；max 越界 | N12 / III | 无 |
-| 同上；max 未越界；min 越界 | N13 / I | 无 |
-| 同上；max/min 均未越界 | N14 / II | 无 |
-| 无 accepted clip；SRTT 无波动；DRate has_wave | N15 / I | 无 |
-| SRTT/DRate 均无波动；max 越界 | N16 / III | 无 |
-| 同上；max 未越界；min 越界 | N17 / I | 无 |
-| 同上；max/min 均未越界 | N18 / II | 无 |
+| U2 + DRate 有效非 periodic | N04 / III | MaxRTT + baseline_up |
+| U3 | N05 / III | MaxRTT + baseline_up |
+| L1 | N06 / II | 无 |
+| L2 + DRate 有普通波动 | N07 / I | RTprop + RTpropDRate + baseline_low |
+| L2 + DRate 无普通波动 | N08 / II | 无 |
+| L3 | N09 / I | RTpropDRate + baseline_low，RTprop 不变 |
+| 无 accepted clip；SRTT has_wave；max 越界 | N10 / III | MaxRTT + baseline_up |
+| 同上；max 未越界；min 越界 | N11 / I | RTprop + RTpropDRate + baseline_low |
+| 同上；max/min 均未越界；`srtt_mean` 高于 1/4 延迟阈值或 `inflight >= 1.1BDP` | N12 / III | 无 |
+| 同上；max/min 均未越界；`srtt_mean` 未高于 1/4 延迟阈值且 `inflight < 1.1BDP` | N12 / II | 无 |
+| SRTT 无波动；DRate periodic | N13 / I | 无 |
+| SRTT 无波动；DRate 有效非 periodic；max 越界 | N14 / III | MaxRTT + baseline_up |
+| 同上；max 未越界；min 越界 | N15 / I | RTprop + RTpropDRate + baseline_low |
+| SRTT 无波动；N13/N14/N15 均未命中；`srtt_mean` 高于 1/4 延迟阈值或 `inflight >= 1.1BDP` | N16 / III | 无 |
+| SRTT 无波动；N13/N14/N15 均未命中；`srtt_mean` 未高于 1/4 延迟阈值且 `inflight < 1.1BDP` | N16 / II | 无 |
 
 必须单列以下优先级用例：
 
 1. U1/U2/U3 与 L1/L2/L3 同时有效时，上方向优先；上方向内部 U1 > U2 > U3，下方向内部 L1 > L2 > L3。
 2. 只有疑似上横切、U1-U3 均失败，而 L1/L2/L3 有效时，必须进入下横切；疑似上横切不能抢占优先级。
-3. 疑似上或下横切存在但六种 case 均失败时，必须根据 SRTT `has_wave` 进入 N12-N18，不能停在横切子树或兜底成 U3/L3。
+3. 疑似上或下横切存在但六种 case 均失败时，必须根据 SRTT `has_wave` 进入 N10-N16，不能停在横切子树或兜底成 U3/L3。
 4. 只有 DRate 上/下横切时，不能直接产生任何 rule 或状态更新；若 SRTT 六种 case 均失败，仍走普通波动回退树。
-5. U1/U2 所需 DRate periodic 输入无效时返回不确定，不能按“非 periodic”进入 N02/N04；L1 所需 DRate wave 输入无效时同样不确定。
+5. U1/U2 所需 DRate periodic 输入无效时返回不确定，不能按“非 periodic”进入 N02/N04；L2 所需 DRate wave 输入无效时同样不确定；SRTT 无波动分支所需 DRate periodic 输入无效时也返回不确定。
 6. U2 长度恰为 `0.20T` 不命中、`0.2001T` 命中；L2 恰为 `0.30T` 不命中、`0.3001T` 命中。
 7. U3/L3 必须在两个周期都形成同电平短 contact 集合，首末 contact 时间跨度至少为 `0.50W`，并通过最小接触样本、聚合平坦步长、边界、周期位置和反事实越界门；仅仅 U1/U2、L1/L2 失败时不得命中。
-8. L1+DRate 无波动以及普通回退树都要单测严格比较：SRTT max 恰等于 MaxRTT 不命中 N07/N12/N16，略大才命中；SRTT min 恰等于 RTprop 不命中 N08/N13/N17，略小才命中；两个比较均不成立时分别为 N09/N14/N18。
+8. 普通回退树要单测严格比较：SRTT max 恰等于 MaxRTT 不命中 N10/N14，略大才命中；SRTT min 恰等于 RTprop 不命中 N11/N15，略小才命中；两个比较均不成立时进入 N12/N16，并用 `srtt_mean > RTprop + (MaxRTT - RTprop) / 4` 或 `inflight >= 1.1BDP` 区分 III/II；SRTT 恰等于阈值且 inflight 低于 `1.1BDP` 时判 II，inflight 恰等于 `1.1BDP` 时判 III。
 9. DRate 自身存在已验真**上**横切时，即使周期相关性高也必须 `periodic_similar=false`；只有下横切时不得作为硬否决，左右边缘和 middle 经允许处理后仍可通过 periodic。无论哪种 DRate 横切都不能直接分类。
 
 ### 10.2 特征检测单元测试
@@ -1229,15 +1231,15 @@ amplitude_before_bps,amplitude_after_bps
 | `swing == 0.5*reference_gap`, Regime III | mindrate |
 | RTpropDRate 无效, Regime I | maxdrate |
 | RTpropDRate 无效, Regime III | mindrate |
-| Regime II | baseline=mean 且 ProbedBw=mean |
+| Regime II | TrustedBw=mean，baseline 不变 |
 | 结果低于 pacing floor | clamp 到 floor |
 
 还必须增加执行器所有权隔离测试：
 
-1. 对完全相同的合成 `SignalRegimeFeatures`，`kFBBR` 可以进入 N01-N18 并调用 PDF 执行器；`kFBBRAdaptive` 不得调用分类器或执行器。
-2. 在 `kFBBRAdaptive` 下预置可命中 Regime I/II/III 的输入，断言 `MaxRTT`、`RTpropDRate` 和 PDF ProbedBw 均无任何变化；其原有 extension/amplification 计数只做行为冻结对比，不要求为 0。
+1. 对完全相同的合成 `SignalRegimeFeatures`，`kFBBR` 可以进入 N01-N16 并调用 PDF 执行器；`kFBBRAdaptive` 不得调用分类器或执行器。
+2. 在 `kFBBRAdaptive` 下预置可命中 Regime I/II/III 的输入，断言 `MaxRTT`、`RTpropDRate` 和 PDF TrustedBw 均无任何变化；其原有 extension/amplification 计数只做行为冻结对比，不要求为 0。
 3. 对 Adaptive 现有 baseline step、delta/queue guard、确认计数和停止条件做修改前后 golden trace 对比，要求逐窗口输出一致。
-4. 任何共享工具函数只能返回样本/特征；测试中不得观察到 pacing baseline、ProbedBw 或连接级状态副作用。
+4. 任何共享工具函数只能返回样本/特征；测试中不得观察到 pacing baseline、TrustedBw 或连接级状态副作用。
 
 ### 10.4 状态机测试
 
@@ -1247,12 +1249,12 @@ amplitude_before_bps,amplitude_after_bps
 - 到达 `2.0A0` 后不再改变幅度；继续不确定时逐周期后探，分析窗严格滚动为 C2+C3、C3+C4、C4+C5。
 - 幅度变化只修改 `current_probe_amplitude_bps`；全过程 baseline、调制频率和三角波形状不因“不确定”而改变。
 - 任一轮得到确定 Regime 并改变 baseline 后，旧滚动窗口失效，等待 1 SRTT 后以当前幅度重新从 C1+C2 开始。
-- 新 Cruise 开始时 baseline 取当时 MaxBw，探针幅度重新初始化为该轮 `A0`，MaxRTT/RTpropDRate 保留，ProbedBw 本轮新鲜度清零。
-- 本轮无 Regime II 时不得发布新的 FBBR ProbedBw。
+- 新 Cruise 开始时 baseline 取当时 MaxBw，探针幅度重新初始化为该轮 `A0`，MaxRTT/RTpropDRate 保留，TrustedBw 本轮新鲜度清零。
+- 本轮无 Regime II 时，不用非 Regime II 窗口的 `tmpBw` 兜底发布 TrustedBw。
 - 连续有效窗依次为 `(SRTT无波动, DRate有波动)`、`(SRTT无波动, DRate有波动)` 时，第二窗结束后必须因 SRTT streak=2 进入增强；证明触发条件是“或”而不是“且”。增强至少实际运行一个新窗，不能被触发窗中的 DRate 波动同窗关闭。
 - 对称地，只有 DRate 连续两窗无波动也必须触发；两信号各自交替无波动、任一 streak 始终不到 2 时不得触发。
 - 每个信号的输入有效性独立控制自己的 streak：输入无效只冻结对应信号；相同 `window_second_cycle_id` 的重复判定不能二次累计。baseline 在两个普通窗口之间改变也不能清零 streak，新 Cruise 才清零。
-- 触发的第二窗无论得到 N01-N18 中哪一个结果（包括“SRTT 无波动、DRate 有波动”的 N15），都必须设置 `classification_suppressed_for_retry=true`，其 baseline/ProbedBw/MaxRTT/RTprop/RTpropDRate 全部不变。
+- 触发的第二窗无论得到 N01-N16 中哪一个结果（包括“SRTT 无波动、DRate 有波动”的 N15），都必须设置 `classification_suppressed_for_retry=true`，其 baseline/TrustedBw/MaxRTT/RTprop/RTpropDRate 全部不变。
 - 触发窗 C1+C2 后只能新采 C3，并以 C2+C3 复判；不得等待并重新采 C3+C4，也不得一次前进两个周期。C2+C3 中任一信号有波动时清除 `TWO_WINDOW_NO_WAVE` 并把两个 streak 归零；分类输入有效时执行该窗正式分类，仍无效时仅以 `INVALID_INPUT` 继续重试。
 - 若 C2+C3 二者仍无波动或分类输入仍无效，才按“同幅度第二次不确定”把 `A0` 增至 `1.25A0`；变幅只产生一个新 epoch 和一次 1 SRTT settle。
 - 新幅度首窗 C1+C2 仍无恢复时，必须先补 C3、用 C2+C3 再确认，不能每个两周期窗都直接增幅；连续失败的幅度序列及 2 倍上限与原不确定逻辑完全相同。
@@ -1264,28 +1266,28 @@ amplitude_before_bps,amplitude_after_bps
 
 建议分三层：
 
-1. **确定性合成 trace 回放**：为 N01-N18 生成 SRTT/DRate 两周期数据，要求 rule_id 100% 命中预期；另生成疑似上/下横切但不满足六种 case 的数据，要求准确进入波动回退树。
+1. **确定性合成 trace 回放**：为 N01-N16 生成 SRTT/DRate 两周期数据，要求 rule_id 100% 命中预期；另生成疑似上/下横切但不满足六种 case 的数据，要求准确进入波动回退树。
 2. **单流受控场景**：固定容量/RTT，分别制造欠载、满载、过载、上/下限截断和 ACK 聚合；检查 baseline 公式、MaxRTT/RTpropDRate 更新、普通波动输入视图区别、保真增强和滚动窗。
-3. **正式矩阵回归**：复用现有 FBBR 多流、多 seed、动态带宽/RTT、随机丢包/ACK 不稳定脚本。至少 10 seeds；`kFBBR` 除吞吐、RTT、公平性外还统计各 rule 命中率、六种横切验真率、横切候选回退率、不确定连续长度、两窗无波动触发/退出次数、单周期后探次数、增幅次数和错误不变量计数；`kFBBRAdaptive` 做行为冻结回归，不统计/消费 N01-N18。
+3. **正式矩阵回归**：复用现有 FBBR 多流、多 seed、动态带宽/RTT、随机丢包/ACK 不稳定脚本。至少 10 seeds；`kFBBR` 除吞吐、RTT、公平性外还统计各 rule 命中率、六种横切验真率、横切候选回退率、不确定连续长度、两窗无波动触发/退出次数、单周期后探次数、增幅次数和错误不变量计数；`kFBBRAdaptive` 做行为冻结回归，不统计/消费 N01-N16。
 
 通过门槛建议：
 
-- N01-N18 单元测试和公式边界测试 100% 通过；
+- N01-N16 单元测试和公式边界测试 100% 通过；
 - 合成 trace rule_id 准确率 100%；
 - 运行时不变量违规数为 0；
 - 任意确定 Regime 窗口的 baseline 实际值与公式值误差不超过 1 bps（浮点转整数前允许 `1e-9` 相对误差）；
 - Cruise 跨代状态测试中 MaxRTT/RTpropDRate 继承率 100%；
 - 第一次不确定后的单周期补采期间幅度变化次数为 0；同一幅度第二次不确定后的幅度序列、1.25 倍增长、2.0 倍封顶和 settle 次数与第 6 节完全一致；
 - 连续两窗按“或”触发、触发窗副作用冻结、每次严格只前进一个周期、任一恢复即退出、第二次仍失败才增幅及 epoch 隔离测试 100% 通过；
-- `kFBBRAdaptive` 的 N01-N18 命中数、PDF 执行器调用数、PDF 状态写入数和保真增强状态变化数全部为 0，且 golden trace 无非预期变化。
+- `kFBBRAdaptive` 的 N01-N16 命中数、PDF 执行器调用数、PDF 状态写入数和保真增强状态变化数全部为 0，且 golden trace 无非预期变化。
 
 ## 11. 推荐实施顺序
 
-1. 先新增纯数据结构、N01-N18 纯分类器和完整叶子测试，不接控制路径。
+1. 先新增纯数据结构、N01-N16 纯分类器和完整叶子测试，不接控制路径。
 2. 把 `DetectDualSignalPlateaus()` 拆成连续横切段、重复短接触、肩部派生和宽泛 middle disturbance；先补齐第 2.5-2.7 节特征测试，再接分类树。
 3. 在 `AnalyzeWaveformWindow()` 旁建立 `kFBBR` 专用分析入口，保留 Adaptive 原路径作行为对照。
 4. 只在 `RunFbbrV2RegimePipeline()` 接入 MaxRTT/RTpropDRate 生命周期和最终 rule 后的副作用。
-5. 替换 `kFBBR` 基线执行器为 50% 公式，接入 Regime II ProbedBw。
+5. 替换 `kFBBR` 基线执行器为 50% 公式，接入 Regime II TrustedBw。
 6. 将新版分类输入无效结果接入 `kFBBR` 现有后探/放大状态机，保持“一次扩展、第二次放大、2 倍封顶后滚动”的行为；Adaptive 原状态机不动。
 7. 实现第 6.2 节 no-wave streak 和统一 retry reason，把连续两窗无波动接入原不确定状态机；先用确定性 trace 验证触发窗副作用冻结、单周期滑窗、退出、增幅与 epoch 隔离。
 8. 扩充 trace，完成合成回放、单流受控和多流多 seed 回归。
@@ -1295,7 +1297,7 @@ amplitude_before_bps,amplitude_after_bps
 
 只有同时满足以下条件，才能认为“完全按照新版 PDF 改造”完成：
 
-- `kFBBR` 运行时确定性分类只可能返回 N01-N18，且分支顺序与第 3 节一致；只有输入无效、覆盖不足或必须谓词无法计算时返回不确定，N01-N18 本身没有不确定叶子；
+- `kFBBR` 运行时确定性分类只可能返回 N01-N16，且分支顺序与第 3 节一致；只有输入无效、覆盖不足或必须谓词无法计算时返回不确定，N01-N16 本身没有不确定叶子；
 - 横切分类只读取 SRTT：上横切只允许 U1/U2/U3，下横切只允许 L1/L2/L3；DRate 横切不得直接决定 Regime；
 - 六种 SRTT 横切 case 均未验真时，无论是否存在疑似候选，都准确回退到 SRTT `has_wave` 分支；U3/L3 绝不允许充当失败兜底；
 - 上下 accepted case 同时存在时上方向优先；上方向只有疑似候选、下方向存在 accepted case 时允许下方向分类；
@@ -1305,8 +1307,8 @@ amplitude_before_bps,amplitude_after_bps
 - periodic 只约束周期和完整性、不约束与发送三角波同形；同一信号的已验真上横切是硬否决，下横切不是，左右边缘线和 middle 允许遮罩/简化；
 - DRate 普通 `has_wave` 不看任何横切，始终从原始有效视图判断幅度、陡变样本和往返变化；SRTT 普通 `has_wave` 按规定使用清理视图；
 - MaxRTT、RTpropDRate 的更新点和跨 Cruise 生命周期正确；
-- 只有 `kFBBR` 的 Regime I/III 严格执行 50% 公式、Regime II 同时更新 baseline/ProbedBw；
-- `kFBBRAdaptive` 对 N01-N18、MaxRTT/RTpropDRate、PDF 执行器和保真增强状态的调用/写入计数全部为 0；其自身既有不确定扩展/幅度行为通过 golden trace 冻结回归；
+- 只有 `kFBBR` 的 Regime I/III 严格执行 50% 公式、Regime II 只更新 TrustedBw 且不改 baseline；
+- `kFBBRAdaptive` 对 N01-N16、MaxRTT/RTpropDRate、PDF 执行器和保真增强状态的调用/写入计数全部为 0；其自身既有不确定扩展/幅度行为通过 golden trace 冻结回归；
 - 不确定严格执行第 6 节：第一次只补一个周期，第二次按 1.25 倍调整探针幅度并重新 settle，2 倍封顶后逐周期滚动；不确定期间 baseline 不变；
 - SRTT 或 DRate 任一连续两个有效最终窗无普通波动后，冻结触发窗的全部判定副作用；状态机空闲时把它作为第一次不确定，已有输入无效重试时只合并 reason 而不重置阶段；随后每次只后探一个周期、用最新两周期复判，二者任一恢复就清除该 reason，否则按原状态机在同幅度第二次仍失败后以 1.25 倍增幅、2 倍封顶；
 - 全部分支、边界、冲突、状态机和公式测试通过，trace 能复原每次决策。
