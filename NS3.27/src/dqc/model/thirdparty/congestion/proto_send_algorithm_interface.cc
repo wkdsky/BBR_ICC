@@ -438,6 +438,32 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                false,
                                kFBBRHybrid);
         }
+        case kFBBRHybridV3:{
+            return new FBBRSender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+                               stats,
+                               false,
+                               false,
+                               false,
+                               kFBBRHybridV3);
+        }
+        case kFBBRHybridV4:{
+            return new FBBRSender(clock->Now(),
+                               rtt_stats,
+                               unacked_packets,
+                               initial_congestion_window,
+                               max_congestion_window,
+                               random,
+                               stats,
+                               false,
+                               false,
+                               false,
+                               kFBBRHybridV4);
+        }
         case kCopa:{
             return new CopaSender(clock->Now(),
                                rtt_stats,

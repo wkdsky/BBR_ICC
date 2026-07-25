@@ -131,7 +131,13 @@ kQuicBBR,kQuicBBRD,
 kBBRR,
 // ns-3.47 TcpCubic semantics adapted to the DQC transport interface.  Keep
 // this at the end so existing serialized enum values remain stable.
-kNs3Cubic};
+kNs3Cubic,
+// Model-consistent inflight projection variant.  Appended so every existing
+// serialized CongestionControlType value remains unchanged.
+kFBBRHybridV3,
+// Service-consistent inflight envelope variant.  The external experiment key
+// deliberately retains the requested "hybirdv4" spelling.
+kFBBRHybridV4};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);

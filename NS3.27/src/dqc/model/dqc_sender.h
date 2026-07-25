@@ -129,6 +129,7 @@ public:
     void SetStreamSendBufferBytes(uint32_t bytes);
     void SetPacketLimitBytes(uint64_t bytes);
     void SetDataGeneratorBatch(uint32_t packets_per_fill);
+    void FinalizeCongestionControlTrace();
     void SetDataChunkVariationBytes(uint32_t variation_bytes,
                                     uint64_t variation_seed = 0);
     void SetProcessIntervalUs(int64_t interval_us);

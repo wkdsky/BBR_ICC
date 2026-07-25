@@ -34,12 +34,15 @@ if TIMES_NEW_ROMAN_BOLD_PATH.exists():
 # =========================
 
 BOUNDARY_COLOR = "#212529"
+REGIME_BRACKET_COLOR = "#343a40"
 OPTIMAL_AREA_COLOR = "#f08c00"
 OPTIMAL_AREA_TEXT_COLOR = "#7a3f00"
 SEND_RATE_COLOR = "#0072b2"
 DRATE_COLOR = "#d9480f"
 CROSS_COLOR = "#495057"
 SRTT_COLOR = "#5f3dc4"
+REGIME_PSD_DRATE_COLOR = "#b85d24"
+REGIME_PSD_SRTT_COLOR = "#3f2bb8"
 CALLOUT_COLOR = "#009e73"
 CALLOUT_FILL_COLOR = "#c3fae8"
 OPTIMAL_AREA_START_S = 2.2
@@ -50,7 +53,7 @@ OPTIMAL_AREA_LABEL = "Kleinrock's optimal\noperating area"
 EXPORT_DPI = 600
 IEEE_COLUMN_WIDTH_IN = 3.5
 TARGET_FINAL_TEXT_PT = 8.0
-TIME_FIGSIZE = (IEEE_COLUMN_WIDTH_IN, 3.65)
+TIME_FIGSIZE = (IEEE_COLUMN_WIDTH_IN, 3.48)
 SPECTRUM_FIGSIZE = (IEEE_COLUMN_WIDTH_IN, 2.2)
 TEXT_WEIGHT = "bold"
 
@@ -64,6 +67,8 @@ LEGEND_FS = SOURCE_TEXT_FS
 SMALL_LEGEND_FS = SOURCE_TEXT_FS
 
 DATA_LW = 1.45
+REGIME_PSD_DRATE_LW = DATA_LW
+REGIME_PSD_SRTT_LW = DATA_LW + 0.25
 SEND_RATE_LW = 1.45
 RATE_SERIES_LW = 1.75
 BACKGROUND_RATE_LW = 1.25
@@ -76,6 +81,8 @@ HATCH_LW = 0.28
 # Keep every simultaneously displayed series identifiable in grayscale.
 SEND_RATE_LINESTYLE = (0, (0.9, 0.55))
 DRATE_LINESTYLE = "-"
+REGIME_PSD_DRATE_LINESTYLE = (0, (2.6, 1.15))
+REGIME_PSD_SRTT_LINESTYLE = "-"
 BACKGROUND_LINESTYLE = (0, (5.0, 2.0, 1.4, 2.0))
 SERVICE_RATE_LINESTYLE = (0, (1.0, 1.8))
 SRTT_LINESTYLE = "-"
@@ -83,15 +90,15 @@ SPECTRUM_SRTT_LINESTYLE = (0, (0.9, 0.55))
 
 # Manual figure layout.  The first-row spectrum panels are horizontally
 # aligned with the three equal time-domain Regimes.
-FIG_LEFT = 0.078
-FIG_RIGHT = 0.995
+FIG_LEFT = 0.070
+FIG_RIGHT = 0.974
 FIG_WIDTH = FIG_RIGHT - FIG_LEFT
-SPECTRUM_Y0 = 0.724
-SPECTRUM_H = 0.150
-RATE_Y0 = 0.395
-RATE_H = 0.205
-RTT_Y0 = 0.085
-RTT_H = 0.240
+SPECTRUM_Y0 = 0.727
+SPECTRUM_H = 0.157
+RATE_Y0 = 0.403
+RATE_H = 0.215
+RTT_Y0 = 0.086
+RTT_H = 0.252
 REGIME_AXIS_GAP = 0.006
 MIN_REGIME_AXIS_W = 0.075
 VISIBLE_SRTT_P2P_MS = 1.0
@@ -321,8 +328,9 @@ def add_time_domain_margin_backgrounds(
         (visible_start_s, first_boundary_s),
         (second_boundary_s, visible_end_s),
     ]
-    for ax in axes:
-        for start_s, end_s in intervals:
+    interval_labels = ["①", "②"]
+    for ax_index, ax in enumerate(axes):
+        for interval_index, (start_s, end_s) in enumerate(intervals):
             if end_s <= start_s:
                 continue
             ax.add_patch(
@@ -331,9 +339,9 @@ def add_time_domain_margin_backgrounds(
                     end_s - start_s,
                     1.0,
                     transform=ax.get_xaxis_transform(),
-                    facecolor="#aeb7c1",
+                    facecolor="#cfd8e3",
                     edgecolor="none",
-                    alpha=0.30,
+                    alpha=0.42,
                     zorder=0.45,
                 )
             )
@@ -346,13 +354,30 @@ def add_time_domain_margin_backgrounds(
                     1.0,
                     transform=ax.get_xaxis_transform(),
                     facecolor="none",
-                    edgecolor="#66717d",
-                    linewidth=0.0,
-                    hatch="///",
-                    alpha=0.34,
+                    edgecolor="#6b7785",
+                    linewidth=0.48,
+                    hatch="////",
+                    alpha=0.46,
                     zorder=0.50,
                 )
             )
+            if ax_index == len(axes) - 1:
+                ax.text(
+                    0.5 * (start_s + end_s),
+                    0.335,
+                    interval_labels[interval_index],
+                    transform=ax.get_xaxis_transform(),
+                    ha="center",
+                    va="center",
+                    fontsize=LABEL_FS * 1.65,
+                    fontfamily="DejaVu Sans",
+                    fontweight=TEXT_WEIGHT,
+                    color="#263238",
+                    path_effects=[
+                        pe.withStroke(linewidth=2.0, foreground="#ffffff", alpha=0.92)
+                    ],
+                    zorder=8,
+                )
 
 
 def add_srtt_magnifiers(
@@ -640,30 +665,88 @@ def add_regime_labels(
     full_to_overload: float | None,
     sender_stop_s: float,
 ) -> None:
-    """Place Regime labels at the centers of their spectrum panels."""
+    """Place Regime labels at the centers of their time-domain regions."""
 
     fig.canvas.draw()
 
+    regime_edges = [
+        sender_start_s,
+        under_to_full,
+        full_to_overload,
+        sender_stop_s,
+    ]
+    if any(edge is None for edge in regime_edges):
+        return
+
+    fig_edges = [data_x_to_fig_x(fig, ref_ax, float(edge)) for edge in regime_edges]
+
     regime_labels = [
         ("Regime I:\nbottleneck\nunsaturated", 1.08),
-        ("Regime II:\nbottleneck\nsaturated", 0.94),
-        ("Regime III:\nbuffer\nsaturated", 0.94),
+        ("Regime II:\nbottleneck\nsaturated", 1.08),
+        ("Regime III:\nbuffer\nsaturated", 1.08),
     ]
 
-    y_top = max(ax.get_position().y1 for ax in spectrum_axes)
+    spectrum_top = max(ax.get_position().y1 for ax in spectrum_axes)
+    bracket_y = spectrum_top + 0.016
+    bracket_tick_h = 0.014
+    label_y = 0.995
 
-    label_y = y_top + 0.008
+    for boundary_x in fig_edges[1:-1]:
+        fig.add_artist(
+            Line2D(
+                [boundary_x, boundary_x],
+                [spectrum_top, bracket_y],
+                transform=fig.transFigure,
+                color=BOUNDARY_COLOR,
+                linewidth=BOUNDARY_LW,
+                linestyle="--",
+                alpha=0.92,
+                zorder=38,
+                clip_on=False,
+            )
+        )
 
-    for (label, line_spacing), spectrum_ax in zip(regime_labels, spectrum_axes):
-        position = spectrum_ax.get_position()
-        center_x = 0.5 * (position.x0 + position.x1)
+    for i in range(3):
+        left = fig_edges[i]
+        right = fig_edges[i + 1]
+        if right <= left:
+            continue
 
+        fig.add_artist(
+            Line2D(
+                [left, right],
+                [bracket_y, bracket_y],
+                transform=fig.transFigure,
+                color=REGIME_BRACKET_COLOR,
+                linewidth=0.95,
+                solid_capstyle="butt",
+                zorder=39,
+                clip_on=False,
+            )
+        )
+
+    for edge_x in fig_edges:
+        fig.add_artist(
+            Line2D(
+                [edge_x, edge_x],
+                [bracket_y, bracket_y + bracket_tick_h],
+                transform=fig.transFigure,
+                color=REGIME_BRACKET_COLOR,
+                linewidth=0.95,
+                solid_capstyle="butt",
+                zorder=39,
+                clip_on=False,
+            )
+        )
+
+    for i, (label, line_spacing) in enumerate(regime_labels):
+        center_x = 0.5 * (fig_edges[i] + fig_edges[i + 1])
         fig.text(
             center_x,
             label_y,
             label,
             ha="center",
-            va="bottom",
+            va="top",
             fontsize=REGIME_LABEL_FS,
             fontweight=TEXT_WEIGHT,
             linespacing=line_spacing,
@@ -929,20 +1012,22 @@ def plot_regime_spectrum(
     ax.plot(
         rx_freqs[rx_mask],
         rx_energy[rx_mask],
-        color=DRATE_COLOR,
-        linewidth=DATA_LW,
-        linestyle=DRATE_LINESTYLE,
+        color=REGIME_PSD_DRATE_COLOR,
+        linewidth=REGIME_PSD_DRATE_LW,
+        linestyle=REGIME_PSD_DRATE_LINESTYLE,
+        dash_capstyle="butt",
         label="DRate",
+        zorder=3,
     )
 
     ax.plot(
         rtt_freqs[rtt_mask],
         rtt_energy[rtt_mask],
-        color=SRTT_COLOR,
-        linewidth=DATA_LW,
-        linestyle=SPECTRUM_SRTT_LINESTYLE,
-        dash_capstyle="butt",
+        color=REGIME_PSD_SRTT_COLOR,
+        linewidth=REGIME_PSD_SRTT_LW,
+        linestyle=REGIME_PSD_SRTT_LINESTYLE,
         label="SRTT",
+        zorder=4,
     )
 
     ax.axvline(
@@ -958,8 +1043,8 @@ def plot_regime_spectrum(
     # shared across all three regimes, rather than mixing Mbps and milliseconds
     # on a single numerical reference.
     for freqs, energy, mask, color, marker in (
-        (rx_freqs, rx_energy, rx_mask, DRATE_COLOR, "o"),
-        (rtt_freqs, rtt_energy, rtt_mask, SRTT_COLOR, "s"),
+        (rx_freqs, rx_energy, rx_mask, REGIME_PSD_DRATE_COLOR, "o"),
+        (rtt_freqs, rtt_energy, rtt_mask, REGIME_PSD_SRTT_COLOR, "s"),
     ):
         band_indices = np.flatnonzero(mask)
         if len(band_indices):
@@ -1027,18 +1112,18 @@ def plot_regime_spectrum(
             Line2D(
                 [0],
                 [0],
-                color=DRATE_COLOR,
-                linewidth=DATA_LW,
-                linestyle=DRATE_LINESTYLE,
+                color=REGIME_PSD_DRATE_COLOR,
+                linewidth=REGIME_PSD_DRATE_LW,
+                linestyle=REGIME_PSD_DRATE_LINESTYLE,
+                dash_capstyle="butt",
                 label="DRate",
             ),
             Line2D(
                 [0],
                 [0],
-                color=SRTT_COLOR,
-                linewidth=DATA_LW,
-                linestyle=SPECTRUM_SRTT_LINESTYLE,
-                dash_capstyle="butt",
+                color=REGIME_PSD_SRTT_COLOR,
+                linewidth=REGIME_PSD_SRTT_LW,
+                linestyle=REGIME_PSD_SRTT_LINESTYLE,
                 label="SRTT",
             ),
         ]
@@ -1346,9 +1431,44 @@ def main() -> None:
             args.freq_max_hz,
             show_ylabel=(i == 0),
             legend_loc="upper left",
-            show_legend=(i == 2),
+            show_legend=False,
             show_xlabel=False,
         )
+
+    spectrum_legend_kwargs = {
+        "frameon": False,
+        "prop": {"size": SMALL_LEGEND_FS * 0.92, "weight": TEXT_WEIGHT},
+        "handlelength": 0.82,
+        "handletextpad": 0.16,
+        "borderpad": 0.0,
+        "labelspacing": 0.00,
+        "borderaxespad": 0.0,
+    }
+    spectrum_axes[1].legend(
+        handles=[
+            Line2D(
+                [0],
+                [0],
+                color=REGIME_PSD_DRATE_COLOR,
+                linewidth=REGIME_PSD_DRATE_LW,
+                linestyle=REGIME_PSD_DRATE_LINESTYLE,
+                dash_capstyle="butt",
+                label="DRate",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color=REGIME_PSD_SRTT_COLOR,
+                linewidth=REGIME_PSD_SRTT_LW,
+                linestyle=REGIME_PSD_SRTT_LINESTYLE,
+                label="SRTT",
+            ),
+        ],
+        loc="upper left",
+        bbox_to_anchor=(0.205, 0.965),
+        ncol=1,
+        **spectrum_legend_kwargs,
+    )
 
     fig.text(
         FIG_LEFT + 0.5 * FIG_WIDTH,
@@ -1373,7 +1493,7 @@ def main() -> None:
         dash_capstyle="butt",
         alpha=1.0,
         label="SRate",
-        zorder=6,
+        zorder=5,
     )[0]
     srate_line.set_path_effects(
         [
@@ -1393,7 +1513,7 @@ def main() -> None:
         linewidth=RATE_SERIES_LW,
         linestyle=DRATE_LINESTYLE,
         label="DRate",
-        zorder=5,
+        zorder=7,
     )
 
     cross_window = max(1, int(round(0.05 / max(float(np.median(np.diff(t))), 1e-9))))
@@ -1489,12 +1609,12 @@ def main() -> None:
     }
     probe_legend = axes[0].legend(
         [
-            label_to_handle["SRate"],
             label_to_handle["DRate"],
+            label_to_handle["SRate"],
         ],
-        ["SRate", "DRate"],
+        ["DRate", "SRate"],
         loc="upper center",
-        bbox_to_anchor=(0.225, 0.970),
+        bbox_to_anchor=(0.145, 0.970),
         ncol=1,
         **rate_legend_kwargs,
     )
@@ -1514,7 +1634,7 @@ def main() -> None:
         [label_to_handle["Link service rate"]],
         ["Service rate"],
         loc="upper center",
-        bbox_to_anchor=(0.820, 0.555),
+        bbox_to_anchor=(0.875, 0.910),
         ncol=1,
         **rate_legend_kwargs,
     )

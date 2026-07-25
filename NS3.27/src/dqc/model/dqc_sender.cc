@@ -50,13 +50,15 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
            type == kFreqCCv3 || type == kFBBR ||
-           type == kFBBRAdaptive || type == kFBBRHybrid;
+           type == kFBBRAdaptive || type == kFBBRHybrid ||
+           type == kFBBRHybridV3 || type == kFBBRHybridV4;
 }
 
 bool
 IsFBBRAlgorithm(CongestionControlType type)
 {
-    return type == kFBBR || type == kFBBRAdaptive || type == kFBBRHybrid;
+    return type == kFBBR || type == kFBBRAdaptive || type == kFBBRHybrid ||
+           type == kFBBRHybridV3 || type == kFBBRHybridV4;
 }
 
 std::string
@@ -511,7 +513,20 @@ void DqcSender::StopApplication(){
 	m_engineTimer.Cancel();
     FlushLossWindows(true);
     CloseEquivalenceAuditTrace();
+    FinalizeCongestionControlTrace();
     m_sinks.clear();
+}
+
+void DqcSender::FinalizeCongestionControlTrace(){
+    SendPacketManager* sent_manager = m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo =
+        sent_manager ? sent_manager->GetSendAlgorithm() : nullptr;
+    if (algo && algo->GetCongestionControlType() == kFBBRHybridV3) {
+        static_cast<FBBRSender*>(algo)->FinalizeFbbrV3Trace();
+    } else if (algo &&
+               algo->GetCongestionControlType() == kFBBRHybridV4) {
+        static_cast<FBBRSender*>(algo)->FinalizeFbbrV4Trace();
+    }
 }
 void DqcSender::RecvPacket(Ptr<Socket> socket){
     if(!m_running){return;}

@@ -31,7 +31,15 @@ DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
 CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
-OPTIONAL_CCS = ("FBBR-adaptive", "FBBR-hybrid", "FreqCCv3", "BBR-R", "CUBIC")
+OPTIONAL_CCS = (
+    "FBBR-adaptive",
+    "FBBR-hybrid",
+    "FBBR-hybridv3",
+    "FBBR-hybirdv4",
+    "FreqCCv3",
+    "BBR-R",
+    "CUBIC",
+)
 SELECTABLE_CCS = (*CCS, *OPTIONAL_CCS)
 
 PLOT_SCRIPT = Path(__file__).with_name("plot_4cc_comparison.py")
@@ -445,6 +453,18 @@ ALGORITHM_PARAMS = {
         "algorithm": "FBBR-hybrid",
         "notes": "独立 N01-N16 量化判定、MaxRTT/RTpropDRate 状态、50% 执行器和两窗无波保真增强分支。",
     },
+    "FBBR-hybridv3": {
+        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FBBR-hybridv3",
+        "notes": "复用 FBBR-hybrid 频域观察器，以 ReferenceBw 驱动 pacing，并用精确 RTprop pacing 积分限制最终 inflight。",
+    },
+    "FBBR-hybirdv4": {
+        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FBBR-hybirdv4",
+        "notes": "保持 V3 pacing/Reference，以累计 delivered service 与既有正向 probing credit 构造短期 inflight envelope。",
+    },
     "FBBR": {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
         "config_file": str(DEFAULT_FBBR_CONFIG),
@@ -583,7 +603,14 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         cc: dict(ALGORITHM_PARAMS.get(cc, {"algorithm": cc}))
         for cc in selected
     }
-    for cc in ("FBBR", "FBBR-adaptive", "FBBR-hybrid", "FreqCCv3"):
+    for cc in (
+        "FBBR",
+        "FBBR-adaptive",
+        "FBBR-hybrid",
+        "FBBR-hybridv3",
+        "FBBR-hybirdv4",
+        "FreqCCv3",
+    ):
         if cc in params:
             params[cc]["config_file"] = args.fbbr_config
 
@@ -739,7 +766,8 @@ def make_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "只运行指定 CC，可用逗号分隔。支持默认四种 CC，以及 "
-            "FBBR-adaptive、FBBR-hybrid、FreqCCv3、BBR-R 和 CUBIC。"
+            "FBBR-adaptive、FBBR-hybrid、FBBR-hybridv3、FBBR-hybirdv4、FreqCCv3、"
+            "BBR-R 和 CUBIC。"
         ),
     )
 

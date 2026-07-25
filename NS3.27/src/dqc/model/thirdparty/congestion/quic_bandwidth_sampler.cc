@@ -454,6 +454,7 @@ void QuicBandwidthSampler::SentPacketToSendTimeState(
     QuicSendTimeState* send_time_state) const {
   *send_time_state = sent_packet.send_time_state;
   send_time_state->is_valid = true;
+  send_time_state->sent_time = sent_packet.sent_time;
 }
 
 void QuicBandwidthSampler::OnAppLimited() {

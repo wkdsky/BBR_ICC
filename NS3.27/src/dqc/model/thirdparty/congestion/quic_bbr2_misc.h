@@ -553,6 +553,10 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
     return bandwidth_sampler_.total_bytes_sent();
   }
 
+  bool is_app_limited() const {
+    return bandwidth_sampler_.is_app_limited();
+  }
+
   int64_t loss_events_in_round() const { return loss_events_in_round_; }
 
   QuicByteCount max_bytes_delivered_in_round() const {

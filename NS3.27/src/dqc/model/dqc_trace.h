@@ -77,6 +77,8 @@ private:
     void OpenFBBRCruiseSummaryFile();
     void OpenFBBRGateFile();
     void OpenFBBRWaveformSearchFile();
+    void OpenFBBRV3SummaryFile();
+    void OpenFBBRV4SummaryFile();
     void OpenStatsFile();
     void CloseOwdFile();
     void CloseRttFile();
@@ -96,6 +98,8 @@ private:
     void CloseFBBRCruiseSummaryFile();
     void CloseFBBRGateFile();
     void CloseFBBRWaveformSearchFile();
+    void CloseFBBRV3SummaryFile();
+    void CloseFBBRV4SummaryFile();
     void CloseStatsFile();
     int m_id=0;
     std::string m_name;       // Store the log name for lazy file opening
@@ -120,6 +124,8 @@ private:
     std::fstream m_fbbrCruiseSummary;
     std::fstream m_fbbrGate;
     std::fstream m_fbbrWaveformSearch;
+    std::fstream m_fbbrV3Summary;
+    std::fstream m_fbbrV4Summary;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records
     int64_t m_lastBwTimeUs = -1; // Track last bw timestamp to avoid same-time duplicates

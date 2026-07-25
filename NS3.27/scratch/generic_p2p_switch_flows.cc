@@ -636,7 +636,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
     SET_WAVEFORM_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
     SET_WAVEFORM_DOUBLE("fbbr.regime.actuator.midpoint_trigger_ratio", fbbr_regime_actuator_midpoint_trigger_ratio)
     SET_WAVEFORM_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
-    SET_WAVEFORM_BOOL("fbbr.wave_fidelity.stop_on_either_wave", fbbr_wave_fidelity_stop_on_either_wave)
     SET_WAVEFORM_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
     SET_WAVEFORM_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)
     SET_WAVEFORM_DOUBLE("waveform.activity.min_level_ratio", waveform_activity_min_level_ratio)
@@ -1217,6 +1216,14 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFBBRHybrid, "FBBR-hybrid", false, true};
     }
+    if (key == "FBBR-hybridv3")
+    {
+        return {dqc::kFBBRHybridV3, "FBBR-hybridv3", false, true};
+    }
+    if (key == "FBBR-hybirdv4")
+    {
+        return {dqc::kFBBRHybridV4, "FBBR-hybirdv4", false, true};
+    }
     if (key == "FreqCCv3")
     {
         return {dqc::kFreqCCv3, "FreqCCv3", false, true};
@@ -1227,7 +1234,7 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
-                                              "FBBR, FBBR-adaptive, FBBR-hybrid, "
+                                              "FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, "
                                               "FreqCCv3, BBRv2)");
 }
 
@@ -1813,6 +1820,11 @@ RunScenario(const ScenarioConfig& scenario,
     const auto wall_end = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> wall = wall_end - wall_start;
 
+    for (const Ptr<DqcSender>& sender : send_apps)
+    {
+        sender->FinalizeCongestionControlTrace();
+    }
+
     std::cout << "[runtime] sim_stop_s=" << scenario.sim_time_s
               << " simulator_now_s=" << Simulator::Now().GetSeconds()
               << " wall_seconds=" << wall.count()
@@ -1948,7 +1960,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FreqCCv3, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",

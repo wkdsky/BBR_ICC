@@ -391,6 +391,16 @@ void DqcTrace::OnFBBRLoad(double window_start_s, double window_end_s,
         if(m_fbbrCruiseSummary.is_open()){
             m_fbbrCruiseSummary<<diagnostics<<"\n";
         }
+    }else if(label == "V3_FLOW_SUMMARY"){
+        OpenFBBRV3SummaryFile();
+        if(m_fbbrV3Summary.is_open()){
+            m_fbbrV3Summary<<diagnostics<<"\n";
+        }
+    }else if(label == "V4_FLOW_SUMMARY"){
+        OpenFBBRV4SummaryFile();
+        if(m_fbbrV4Summary.is_open()){
+            m_fbbrV4Summary<<diagnostics<<"\n";
+        }
     }else{
         OpenFBBRLoadFile();
         if(m_fbbrLoad.is_open()){
@@ -434,6 +444,8 @@ void DqcTrace::Close(){
     CloseFBBRCruiseSummaryFile();
     CloseFBBRGateFile();
     CloseFBBRWaveformSearchFile();
+    CloseFBBRV3SummaryFile();
+    CloseFBBRV4SummaryFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -539,6 +551,18 @@ void DqcTrace::CloseFBBRWaveformSearchFile(){
     if(m_fbbrWaveformSearch.is_open()){
         m_fbbrWaveformSearch.flush();
         m_fbbrWaveformSearch.close();
+    }
+}
+void DqcTrace::CloseFBBRV3SummaryFile(){
+    if(m_fbbrV3Summary.is_open()){
+        m_fbbrV3Summary.flush();
+        m_fbbrV3Summary.close();
+    }
+}
+void DqcTrace::CloseFBBRV4SummaryFile(){
+    if(m_fbbrV4Summary.is_open()){
+        m_fbbrV4Summary.flush();
+        m_fbbrV4Summary.close();
     }
 }
 void DqcTrace::CloseStatsFile(){
@@ -668,12 +692,12 @@ void DqcTrace::OpenFBBRCruiseSummaryFile(){
 		                                <<",adaptive_srtt_up_ms"
 		                                <<",hybrid_baseline_low_valid"
 		                                <<",hybrid_baseline_low_bps"
-		                                <<",hybrid_baseline_up_valid"
-		                                <<",hybrid_baseline_up_bps"
+		                                <<",hybrid_max_bw_valid"
+		                                <<",hybrid_max_bw_bps"
 		                                <<",hybrid_srtt_low_rtprop_valid"
 		                                <<",hybrid_srtt_low_rtprop_ms"
-		                                <<",hybrid_srtt_max_max_rtt_valid"
-		                                <<",hybrid_srtt_max_max_rtt_ms"
+		                                <<",hybrid_max_srtt_valid"
+		                                <<",hybrid_max_srtt_ms"
 		                                <<std::endl;
     }
 }
@@ -843,14 +867,14 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",srtt_srate_period_error_ratio,drate_srate_period_error_ratio"
             <<",srtt_edge_mask_ratio,drate_edge_mask_ratio"
             <<",hybrid_inflight_bdp_valid,hybrid_inflight_bytes,hybrid_bdp_bytes"
-            <<",max_rtt_valid,max_rtt_before_ms,max_rtt_after_ms"
+            <<",max_srtt_valid,max_srtt_before_ms,max_srtt_after_ms"
             <<",rtprop_drate_valid,rtprop_drate_before_bps,rtprop_drate_after_bps"
             <<",hybrid_baseline_low_before_valid,hybrid_baseline_low_before_bps"
             <<",hybrid_baseline_low_after_valid,hybrid_baseline_low_after_bps"
-            <<",hybrid_baseline_up_before_valid,hybrid_baseline_up_before_bps"
-            <<",hybrid_baseline_up_after_valid,hybrid_baseline_up_after_bps"
+            <<",hybrid_max_bw_before_valid,hybrid_max_bw_before_bps"
+            <<",hybrid_max_bw_after_valid,hybrid_max_bw_after_bps"
             <<",hybrid_srtt_low_rtprop_valid,hybrid_srtt_low_rtprop_ms"
-            <<",hybrid_srtt_max_max_rtt_valid,hybrid_srtt_max_max_rtt_ms"
+            <<",hybrid_max_srtt_valid,hybrid_max_srtt_ms"
             <<",hybrid_swing_bps,hybrid_reference_gap_bps"
             <<",hybrid_bracket_valid,hybrid_bracket_target_bps"
             <<",hybrid_bracket_triggered,hybrid_midpoint_triggered"
@@ -862,7 +886,74 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",retry_window_advance_periods,retry_window_stride_cycles"
             <<",inconclusive_extension_count,inconclusive_amplification_count"
             <<",initial_probe_amplitude_bps,current_probe_amplitude_bps"
-            <<",inconclusive_amplitude_cap_bps,rolling_retry_count\n";
+            <<",inconclusive_amplitude_cap_bps,rolling_retry_count"
+            <<",v3_reference_bw,v3_reference_source"
+            <<",v3_model_inflight,v3_inflight_cap,v3_native_cwnd"
+            <<",v3_actual_inflight,v3_raw_queue_debt"
+            <<",v3_enforced_excess,v3_cap_binding_fraction"
+            <<",v3_history_valid"
+            <<",v4_reference_bw,v4_reference_source"
+            <<",v4_plan_inflight,v4_service_inflight"
+            <<",v4_positive_probe_credit,v4_service_budget"
+            <<",v4_envelope,v4_extra_acked,v4_inflight_cap"
+            <<",v4_native_cwnd,v4_actual_inflight"
+            <<",v4_service_history_valid"
+            <<",v4_app_limited_contaminated"
+            <<",v4_projection_active,v4_service_restriction"
+            <<",v4_enforced_excess,v4_cap_binding_fraction\n";
+    }
+}
+void DqcTrace::OpenFBBRV3SummaryFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrV3Summary.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
+            +std::to_string(m_id)+"_v3_projection_summary.csv";
+    }else{
+        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
+            +"_v3_projection_summary.csv";
+    }
+    m_fbbrV3Summary.open(path.c_str(), std::fstream::out);
+    if(m_fbbrV3Summary.is_open()){
+        m_fbbrV3Summary
+            <<"algorithm,flow_id,reference_trusted_time_ratio"
+            <<",reference_guard_time_ratio,reference_last_valid_time_ratio"
+            <<",reference_invalid_time_ratio,projection_active_time_ratio"
+            <<",history_invalid_time_ratio,cap_binding_time_ratio"
+            <<",mean_model_inflight,mean_raw_queue_debt,p95_raw_queue_debt"
+            <<",mean_enforced_excess,p95_enforced_excess\n";
+    }
+}
+void DqcTrace::OpenFBBRV4SummaryFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrV4Summary.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
+            +std::to_string(m_id)+"_v4_service_envelope_summary.csv";
+    }else{
+        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
+            +"_v4_service_envelope_summary.csv";
+    }
+    m_fbbrV4Summary.open(path.c_str(), std::fstream::out);
+    if(m_fbbrV4Summary.is_open()){
+        m_fbbrV4Summary
+            <<"algorithm,flow_id,reference_trusted_time_ratio"
+            <<",reference_guard_time_ratio,reference_last_valid_time_ratio"
+            <<",reference_invalid_time_ratio,projection_active_time_ratio"
+            <<",service_history_valid_time_ratio"
+            <<",app_limited_fallback_time_ratio"
+            <<",plan_only_fallback_time_ratio"
+            <<",service_limited_time_ratio,cap_binding_time_ratio"
+            <<",mean_plan_inflight,p95_plan_inflight"
+            <<",mean_service_inflight,p95_service_inflight"
+            <<",mean_probe_credit,p95_probe_credit"
+            <<",mean_extra_acked,p95_extra_acked"
+            <<",mean_service_restriction,p95_service_restriction"
+            <<",mean_enforced_excess,p95_enforced_excess\n";
     }
 }
 void DqcTrace::OpenFBBRGateFile(){

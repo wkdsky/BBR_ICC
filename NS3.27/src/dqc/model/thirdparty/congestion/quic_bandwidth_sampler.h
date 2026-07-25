@@ -20,6 +20,7 @@ struct QuicSendTimeState {
   QuicSendTimeState()
       : is_valid(false),
         is_app_limited(false),
+        sent_time(ProtoTime::Zero()),
         total_bytes_sent(0),
         total_bytes_acked(0),
         total_bytes_lost(0),
@@ -32,6 +33,7 @@ struct QuicSendTimeState {
                 QuicByteCount bytes_in_flight)
       : is_valid(true),
         is_app_limited(is_app_limited),
+        sent_time(ProtoTime::Zero()),
         total_bytes_sent(total_bytes_sent),
         total_bytes_acked(total_bytes_acked),
         total_bytes_lost(total_bytes_lost),
@@ -49,6 +51,9 @@ struct QuicSendTimeState {
   // App limited bandwidth sample might be artificially low because the sender
   // did not have enough data to send in order to saturate the link.
   bool is_app_limited;
+
+  // Time at which the acked or lost packet represented by this state was sent.
+  ProtoTime sent_time;
 
   // Total number of sent bytes at the time the packet was sent.
   // Includes the packet itself.

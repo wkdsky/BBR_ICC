@@ -56,6 +56,12 @@ enum class FBBRPacingBaseSource {
   kTrustedBw,
   kWaveformCruiseBaseline,
   kHybridLowerBoundSearch,
+  kV3TrustedReference,
+  kV3GuardReference,
+  kV3LastValidReference,
+  kV4TrustedReference,
+  kV4GuardReference,
+  kV4LastValidReference,
 };
 
 enum class FBBRCruiseDetectorMode {
@@ -291,6 +297,10 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static bool RunWaveformCruiseSelfTest(std::ostream& os);
   static bool RunFbbrBaselineSelfTest(std::ostream& os);
   static bool RunFbbrHybridSelfTest(std::ostream& os);
+  static bool RunFbbrHybridV3SelfTest(std::ostream& os);
+  static bool RunFbbrHybridV4SelfTest(std::ostream& os);
+  void FinalizeFbbrV3Trace();
+  void FinalizeFbbrV4Trace();
   static bool RunHybridBaselineSelfTest(std::ostream& os) {
     return RunFbbrBaselineSelfTest(os);
   }
@@ -312,6 +322,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                          const LostPacketVector& lost_packets) override;
 
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
+  QuicByteCount GetCongestionWindow() const override;
 
   int32_t GetCurrentBbrModeIndex() const override;
 
@@ -468,6 +479,80 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     size_t normal_window_count;
     size_t merged_window_count;
     size_t spectral_invalid_count;
+  };
+
+  enum class FbbrV3ReferenceSource {
+    kTrusted,
+    kGuard,
+    kLastValid,
+    kInvalid,
+  };
+
+  struct FbbrV3ReferenceResult {
+    QuicBandwidth bandwidth = QuicBandwidth::Zero();
+    FbbrV3ReferenceSource source = FbbrV3ReferenceSource::kInvalid;
+    bool valid = false;
+  };
+
+  struct FbbrV3PacingTargetSegment {
+    QuicTime start = QuicTime::Zero();
+    // Zero denotes the currently open segment.  Closed segments always have
+    // end > start; zero-duration updates are coalesced.
+    QuicTime end = QuicTime::Zero();
+    QuicBandwidth target_rate = QuicBandwidth::Zero();
+  };
+
+  struct FbbrV3ProjectionSnapshot {
+    FbbrV3ReferenceResult reference;
+    QuicBandwidth pacing_target = QuicBandwidth::Zero();
+    QuicByteCount model_inflight = 0;
+    QuicByteCount inflight_cap = 0;
+    QuicByteCount native_cwnd = 0;
+    QuicByteCount actual_inflight = 0;
+    QuicByteCount raw_queue_debt = 0;
+    QuicByteCount enforced_excess = 0;
+    bool history_valid = false;
+    bool projection_active = false;
+    bool cap_binding = false;
+  };
+
+  struct FbbrRateSegment {
+    QuicTime start = QuicTime::Zero();
+    QuicTime end = QuicTime::Zero();
+    QuicBandwidth target_rate = QuicBandwidth::Zero();
+    QuicBandwidth base_target_rate = QuicBandwidth::Zero();
+  };
+
+  struct FbbrDeliveredPoint {
+    QuicTime timestamp = QuicTime::Zero();
+    uint64_t cumulative_delivered_bytes = 0;
+    bool app_limited = false;
+  };
+
+  struct FbbrV4EnvelopeSnapshot {
+    FbbrV3ReferenceResult reference;
+    QuicBandwidth pacing_target = QuicBandwidth::Zero();
+    QuicBandwidth pacing_base_target = QuicBandwidth::Zero();
+    QuicByteCount plan_inflight = 0;
+    QuicByteCount service_inflight = 0;
+    QuicByteCount positive_probe_credit = 0;
+    QuicByteCount service_budget = 0;
+    QuicByteCount envelope = 0;
+    QuicByteCount extra_acked = 0;
+    QuicByteCount inflight_cap = 0;
+    QuicByteCount native_cwnd = 0;
+    QuicByteCount actual_inflight = 0;
+    QuicByteCount plan_excess = 0;
+    QuicByteCount service_restriction = 0;
+    QuicByteCount raw_queue_debt = 0;
+    QuicByteCount envelope_debt = 0;
+    QuicByteCount enforced_excess = 0;
+    bool target_history_valid = false;
+    bool service_history_valid = false;
+    bool app_limited_contaminated = false;
+    bool projection_active = false;
+    bool service_limited = false;
+    bool cap_binding = false;
   };
 
   struct ResampledWaveformSeries {
@@ -715,8 +800,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   };
 
   struct FbbrRegimeContext {
-    bool max_rtt_valid = false;
-    double max_rtt_ms = 0.0;
+    bool max_srtt_valid = false;
+    double max_srtt_ms = 0.0;
     bool rtprop_valid = false;
     double rtprop_ms = 0.0;
   };
@@ -725,7 +810,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     WaveformClassification classification =
         WaveformClassification::kInconclusive;
     const char* rule_id = "";
-    bool update_max_rtt = false;
     bool refresh_rtprop = false;
     bool update_rtprop_drate = false;
     // Lower-bound search transaction flag. The N01-N16 classifier does not
@@ -735,15 +819,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     // half a BDP, the window minimum supplies the lower rate bound and the
     // window minimum SRTT becomes the new RTprop.
     bool update_lower_bound_from_low_inflight = false;
-    // Only explicit upper/lower-bound rules set these. N12/N16 never do.
+    // Only explicit lower-bound rules set this. N12/N16 never do.
     bool update_baseline_low = false;
-    bool update_baseline_up = false;
   };
 
   struct FbbrHybridActuatorResult {
     bool valid = false;
     bool update_baseline = false;
     double next_baseline_bps = 0.0;
+    double overload_beta = 0.0;
     bool update_trusted_bw = false;
     double trusted_bw_bps = 0.0;
     double swing_bps = 0.0;
@@ -752,6 +836,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double bracket_target_bps = 0.0;
     bool bracket_triggered = false;
     bool midpoint_triggered = false;
+  };
+
+  struct HybridMaxSrttObservation {
+    QuicTime update_time = QuicTime::Zero();
+    TimeDelta half_window = TimeDelta::Zero();
+    QuicBandwidth max_bw = QuicBandwidth::Zero();
   };
 
   struct WaveformWindowAnalysis {
@@ -779,6 +869,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double srtt_mean_ms = 0.0;
     double srtt_min_ms = 0.0;
     double srtt_max_ms = 0.0;
+    bool overload_queue_sample_valid = false;
+    size_t overload_queue_sample_count = 0;
+    double overload_q90_s = 0.0;
+    double overload_queue_gradient_raw = 0.0;
+    double overload_queue_gradient_noise = 0.0;
+    double overload_queue_gradient = 0.0;
     bool latest_waveform_overload_srtt_mean_valid = false;
     double latest_waveform_overload_srtt_mean_ms = 0.0;
     bool latest_waveform_underload_srtt_mean_valid = false;
@@ -843,22 +939,22 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     uint8_t drate_no_wave_streak = 0;
     uint64_t window_first_cycle_id = 0;
     uint64_t window_second_cycle_id = 0;
-    double max_rtt_before_ms = 0.0;
-    double max_rtt_after_ms = 0.0;
+    double max_srtt_before_ms = 0.0;
+    double max_srtt_after_ms = 0.0;
     double rtprop_drate_before_bps = 0.0;
     double rtprop_drate_after_bps = 0.0;
     bool hybrid_baseline_low_before_valid = false;
     double hybrid_baseline_low_before_bps = 0.0;
     bool hybrid_baseline_low_after_valid = false;
     double hybrid_baseline_low_after_bps = 0.0;
-    bool hybrid_baseline_up_before_valid = false;
-    double hybrid_baseline_up_before_bps = 0.0;
-    bool hybrid_baseline_up_after_valid = false;
-    double hybrid_baseline_up_after_bps = 0.0;
+    bool hybrid_max_bw_before_valid = false;
+    double hybrid_max_bw_before_bps = 0.0;
+    bool hybrid_max_bw_after_valid = false;
+    double hybrid_max_bw_after_bps = 0.0;
     bool hybrid_srtt_low_rtprop_valid = false;
     double hybrid_srtt_low_rtprop_ms = 0.0;
-    bool hybrid_srtt_max_max_rtt_valid = false;
-    double hybrid_srtt_max_max_rtt_ms = 0.0;
+    bool hybrid_max_srtt_valid = false;
+    double hybrid_max_srtt_ms = 0.0;
     double hybrid_swing_bps = 0.0;
     double hybrid_reference_gap_bps = 0.0;
     bool hybrid_bracket_valid = false;
@@ -920,6 +1016,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void MaybeFinishHybridStableObservation(QuicTime now, bool force_finish);
   void CancelHybridStableObservation();
   void ResetHybridLowerBoundSearch();
+  TimeDelta CurrentHybridLowerBoundSearchGuardRtt() const;
+  bool FbbrHybridLowerBoundSearchGuardAllows(TimeDelta current_rtt) const;
+  bool FbbrHybridLowerBoundSearchGuardAllowsMs(double current_srtt_ms) const;
+  bool FbbrHybridLowerBoundSearchGuardAllows(
+      const WaveformWindowAnalysis& analysis) const;
   void PublishHybridLowerBound(QuicBandwidth delivery_rate,
                                QuicTime source_time);
   void PublishHybridSrttLow(TimeDelta rtprop,
@@ -958,6 +1059,82 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void ResetWaveformCruiseState(QuicTime now);
   void RunWaveformCruiseStateMachine(QuicTime now);
   bool IsFbbrHybrid() const;
+  bool IsFbbrHybridV3() const;
+  bool IsFbbrHybridV4() const;
+  bool IsFbbrProjectionObserver() const;
+  bool IsFbbrHybridObserver() const;
+  FbbrV3ReferenceResult SelectFbbrV3ReferenceBw() const;
+  static const char* FbbrV3ReferenceSourceName(
+      FbbrV3ReferenceSource source);
+  TimeDelta CurrentFbbrV3Rtprop() const;
+  void RecordFbbrV3PacingTarget(
+      QuicTime now,
+      QuicBandwidth target_rate) const;
+  bool HasFullFbbrV3RateHistory(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  QuicByteCount ComputeFbbrV3ModelInflightBytes(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  QuicByteCount ComputeFbbrV3InflightCapBytes(
+      QuicByteCount model_inflight,
+      QuicByteCount native_extra_acked,
+      QuicByteCount native_offload_budget) const;
+  QuicByteCount ApplyFbbrV3InflightProjection(
+      QuicByteCount native_cwnd_target) const;
+  FbbrV3ProjectionSnapshot BuildFbbrV3ProjectionSnapshot(
+      QuicByteCount native_cwnd,
+      QuicByteCount actual_inflight) const;
+  void UpdateFbbrV3Telemetry(
+      QuicTime now,
+      QuicByteCount actual_inflight);
+  void EmitFbbrV3FlowSummary() const;
+  void RecordFbbrV4RateTargets(
+      QuicTime now,
+      QuicBandwidth target_rate,
+      QuicBandwidth base_target_rate) const;
+  void RecordFbbrV4DeliveredPoint(
+      QuicTime now,
+      uint64_t cumulative_delivered,
+      bool app_limited);
+  bool HasFullFbbrV4TargetHistory(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  bool HasValidFbbrV4ServiceHistory(
+      QuicTime now,
+      TimeDelta rtprop,
+      bool current_app_limited,
+      bool* app_limited_contaminated) const;
+  QuicByteCount ComputeFbbrV4PlannedInflightBytes(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  QuicByteCount ComputeFbbrV4PositiveProbeCreditBytes(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  QuicByteCount ComputeFbbrV4ServiceInflightBytes(
+      QuicTime now,
+      TimeDelta rtprop) const;
+  QuicByteCount ComputeFbbrV4EnvelopeBytes(
+      QuicByteCount plan_inflight,
+      QuicByteCount service_inflight,
+      QuicByteCount positive_probe_credit,
+      bool service_history_valid) const;
+  QuicByteCount ComputeFbbrV4InflightCapBytes(
+      QuicByteCount envelope,
+      QuicByteCount native_extra_acked,
+      QuicByteCount native_offload_budget) const;
+  QuicByteCount ApplyFbbrV4InflightEnvelope(
+      QuicByteCount native_cwnd_target) const;
+  FbbrV4EnvelopeSnapshot BuildFbbrV4EnvelopeSnapshot(
+      QuicByteCount native_cwnd,
+      QuicByteCount actual_inflight) const;
+  void UpdateFbbrV4Telemetry(
+      QuicTime now,
+      QuicByteCount actual_inflight);
+  void EmitFbbrV4FlowSummary() const;
+  void ApplyFbbrHybridV3Classification(
+      const WaveformWindowAnalysis& analysis,
+      QuicTime now);
   WaveformWindowAnalysis AnalyzeFbbrHybridWindow(
       QuicTime window_start,
       QuicTime window_end,
@@ -1001,13 +1178,34 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       const WaveformWindowAnalysis& analysis);
   void UpdateMaxBwAttenuationFromLegacyWindow(
       const CruiseWindowResult& result);
+  TimeDelta CurrentHybridMaxSrttObservationRtt() const;
+  bool ComputeHybridMaxSrttAround(QuicTime center_time,
+                                  TimeDelta half_window,
+                                  double* max_srtt_ms,
+                                  size_t* sample_count) const;
+  void RecordHybridMaxBwUpdateForMaxSrtt(QuicTime event_time,
+                                         QuicBandwidth max_bw);
+  void FinalizePendingHybridMaxSrttObservations(QuicTime now);
   void EmitWaveformSearchTrace(const WaveformWindowAnalysis& analysis,
                                const std::string& action,
                                double baseline_before_bps,
                                double amplitude_before_bps) const;
   void PublishWaveformTrustedBw();
+  void PublishFbbrHybridCruiseTrustedBw(
+      const TrustedBwSelectionResult* frequency_selection);
   TrustedBwSelectionResult RunTrustedBwSelection(QuicTime now);
   void PublishTrustedBwSelection(const TrustedBwSelectionResult& selection);
+  void UpdateGuardEstimatorFromCongestionEvent(
+      const Bbr2CongestionEvent& congestion_event);
+  void StartGuardMeasurementWindow(
+      const Bbr2CongestionEvent& congestion_event);
+  void UpdateGuardFilter(QuicBandwidth raw_sample);
+  void AnchorGuardFilter(QuicBandwidth trusted_bw);
+  TimeDelta CurrentGuardRttSample(
+      const Bbr2CongestionEvent& congestion_event) const;
+  TimeDelta CurrentGuardMinRtt(TimeDelta fallback_rtt) const;
+  static QuicBandwidth ApplyGuardLowPass(QuicBandwidth previous,
+                                         QuicBandwidth sample);
   void RankCruiseWindows(const CruiseWindowResult* selected_window);
   void EmitCruiseWindowTrace(const CruiseWindowResult& result);
   void EmitCruiseSummaryTrace(QuicTime now) const;
@@ -1253,13 +1451,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       double meandrate_bps,
       bool baseline_low_valid,
       double baseline_low_bps,
-      bool baseline_up_valid,
-      double baseline_up_bps,
+      bool max_bw_valid,
+      double max_bw_bps,
       double current_baseline_bps,
       bool rtprop_drate_valid,
       double rtprop_drate_bps,
       double midpoint_trigger_ratio,
-      double minimum_rate_bps);
+      double minimum_rate_bps,
+      bool overload_gradient_valid = false,
+      double overload_beta = 0.0);
   WaveActivityFeatures DetectOrdinaryWaveActivity(
       const std::vector<double>& values,
       const std::vector<bool>& valid,
@@ -1414,9 +1614,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   uint32_t baseline_adjustment_count_;
   uint32_t inconclusive_extension_count_;
   uint32_t waveform_inconclusive_amplification_count_;
-  bool fbbr_hybrid_max_rtt_valid_;
-  double fbbr_hybrid_max_rtt_ms_;
-  uint64_t fbbr_hybrid_max_rtt_source_cruise_id_;
+  bool fbbr_hybrid_max_srtt_valid_;
+  double fbbr_hybrid_max_srtt_ms_;
+  uint64_t fbbr_hybrid_max_srtt_source_cruise_id_;
   bool fbbr_hybrid_rtprop_drate_valid_;
   QuicBandwidth fbbr_hybrid_rtprop_drate_;
   uint64_t fbbr_hybrid_rtprop_drate_source_cruise_id_;
@@ -1580,8 +1780,19 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   std::deque<FBBRRateSample> delivery_rate_history_;
   std::deque<FBBRRttSample> srtt_history_;
   std::deque<AckWindowSample> ack_window_history_;
+  std::deque<HybridMaxSrttObservation>
+      pending_hybrid_max_srtt_observations_;
   std::vector<CruiseWindowResult> current_cruise_windows_;
   bool cruise_freq_tool_active_;
+  bool guard_filter_valid_;
+  QuicBandwidth guard_filter_stage1_;
+  QuicBandwidth guard_filter_stage2_;
+  bool guard_updated_this_cruise_;
+  bool guard_window_active_;
+  QuicByteCount guard_window_delivered_start_;
+  QuicTime guard_window_ack_start_;
+  QuicTime guard_window_send_start_;
+  bool guard_window_app_limited_;
 
   CruiseLoadTraceCallback cruise_load_trace_cb_;
   PacingAuditTraceCallback pacing_audit_trace_cb_;
@@ -1656,6 +1867,97 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   FBBRGateTraceMode gate_trace_mode_;
   TimeDelta gate_trace_sample_interval_;
   mutable QuicTime last_pacing_gate_trace_time_;
+
+  // FBBR-hybridv3 has no queue target/gain, gradient gain, baseline step,
+  // drain/recovery duration, flow-count threshold, or scenario parameter.
+  // Its only control inputs are ReferenceBw, the actual commanded pacing
+  // target history, RTprop, native ACK aggregation budget, and native cwnd.
+  mutable std::deque<FbbrV3PacingTargetSegment>
+      fbbr_v3_pacing_target_history_;
+  mutable TimeDelta fbbr_v3_max_rtprop_seen_;
+  mutable QuicTime fbbr_v3_history_start_time_;
+  mutable bool fbbr_v3_history_valid_;
+  mutable QuicBandwidth fbbr_v3_last_recorded_pacing_target_;
+
+  QuicTime fbbr_v3_telemetry_last_time_;
+  bool fbbr_v3_telemetry_initialized_;
+  FbbrV3ReferenceSource fbbr_v3_telemetry_reference_source_;
+  bool fbbr_v3_telemetry_projection_active_;
+  bool fbbr_v3_telemetry_history_invalid_;
+  bool fbbr_v3_telemetry_cap_binding_;
+  QuicByteCount fbbr_v3_telemetry_model_inflight_;
+  QuicByteCount fbbr_v3_telemetry_raw_queue_debt_;
+  QuicByteCount fbbr_v3_telemetry_enforced_excess_;
+  uint64_t fbbr_v3_telemetry_total_us_;
+  uint64_t fbbr_v3_reference_trusted_us_;
+  uint64_t fbbr_v3_reference_guard_us_;
+  uint64_t fbbr_v3_reference_last_valid_us_;
+  uint64_t fbbr_v3_reference_invalid_us_;
+  uint64_t fbbr_v3_projection_active_us_;
+  uint64_t fbbr_v3_history_invalid_us_;
+  uint64_t fbbr_v3_cap_binding_us_;
+  long double fbbr_v3_model_inflight_byte_us_;
+  long double fbbr_v3_raw_queue_debt_byte_us_;
+  long double fbbr_v3_enforced_excess_byte_us_;
+  std::vector<QuicByteCount> fbbr_v3_raw_queue_debt_samples_;
+  std::vector<QuicByteCount> fbbr_v3_enforced_excess_samples_;
+  mutable uint64_t fbbr_v3_window_ack_events_;
+  mutable uint64_t fbbr_v3_window_cap_binding_events_;
+  bool fbbr_v3_flow_summary_emitted_;
+
+  // FBBR-hybirdv4 extends V3 with an independent target/base history and the
+  // bandwidth sampler's cumulative delivered history.  These fields are
+  // touched only by kFBBRHybridV4.
+  mutable std::deque<FbbrRateSegment> fbbr_v4_rate_history_;
+  mutable TimeDelta fbbr_v4_max_rtprop_seen_;
+  mutable bool fbbr_v4_rate_history_integrity_valid_;
+  mutable QuicBandwidth fbbr_v4_last_target_rate_;
+  mutable QuicBandwidth fbbr_v4_last_base_target_rate_;
+  std::deque<FbbrDeliveredPoint> fbbr_v4_delivered_history_;
+  bool fbbr_v4_delivered_history_integrity_valid_;
+  QuicTime fbbr_v4_last_counter_reset_time_;
+
+  QuicTime fbbr_v4_telemetry_last_time_;
+  bool fbbr_v4_telemetry_initialized_;
+  FbbrV3ReferenceSource fbbr_v4_telemetry_reference_source_;
+  bool fbbr_v4_telemetry_projection_active_;
+  bool fbbr_v4_telemetry_service_history_valid_;
+  bool fbbr_v4_telemetry_app_limited_fallback_;
+  bool fbbr_v4_telemetry_plan_only_fallback_;
+  bool fbbr_v4_telemetry_service_limited_;
+  bool fbbr_v4_telemetry_cap_binding_;
+  QuicByteCount fbbr_v4_telemetry_plan_inflight_;
+  QuicByteCount fbbr_v4_telemetry_service_inflight_;
+  QuicByteCount fbbr_v4_telemetry_probe_credit_;
+  QuicByteCount fbbr_v4_telemetry_extra_acked_;
+  QuicByteCount fbbr_v4_telemetry_service_restriction_;
+  QuicByteCount fbbr_v4_telemetry_enforced_excess_;
+  uint64_t fbbr_v4_telemetry_total_us_;
+  uint64_t fbbr_v4_reference_trusted_us_;
+  uint64_t fbbr_v4_reference_guard_us_;
+  uint64_t fbbr_v4_reference_last_valid_us_;
+  uint64_t fbbr_v4_reference_invalid_us_;
+  uint64_t fbbr_v4_projection_active_us_;
+  uint64_t fbbr_v4_service_history_valid_us_;
+  uint64_t fbbr_v4_app_limited_fallback_us_;
+  uint64_t fbbr_v4_plan_only_fallback_us_;
+  uint64_t fbbr_v4_service_limited_us_;
+  uint64_t fbbr_v4_cap_binding_us_;
+  long double fbbr_v4_plan_inflight_byte_us_;
+  long double fbbr_v4_service_inflight_byte_us_;
+  long double fbbr_v4_probe_credit_byte_us_;
+  long double fbbr_v4_extra_acked_byte_us_;
+  long double fbbr_v4_service_restriction_byte_us_;
+  long double fbbr_v4_enforced_excess_byte_us_;
+  std::vector<QuicByteCount> fbbr_v4_plan_inflight_samples_;
+  std::vector<QuicByteCount> fbbr_v4_service_inflight_samples_;
+  std::vector<QuicByteCount> fbbr_v4_probe_credit_samples_;
+  std::vector<QuicByteCount> fbbr_v4_extra_acked_samples_;
+  std::vector<QuicByteCount> fbbr_v4_service_restriction_samples_;
+  std::vector<QuicByteCount> fbbr_v4_enforced_excess_samples_;
+  mutable uint64_t fbbr_v4_window_ack_events_;
+  mutable uint64_t fbbr_v4_window_cap_binding_events_;
+  bool fbbr_v4_flow_summary_emitted_;
 
   static constexpr size_t kMaxHistorySamples = 20000;
   static constexpr uint32_t kStableRounds = 3;
