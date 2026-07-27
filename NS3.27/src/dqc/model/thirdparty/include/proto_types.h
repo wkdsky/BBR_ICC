@@ -120,7 +120,10 @@ kNmccBytes,kOlia,kWvegas,kMpVeno,
 kDwcBytes,kCoupleBBR,kBBR_DELAY, 
 kBBR,kBBRD,kBBRPlus,kOBBR,
 kBBRRand,kTsunami,kHighSpeedRail,
-kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,kFBBR,kFBBRAdaptive,kFBBRHybrid,
+kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,
+// Leave the retired bare-FBBR numeric slot unused so all surviving algorithm
+// values, including the active FBBR service-envelope slot below, stay stable.
+kFBBRAdaptive = kFreqCCv3 + 2,kFBBRHybrid,
 kCopa,kPCC,kVivace,
 kWebRTCVivace,kVegas,
 kLedbat,kLpTcp,kLpBBR,kLpBBRNo,
@@ -135,11 +138,11 @@ kNs3Cubic,
 // Model-consistent inflight projection variant.  Appended so every existing
 // serialized CongestionControlType value remains unchanged.
 kFBBRHybridV3,
-// Service-consistent inflight envelope variant.  The external experiment key
-// deliberately retains the requested "hybirdv4" spelling.
-kFBBRHybridV4,
+// The service-consistent inflight envelope is the active FBBR algorithm.
+// It retains the former V4 numeric slot so ServiceFair's value is stable.
+kFBBR,
 // Service-aware, Cruise-cycle AIMD fairness control layered on top of the
-// FBBR-hybirdv4 inflight envelope.  Appended to preserve existing values.
+// FBBR inflight envelope.  Appended to preserve existing values.
 kFBBRServiceFair};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);

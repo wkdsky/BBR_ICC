@@ -51,7 +51,7 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kFreqCC || type == kFreqCCv2 ||
            type == kFreqCCv3 || type == kFBBR ||
            type == kFBBRAdaptive || type == kFBBRHybrid ||
-           type == kFBBRHybridV3 || type == kFBBRHybridV4 ||
+           type == kFBBRHybridV3 ||
            type == kFBBRServiceFair;
 }
 
@@ -59,7 +59,7 @@ bool
 IsFBBRAlgorithm(CongestionControlType type)
 {
     return type == kFBBR || type == kFBBRAdaptive || type == kFBBRHybrid ||
-           type == kFBBRHybridV3 || type == kFBBRHybridV4 ||
+           type == kFBBRHybridV3 ||
            type == kFBBRServiceFair;
 }
 
@@ -526,7 +526,7 @@ void DqcSender::FinalizeCongestionControlTrace(){
     if (algo && algo->GetCongestionControlType() == kFBBRHybridV3) {
         static_cast<FBBRSender*>(algo)->FinalizeFbbrV3Trace();
     } else if (algo &&
-               (algo->GetCongestionControlType() == kFBBRHybridV4 ||
+               (algo->GetCongestionControlType() == kFBBR ||
                 algo->GetCongestionControlType() == kFBBRServiceFair)) {
         static_cast<FBBRSender*>(algo)->FinalizeFbbrV4Trace();
     }

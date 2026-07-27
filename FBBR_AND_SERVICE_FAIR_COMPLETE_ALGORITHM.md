@@ -1,15 +1,20 @@
-# FBBR-hybirdv4 完整算法说明
+# FBBR 与 FBBR-ServiceFair 完整算法说明
 
-> 外部算法名固定为 `FBBR-hybirdv4`，内部枚举为
-> `kFBBRHybridV4`。本文描述当前项目中已经实现并通过编译、自测试和实验
-> 的实际源码语义。本文只说明 V4，不引入 V5 或任何额外控制机制。
+> 本文统一描述当前可用的 `FBBR`（`kFBBR`）和
+> `FBBR-ServiceFair`（`kFBBRServiceFair`）。二者共享 service-consistent
+> inflight envelope；ServiceFair 仅在明确的 Cruise、Regime 和
+> TrustedBw publication 边界增加服务公平控制。
+
+> 术语说明：源码中的 `FbbrV4*` 类型、函数、trace 字段和部分历史注释保留了
+> `V4` 这个实现代号；它不再是可选算法名。本文中未特别说明的 `V4` 均指这套
+> 由 `FBBR` 与 `FBBR-ServiceFair` 共同使用的内部 service-envelope 实现。
 
 ## 1. 文档范围
 
-这是一份单文件、可独立阅读的 V4 算法规范，统一说明：
+这是一份单文件、可独立阅读的 FBBR / ServiceFair 算法规范，统一说明：
 
-- 独立算法入口和 V1/V3/V4 隔离；
-- V4 继承的 BBRv2 phase、MaxBw、RTprop、TrustedBw、GuardBw；
+- 独立算法入口和 V1/V3/FBBR/ServiceFair 隔离；
+- FBBR/ServiceFair 继承的 BBRv2 phase、MaxBw、RTprop、TrustedBw、GuardBw；
 - 频率激励、三角波、Goertzel/time-waveform 观察器；
 - DRate/SRTT 特征和 Regime I/II/III 判定；
 - ReferenceBw 和最终 pacing target 的选择；
@@ -19,7 +24,9 @@
 - planned inflight、positive probe credit、service inflight；
 - app-limited、counter reset、历史覆盖和 fallback；
 - service-consistent envelope、native headroom 和最终 cwnd；
-- 所有 V4 私有状态变量、控制变量和纯观测变量；
+- 共享 service-envelope 的私有状态变量、控制变量和纯观测变量；
+- ServiceFair 的 service/qdelay 信号、每 Cruise AIMD、Regime III 保护和
+  TrustedBw publication 修正；
 - 数值安全、边界行为、运行时伪代码、trace 和 self-test。
 
 实验结果和验收结论仍保存在
@@ -28,7 +35,7 @@
 
 ## 2. 一句话定义
 
-V4 保持 V3 的长期 ReferenceBw 和最终 pacing target，不根据短期 RTT 或
+FBBR 保持 V3 的长期 ReferenceBw 和最终 pacing target，不根据短期 RTT 或
 队列直接降速；它把 V3 的无队列发送计划：
 
 \[
@@ -67,7 +74,7 @@ I_{env}+ExtraAcked+OffloadBudget
 OffloadBudget=0
 \]
 
-因此 V4 的控制分工是：
+因此 FBBR shared service envelope 的控制分工是：
 
 | 时间尺度 | 决定量 | 职责 |
 |---|---|---|
@@ -79,47 +86,55 @@ OffloadBudget=0
 
 ## 3. 算法身份和隔离
 
-### 3.1 三个算法同时存在
+### 3.1 算法身份
 
 | 外部名称 | 内部枚举 | 独立控制行为 |
 |---|---|---|
 | `FBBR-hybrid` | `kFBBRHybrid` | Gradient-Matched V1 |
 | `FBBR-hybridv3` | `kFBBRHybridV3` | Model-Consistent Inflight Projection |
-| `FBBR-hybirdv4` | `kFBBRHybridV4` | Service-Consistent Inflight Envelope |
+| `FBBR` | `kFBBR` | Service-Consistent Inflight Envelope |
+| `FBBR-ServiceFair` | `kFBBRServiceFair` | FBBR envelope + Cruise service fairness |
 
-枚举 `kFBBRHybridV4` 追加在旧枚举之后，没有重排旧值。
+`kFBBR` 复用原 V4 的数值槽位；旧裸 FBBR 的数值槽位不再映射到任何算法，
+因此新 FBBR 和 ServiceFair 的既有数值保持稳定。
 
 ### 3.2 身份 helper
 
 ```cpp
 bool IsFbbrHybrid() const;             // 只匹配 V1
 bool IsFbbrHybridV3() const;           // 只匹配 V3
-bool IsFbbrHybridV4() const;           // 只匹配 V4
-bool IsFbbrProjectionObserver() const; // V3 || V4
-bool IsFbbrHybridObserver() const;     // V1 || V3 || V4
+bool IsFbbr() const;                   // 只匹配 FBBR
+bool IsFbbrServiceFair() const;        // 只匹配 ServiceFair
+bool UsesFbbrServiceEnvelope() const;  // FBBR || ServiceFair
+bool IsFbbrProjectionObserver() const; // V3 || service envelope
+bool IsFbbrHybridObserver() const;     // V1 || V3 || service envelope
 ```
 
 职责：
 
-- `IsFbbrHybridV4()` 保护所有 V4 私有 history、envelope 和 telemetry；
-- `IsFbbrProjectionObserver()` 只共享 V3/V4 的信息层和 Reference 选择；
+- `IsFbbr()` 只识别裸 `FBBR`；
+- `IsFbbrServiceFair()` 只打开公平控制；它不创建第二套 envelope；
+- `UsesFbbrServiceEnvelope()` 确保 FBBR 与 ServiceFair 使用相同的
+  target/base history、delivered history、telemetry 和 final cwnd cap；
+- `IsFbbrProjectionObserver()` 共享 V3/FBBR/ServiceFair 的信息层和
+  Reference 相关观测；
 - `IsFbbrHybridObserver()` 共享频率观察、Guard、Trusted 和部分 RTprop
   观察逻辑；
-- 没有全局开关把 V3 替换成 V4。
+- 没有全局开关把 V3 替换成 FBBR。
 
-### 3.3 V1、V3 不受 V4 状态影响
+### 3.3 V1、V3 不受 FBBR shared state 影响
 
 - V3 继续使用自己的 `FbbrV3PacingTargetSegment`；
-- V3 只记录 `target_rate`，不记录 V4 的 `base_target_rate`；
+- V3 只记录 `target_rate`，不记录 shared envelope 的 `base_target_rate`；
 - V3 的 projection 仍要求 `ReferenceBw valid`；
-- V4 使用独立 `fbbr_v4_rate_history_`；
-- V4 使用独立 `fbbr_v4_delivered_history_`；
-- V4 的记录、计算、summary helper 都先检查 `IsFbbrHybridV4()`；
+- FBBR/ServiceFair 使用独立 `fbbr_v4_rate_history_`；
+- FBBR/ServiceFair 使用独立 `fbbr_v4_delivered_history_`；
+- 共享记录、计算和 summary helper 都先检查 `UsesFbbrServiceEnvelope()`；
 - V1 仍进入 `ApplyFbbrHybridClassification()`；
-- V3/V4 进入 `ApplyFbbrHybridV3Classification()`；
-- V4 不调用 V1 的 Gradient-Matched baseline actuator。
+- V3/FBBR/ServiceFair 进入 `ApplyFbbrHybridV3Classification()`；
+- FBBR/ServiceFair 不调用 V1 的 Gradient-Matched baseline actuator。
 
-## 4. V4 端到端控制路径
+## 4. FBBR shared service-envelope 端到端控制路径
 
 ```text
 Native BBRv2
@@ -198,10 +213,11 @@ Bytes=\frac{Rate_{bps}\times Duration_{\mu s}}{8\,000\,000}
 
 ### 6.1 初始化和算法创建
 
-命令行中的 `FBBR-hybirdv4` 被解析为 `kFBBRHybridV4`。工厂为它创建独立
-`FBBRSender`，但底层仍是同一个 BBRv2 sender/model。
+命令行中的 `FBBR`、`FBBR-ServiceFair` 分别解析为 `kFBBR`、
+`kFBBRServiceFair`。工厂为它们创建独立 `FBBRSender`，但底层仍是同一个
+BBRv2 sender/model。
 
-所有 V4 私有 history 初始为空：
+两种算法共享的 service-envelope history 初始为空：
 
 - rate history integrity 为 true；
 - delivered history integrity 为 true；
@@ -216,11 +232,11 @@ Bytes=\frac{Rate_{bps}\times Duration_{\mu s}}{8\,000\,000}
 1. 更新 `current_time_ = sent_time`；
 2. 调用 `PacingRate(bytes_in_flight)`；
 3. 在 `PacingRate()` 内同时形成最终 target 和 base target；
-4. V4 记录或更新 rate segment；
+4. FBBR/ServiceFair 记录或更新 rate segment；
 5. sender-rate observer history 记录实际返回的 target；
 6. 调用 native `Bbr2Sender::OnPacketSent()`。
 
-V4 的 cwnd cap 不参与 `PacingRate()`，所以 cap binding 不会改变本次或后续
+shared service-envelope 的 cwnd cap 不参与 `PacingRate()`，所以 cap binding 不会改变本次或后续
 `PacingTarget` 的计算公式。
 
 ### 6.3 每次 ACK/congestion event
@@ -234,9 +250,10 @@ V4 的 cwnd cap 不参与 `PacingRate()`，所以 cap binding 不会改变本次
    app-limited；
 5. 更新共享 DRate、SRTT、ACK-window、Guard 和 waveform observer；
 6. 在 ProbeBW Cruise 中推进 frequency/time-waveform 状态机；
-7. 仅当 `acked_packets` 非空时，V4 记录更新后的
+7. 仅当 `acked_packets` 非空时，FBBR/ServiceFair 记录更新后的
    `model_.total_bytes_acked()` 和 `model_.is_app_limited()`；
-8. 更新 V4 telemetry snapshot。
+8. 更新 shared service-envelope telemetry snapshot；ServiceFair 随后更新
+   qdelay/service 信号。
 
 这样 delivered point 一定来自 native sampler 已完成 ACK 更新后的累计值。
 
@@ -244,14 +261,14 @@ V4 的 cwnd cap 不参与 `PacingRate()`，所以 cap binding 不会改变本次
 
 ```cpp
 QuicByteCount FBBRSender::GetCongestionWindow() const {
-    if (IsFbbrHybridV4()) {
+    if (UsesFbbrServiceEnvelope()) {
         return ApplyFbbrV4InflightEnvelope(cwnd_);
     }
     return ApplyFbbrV3InflightProjection(cwnd_);
 }
 ```
 
-V4 先构造一次完整 snapshot。若 projection 不活跃，原样返回 native cwnd；
+FBBR/ServiceFair 先构造一次完整 snapshot。若 projection 不活跃，原样返回 native cwnd；
 若活跃，返回：
 
 \[
@@ -260,11 +277,11 @@ V4 先构造一次完整 snapshot。若 projection 不活跃，原样返回 nati
 
 ### 6.5 flow 结束
 
-V4 只汇总一次 flow summary。它不会输出逐 ACK 或逐 packet 的新文件日志。
+FBBR/ServiceFair 各自只汇总一次 flow summary。它不会输出逐 ACK 或逐 packet 的新文件日志。
 
 ## 7. 保持不变的 native BBRv2 层
 
-V4 不替换 BBRv2 的以下机制：
+FBBR shared service envelope 不替换 BBRv2 的以下机制：
 
 - Startup；
 - 初始 Drain/Startup 到 ProbeBW 的转换；
@@ -513,123 +530,123 @@ case，而是进入 no-cut fallback/retry。
 | N09 | L3 repeated bottom clip | Regime I | 更新 RTpropDRate/baseline-low，不 refresh RTprop |
 | N10 | 无 clip、SRTT 有 wave、`SRTTmax > MaxSRTT` | Regime III | 无 lower reference 更新 |
 | N11 | 无 clip、SRTT 有 wave、`SRTTmin < RTprop` | Regime I | refresh RTprop；更新 RTpropDRate/baseline-low |
-| N12 | 无 clip、SRTT 有 wave，进入 fallback threshold | Regime III 或 II | 无 lower reference 更新 |
+| N12 | 无 clip、SRTT 有 wave，进入 fallback threshold | Regime I / II / III | 无 lower reference 更新 |
 | N13 | 无 clip、SRTT 无 wave、DRate periodic match | Regime I | 无 lower reference 更新 |
 | N14 | 无 clip、SRTT 无 wave、`SRTTmax > MaxSRTT` | Regime III | 无 lower reference 更新 |
 | N15 | 无 clip、SRTT 无 wave、`SRTTmin < RTprop` | Regime I | refresh RTprop；更新 RTpropDRate/baseline-low |
-| N16 | 无 clip、SRTT 无 wave，进入 fallback threshold | Regime III 或 II | 无 lower reference 更新 |
+| N16 | 无 clip、SRTT 无 wave，进入 fallback threshold | Regime I / II / III | 无 lower reference 更新 |
 
 需要 DRate periodic 的规则在 periodic input invalid 时返回
 `INCONCLUSIVE`。
 
 ### 10.3 N12/N16 fallback
 
-当前源码中的 N12/N16 overload signal 是：
+N12/N16 只在 SRTT stats、`RTprop` 和 `MaxSRTT` 均有效，且
+`MaxSRTT >= RTprop > 0` 时可判定。当前源码定义：
 
 \[
-SRTT_{mean}>
-RTprop+\frac{MaxSRTT-RTprop}{4}
+T_{overload}=\max\left(
+1.10RTprop,
+RTprop+\frac{MaxSRTT-RTprop}{3}
+\right)
 \]
 
-或者：
+然后按 `SRTTmax` 三段分类：
 
-\[
-Inflight\ge1.1\times BDP
-\]
+| 条件 | 结果 |
+|---|---|
+| `SRTTmax > T_overload` | Regime III / OVERLOAD |
+| `SRTTmax < 1.05 * RTprop` | Regime I / UNDERLOAD |
+| 其余 | Regime II / FULL_LOAD |
 
-任一成立判为 Regime III，否则判为 Regime II。若两个判据都没有有效输入，
-返回 inconclusive。
+它不是 inflight/BDP 判据，也不读取 `SRTTmean`。前提无效时返回
+`INCONCLUSIVE`。
 
-### 10.4 `/3` 与 `/4` 的源码核对
+### 10.4 `/3` 与边界值的源码核对
 
-当前代码中需要区分两个不同公式：
+N12/N16 当前编译代码使用上节的 `/3` 公式，并同时带有 `1.10 * RTprop`
+overload floor 和 `1.05 * RTprop` underload floor；不存在 `/4` 或
+`Inflight >= 1.1 * BDP` 的 fallback 分支。
 
-- V1 Gradient-Matched queue guard 保持：
+V1 Gradient-Matched queue guard 仍有独立的 `/3` 公式：
 
 \[
 Q_{guard}=
 \max\left(0.1RTprop,\frac{MaxSRTT-RTprop}{3}\right)
 \]
 
-- N12/N16 当前编译代码的 fallback SRTT threshold 是上一节的 `/4`。
+FBBR 与 ServiceFair 共用 N12/N16 的三段 SRTT fallback；二者不调用 V1 的
+Gradient-Matched baseline decrease。V1 的 queue guard 即使被共享分析代码
+计算，也不会成为 FBBR/ServiceFair actuator。
 
-V4 没有新增或修改这两个阈值。V4 走 V3 信息层，不调用 V1 的
-Gradient-Matched baseline decrease；V1 的 `/3` queue guard 即使被共享
-分析代码计算，也不会成为 V4 actuator。
+## 11. Regime 对 FBBR 的实际作用
 
-## 11. Regime 对 V4 的实际作用
+FBBR/ServiceFair 共用 N01-N16 分类和 `ComputeFbbrV4InjectionBaseline()`。
+分类的信息层副作用先由 `ApplyFbbrHybridRegimeStateUpdates()` 执行；随后
+才执行下面的 FBBR baseline/TrustedBw 动作。ServiceFair 的额外修正在第 38
+节以后说明。
 
-V4 与 V3 共用 `ApplyFbbrHybridV3Classification()`。
+### 11.1 Inconclusive 或无效 DRate
 
-### 11.1 Inconclusive
+`INCONCLUSIVE`、无效 DRate stats、或 Regime II 所需的累计 delivered
+区间无效时都不改变 baseline 或 TrustedBw，保留错误原因并在 settle 后继续
+采集。若 Regime II 前本 Cruise 已出现 Regime I/III，缺少合法 delivered
+区间同样只能 hold，不能回退为 ACK-sample mean。
 
-```text
-action = V3_INCONCLUSIVE_REFERENCE_HOLD
-baseline delta = 0
-schedule next observation after settle
-```
+### 11.2 Regime II / FULL_LOAD
 
-### 11.2 DRate stats invalid
-
-```text
-action = V3_INVALID_DRATE_REFERENCE_HOLD
-baseline delta = 0
-schedule retry
-```
-
-### 11.3 Regime II / FULL_LOAD
-
-有效的窗口 mean DRate 成为 candidate：
+若本 Cruise 尚未出现 Regime I 或 III，Regime II 验证窗口但保持当前
+baseline。若已经出现 I/III，必须使用窗口边界之间的累计 delivered rate：
 
 ```text
-fbbr_hybrid_regime_ii_seen_this_cruise_ = true
-fbbr_hybrid_trusted_bw_ = MeanDRate
-fbbr_latest_trusted_bw_ = MeanDRate
-fbbr_smoothed_trusted_bw_ = MeanDRate
-trusted_bw_candidate_ = MeanDRate
-trusted_bw_candidate_source_ = FBBR_WINDOW_MEAN
-trusted_baseline_locked_ = true
+baseline  = Delivered(window_start, window_end) / window_duration
+TrustedBw = 同一个 cumulative-delivery rate
 ```
 
-Cruise 结束时可发布为 TrustedBw。
+这条合法 Regime II measurement 是 Cruise publication 的最高优先级。
 
-### 11.4 Regime I / UNDERLOAD
+### 11.3 Regime I / UNDERLOAD
 
-- 设置 `underload_located_ = true`；
-- 按 N07/N09/N11/N15 决定是否更新共享 RTprop/RTpropDRate/lower
-  observation；
-- Reference hold；
-- 不直接提高或降低 V4 pacing baseline。
+记当前 baseline 为 \(B\)、窗口最大 delivery rate 为 \(R_{max}\)、native
+MaxBw 为 \(M\)。FBBR 按顺序选择：
 
-### 11.5 Regime III / OVERLOAD
+\[
+B_{next}=\begin{cases}
+R_{max},& B<R_{max}<M\\
+R_{max}+\frac{M-R_{max}}{2},& R_{max}<M\ \land\ B<\frac{M+R_{max}}2\\
+1.02B,& otherwise
+\end{cases}
+\]
 
-- 保留分类和 trace；
-- Reference hold；
-- 不执行 V1 Gradient-Matched decrease；
-- 不用 RTT threshold 直接降低 V4 pacing；
-- 不写 `inflight_hi/lo`。
+结果受 minimum pacing rate 下限保护。N07/N09/N11/N15 仍按第 10 节更新
+RTprop / RTpropDRate / lower observation；该信息更新不是新的 fairness
+动作。
 
-### 11.6 V4 中 Regime 的边界
+### 11.4 Regime III / OVERLOAD
 
-Regime 可以：
+记窗口最小 delivery rate 为 \(R_{min}\)、native MinBw 为 \(m\)。FBBR
+按顺序选择：
 
-- 判定某个窗口是否可信；
-- 更新或冻结 Trusted candidate；
-- 更新继承的 RTprop/lower observation；
-- 影响后续 Reference 是否发布。
+\[
+B_{next}=\begin{cases}
+R_{min},& m<R_{min}<B\\
+m+\frac{R_{min}-m}{2},& R_{min}>m\ \land\ m+\frac{R_{min}-m}{2}<B\\
+0.98B,& otherwise
+\end{cases}
+\]
 
-Regime 不可以：
+这不是 V1 Gradient-Matched decrease，也不写 `inflight_hi/lo`。ServiceFair
+会在这条 raw candidate 之上再施加第 41 节的 service floor/yield cap。
 
-- 直接改变 V4 `I_service`；
-- 直接改变 `I_probe+`；
-- 直接改变 `I_env`；
-- 直接按比例升降 pacing；
-- 新增 queue target；
-- 进入 V4 recovery 状态。
+### 11.5 Regime 的边界
+
+Regime 可以改变当前 Cruise baseline、在满足条件时发布 TrustedBw，并更新
+共享的 RTprop/lower observation；它不能直接改变 `I_service`、`I_probe+`、
+`I_env`、native BBR mode、`inflight_hi/lo` 或创建 recovery 状态。
 
 ## 12. GuardBw
 
-Guard 是共享的 ACK-clock 低通 fallback，不是 V4 新 estimator。
+Guard 是共享的 ACK-clock 低通 fallback，不是 FBBR/ServiceFair 新 estimator。
 
 ### 12.1 原始 Guard sample
 
@@ -680,61 +697,43 @@ stage2 = LPF(stage2, stage1)
 首次 sample 直接初始化两个 stage。可信 TrustedBw 发布时，两个 stage
 都锚定到该 TrustedBw。
 
-### 12.3 Cruise 结束的 Reference 候选优先级
+### 12.3 Cruise 结束的 TrustedBw 候选优先级
 
 ```text
 1. time-waveform Regime II candidate
 2. spectral dual-signal candidate
 3. 本 Cruise 更新过的 Guard stage2
-4. PreviousTrusted
+4. FBBR 的 PreviousTrusted
 5. native fallback
 ```
 
-native fallback 可以维持 pacing bootstrap，但在 V3/V4 Reference selector
-中被标记为 `invalid`，不会伪装成可信 Reference。
+`FBBR-ServiceFair` 进入 Cruise 时可用 PreviousTrusted 初始化 baseline，
+但 Cruise 结束的 publication 不把它作为独立候选来源：在 Guard 也不可用时
+先选择 native fallback，再由第 42 节修正。native fallback 仅用于 pacing
+bootstrap，不会伪装成 V3 的可信 `ReferenceBw`。
 
-## 13. ReferenceBw
+## 13. FBBR/ServiceFair 的 TrustedBw 使用
 
-V4 完全复用 V3 selector：
+FBBR/ServiceFair 共用第 12.3 节的 TrustedBw publication，但 `PacingRate()`
+不调用仅供 V3 使用的 `SelectFbbrV3ReferenceBw()`。对 shared service envelope
+而言，pacing baseline 的优先级是：
 
-\[
-ReferenceBw=
-\begin{cases}
-TrustedBw,& trusted\ value/source\ valid\\
-GuardBw,& source=GUARD\_FILTER\\
-PreviousTrusted,& source=PREVIOUS\_TRUSTED\\
-invalid,& NONE/NATIVE\_FALLBACK/invalid
-\end{cases}
-\]
+1. time-waveform Cruise 使用 `current_injection_baseline_bw_`，phase gain
+   固定为 1；
+2. 在 ProbeBW 中，若已有 finite、positive 的已发布 `trusted_bw_`，并且不在
+   已出现 Regime I/III 的 Cruise 内，则使用 PreviousTrusted；
+3. 其余允许应用 TrustedBw 的 phase，使用 fresh、同 Cruise、已通过 native
+   publication 校验的 `trusted_bw_`；
+4. 以上均不成立时直接使用 native BBR pacing。
 
-对应枚举：
+已发布的 `trusted_bw_` 可以来自 Regime II cumulative delivery、spectral、
+Guard、FBBR PreviousTrusted 或 native fallback。FBBR/ServiceFair 不增加
+TTL、置信度阈值或另一套 reference estimator。
 
-```cpp
-enum class FbbrV3ReferenceSource {
-    kTrusted,
-    kGuard,
-    kLastValid,
-    kInvalid,
-};
-```
-
-选择规则：
-
-- `trusted_bw_valid_` 必须为 true；
-- bandwidth 必须 finite 且大于 0；
-- Guard 只能使用已经通过 Cruise publication path 发布的
-  `trusted_bw_`，不直接读取尚未发布的 raw stage；
-- PreviousTrusted 使用原有 bounded carry-forward 语义；
-- 不增加 V4 TTL、置信度阈值或有效期；
-- native/MaxBw bootstrap publication 不算 valid Reference。
-
-重要区别：
-
-- V3 projection：要求 Reference valid；
-- V4 projection：不要求 Reference valid。
-
-Reference invalid 时，V4 仍记录实际生成的 native/time-waveform bootstrap
-target，并在 target history 覆盖完整 RTprop 后启用 planned projection。
+重要区别：V3 projection 要求 `SelectFbbrV3ReferenceBw()` 返回有效
+`ReferenceBw`；FBBR/ServiceFair 的 envelope 不要求它有效。即使没有可用
+TrustedBw，仍会记录 native/time-waveform bootstrap target；target history 覆盖
+完整 RTprop 后，planned projection 仍可启用。
 
 ## 14. PacingTarget
 
@@ -753,33 +752,37 @@ baseline/reference 路径：
 
 1. 默认 native bandwidth/native pacing；
 2. time-waveform Cruise 中使用 `current_injection_baseline_bw_`；
-3. V1 lower-bound search 只对 V1 生效，V4 不进入；
-4. 非 Cruise 的允许 phase 可使用 fresh TrustedBw；
-5. 对 V3/V4，若 projection Reference valid，它最终覆盖前述 pacing
-   reference。
+3. V1 lower-bound search 只对 V1 生效，FBBR/ServiceFair 不进入；
+4. FBBR/ServiceFair 在非 Cruise ProbeBW phase 可使用 usable
+   PreviousTrusted 或 fresh TrustedBw；
+5. 仅 V3 在 `SelectFbbrV3ReferenceBw()` 有效时以该 reference 覆盖前述
+   pacing source。
 
-V4 的 pacing base source trace 可为：
+完整的 pacing-base source 枚举为：
 
 ```text
 NATIVE_BBR
 WAVEFORM_CRUISE_BASELINE
 TRUSTED_BW
-V4_TRUSTED_REFERENCE
-V4_GUARD_REFERENCE
-V4_LAST_VALID_REFERENCE
+V3_TRUSTED_REFERENCE
+V3_GUARD_REFERENCE
+V3_LAST_VALID_REFERENCE
 ```
+
+后三个 `V3_*_REFERENCE` source 仅属于 V3；FBBR/ServiceFair 实际只使用前
+三个 source。
 
 ### 14.2 phase gain
 
-Reference valid 时：
+对 FBBR/ServiceFair 的 usable TrustedBw：
 
 \[
-BaselinePacing=PhaseGain\times ReferenceBw
+BaselinePacing=PhaseGain\times TrustedBw
 \]
 
-fresh Trusted path 同样使用 phase gain。time-waveform Cruise baseline 的
-phase gain 固定为 1。native path 保留 native BBRv2 的 pacing limit 和
-phase 结果。
+time-waveform Cruise baseline 的 phase gain 固定为 1。V3 valid Reference
+path 也使用同一 phase-gain 规则；native path 保留 native BBRv2 的 pacing
+limit 和 phase 结果。
 
 ### 14.3 waveform offset
 
@@ -1300,7 +1303,7 @@ Cwnd_{final}=
 
 ```cpp
 projection_active =
-    IsFbbrHybridV4() &&
+    UsesFbbrServiceEnvelope() &&
     RTpropValid &&
     target_history_covers_full_rtprop &&
     drain_completed_ &&
@@ -1316,7 +1319,7 @@ service_history_valid
 
 ### 24.2 phase 表
 
-| 状态/phase | V4 history | V4 cap | 行为 |
+| 状态/phase | shared history | shared cap | 行为 |
 |---|---|---|---|
 | Startup | 持续维护 target/delivered | 不启用 | native BBR |
 | initial Drain/transition | 持续维护 | 不启用 | native BBR |
@@ -1325,7 +1328,7 @@ service_history_valid
 | ProbeBW Up | 持续维护 | 启用 | 正 phase 可形成 probe credit |
 | ProbeBW Down | 持续维护 | 启用 | 负 phase 不形成 credit |
 | ProbeRTT | 持续维护 | 不启用 | native ProbeRTT |
-| Reference invalid | 持续维护 | 可启用 | 使用实际 bootstrap target |
+| TrustedBw/reference unavailable | 持续维护 | 可启用 | 使用实际 bootstrap target |
 | service invalid | 持续维护 | planned cap | `I_env=I_plan` |
 | service valid | 持续维护 | service envelope | `min(plan,service+probe)` |
 
@@ -1641,7 +1644,7 @@ function PacingRate(bytes_in_flight):
 
     base = min(base, target)
 
-    if algorithm == V4:
+    if algorithm in {FBBR, FBBR-ServiceFair}:
         RecordRateTargets(now, target, base)
 
     return target
@@ -1654,19 +1657,19 @@ function OnCongestionEvent(event):
     NativeBbrOnCongestionEvent(event)
     RunExistingFrequencyAndWaveformObserver(event)
 
-    if algorithm == V4 and event.acked_packets not empty:
+    if algorithm in {FBBR, FBBR-ServiceFair} and event.acked_packets not empty:
         RecordDeliveredPoint(
             event.time,
             model.total_bytes_acked,
             model.is_app_limited)
 
-        UpdateV4Telemetry(event.time, actual_inflight)
+        UpdateFBBRServiceEnvelopeTelemetry(event.time, actual_inflight)
 ```
 
 ### 31.3 snapshot
 
 ```text
-function BuildV4Snapshot(native_cwnd, actual_inflight):
+function BuildFBBRServiceEnvelopeSnapshot(native_cwnd, actual_inflight):
     rtprop = HybridSrttLow if valid else NativeMinRtt
 
     target_valid = HasFullTargetHistory(now, rtprop)
@@ -1701,7 +1704,7 @@ function BuildV4Snapshot(native_cwnd, actual_inflight):
             SaturatingAdd(envelope, extra_acked)))
 
     active =
-        algorithm == V4 &&
+        algorithm in {FBBR, FBBR-ServiceFair} &&
         rtprop valid &&
         target_valid &&
         drain_completed &&
@@ -1715,7 +1718,7 @@ function BuildV4Snapshot(native_cwnd, actual_inflight):
 ```text
 function GetCongestionWindow():
     native = native_cwnd
-    snapshot = BuildV4Snapshot(native, latest_actual_inflight)
+    snapshot = BuildFBBRServiceEnvelopeSnapshot(native, latest_actual_inflight)
 
     if !snapshot.projection_active:
         return native
@@ -1785,8 +1788,8 @@ mean 使用 byte×time / total time；P95 使用 ACK snapshot sample。
 
 ## 33. 默认配置
 
-V4 没有专属 capacity、flow-count、Cellular、fixed、queue、gain 或 recovery
-参数。它继承 `NS3.27/examples/CCconfig/fbbr_default.conf`。与 V4 信息层和
+FBBR/ServiceFair 没有专属 capacity、flow-count、Cellular、fixed、queue、gain 或 recovery
+参数。它们继承 `NS3.27/examples/CCconfig/fbbr_default.conf`。与 shared information layer 和
 pacing 相关的当前默认值如下：
 
 ```text
@@ -1936,19 +1939,20 @@ trace.enable_trusted_bw_selection_trace = true
 ```
 
 配置文件中还保留若干旧 Adaptive delta/queue-guard 和旧 waveform
-compatibility key。它们不进入 V4 的 service envelope，也不能据此认为
-V4 存在 queue target、baseline step 或 percentage actuator。
+compatibility key。它们不进入 FBBR shared service envelope，也不控制第 11
+节 FBBR 固定定义的 Regime I/III baseline 执行器；不能据此推断存在 queue
+target 或另一套 legacy baseline actuator。
 
 ## 34. Self-test 覆盖
 
-当前 V4 self-test 共 30 项，覆盖：
+当前 FBBR self-test 覆盖：
 
 ### 34.1 identity/isolation
 
-- V4 enum 与 V1/V3 不同；
-- V4 identity helper；
-- V4-only history；
-- V3/V4 planned integral 一致性。
+- FBBR enum 与 V1/V3 不同；
+- FBBR identity helper；
+- FBBR-only history；
+- V3/FBBR planned integral 一致性。
 
 ### 34.2 planned inflight
 
@@ -1990,18 +1994,18 @@ V4 存在 queue target、baseline step 或 percentage actuator。
 - Startup/ProbeRTT native；
 - 饱和 arithmetic。
 
-V1 和 V3 self-test 的归一化输出 hash 与 V4 修改前相同，证明 V4 没有
+V1 和 V3 self-test 的归一化输出 hash 与 FBBR 迁移前相同，证明 FBBR 没有
 替换它们的算法入口。
 
 ## 35. 源码索引
 
 | 内容 | 文件/函数 |
 |---|---|
-| 枚举 | `proto_types.h` / `kFBBRHybridV4` |
+| 枚举 | `proto_types.h` / `kFBBR` |
 | 工厂 | `proto_send_algorithm_interface.cc` |
 | parser | `fbbr_4flow.cc`, `generic_p2p_switch_flows.cc` |
-| V4 structs/state | `fbbr_sender.h` |
-| identity | `IsFbbrHybridV4()` |
+| FBBR/ServiceFair shared structs/state | `fbbr_sender.h` |
+| identity | `IsFbbr()`、`IsFbbrServiceFair()`、`UsesFbbrServiceEnvelope()` |
 | Reference | `SelectFbbrV3ReferenceBw()` |
 | pacing target/base | `PacingRate()` |
 | rate history | `RecordFbbrV4RateTargets()` |
@@ -2017,20 +2021,19 @@ V1 和 V3 self-test 的归一化输出 hash 与 V4 修改前相同，证明 V4 �
 | final cwnd | `ApplyFbbrV4InflightEnvelope()`, `GetCongestionWindow()` |
 | observer | `AnalyzeFbbrHybridWindow()` |
 | classifier | `ClassifyFbbrHybridRegime()` |
-| V3/V4 info actuator | `ApplyFbbrHybridV3Classification()` |
+| V3/FBBR info actuator | `ApplyFbbrHybridV3Classification()` |
 | Guard | `UpdateGuardEstimatorFromCongestionEvent()` |
 | Trusted publish | `PublishFbbrHybridCruiseTrustedBw()` |
 | telemetry | `UpdateFbbrV4Telemetry()`, `EmitFbbrV4FlowSummary()` |
-| self-test | `RunFbbrHybridV4SelfTest()` |
+| self-test | `RunFbbrSelfTest()` |
 
-## 36. 明确不存在的 V4 机制
+## 36. FBBR service envelope 明确不包含的机制
 
-V4 没有：
+第 11 节的 Regime I/III baseline 动作属于 FBBR 的 load executor；下列项目
+则不是 FBBR service envelope 新增的控制机制：
 
 - queue target；
 - RTT/queue gradient pacing gain；
-- baseline increase/decrease actuator；
-- percentage step；
 - V4 Drain；
 - V4 recovery；
 - capacity-specific 参数；
@@ -2051,7 +2054,7 @@ V4 没有：
 
 ## 37. 最终控制不变量
 
-只要 V4 projection active：
+只要 FBBR 或 ServiceFair 的 shared service-envelope projection active：
 
 \[
 PacingBaseTarget\le PacingTarget
@@ -2104,5 +2107,367 @@ I_{env}+MaxAckHeight
 \]
 
 长期 ReferenceBw 决定目标发送速率，近期已确认 service 决定短期 envelope，
-已有正向 probing 决定容量回升时的扩张信用；三者互不被 V4 额外 gain、
-阈值或状态机改写。
+已有正向 probing 决定容量回升时的扩张信用。ServiceFair 只在第 38-45 节
+所列的 baseline、Regime III 和 TrustedBw 边界加入控制，不回写 envelope。
+
+## 38. FBBR-ServiceFair 的定位和不变量
+
+`FBBR-ServiceFair` 不是第二套 BBR，也不替换 FBBR 的 target/base history、
+delivered history、service envelope 或最终 cwnd cap。它复用第 4-37 节的
+全部 FBBR 路径，并且只增加三类控制点：
+
+1. 每个 Cruise 至多一次的 service/qdelay AIMD，用来修改
+   `current_injection_baseline_bw_`；
+2. Regime III 的 yield cap 与 service floor，用来限制 FBBR 的 raw
+   overload candidate；
+3. Cruise 结束时的 TrustedBw publication correction，用来让最终发布值与
+   已完成的公平动作和最后一个有效 Regime 一致。
+
+因此以下公式对两个算法完全一致：
+
+\[
+I_{plan}=\int PacingTarget
+\]
+
+\[
+I_{probe}^{+}=\int\max(PacingTarget-PacingBaseTarget,0)
+\]
+
+\[
+I_{env}=\min(I_{plan},I_{service}+I_{probe}^{+})
+\]
+
+\[
+Cwnd_{final}=\min(Cwnd_{native},I_{cap})
+\]
+
+ServiceFair 不能直接修改 `I_service`、`I_probe+`、`I_env`、`I_cap`、
+`MaxAckHeight`、native `MaxBw`、`inflight_hi/lo`、ProbeBW phase 或 ProbeRTT。
+它也没有跨 Cruise 的独立公平速率；跨 Cruise 的唯一带宽状态仍是已发布的
+`TrustedBw`。
+
+## 39. ServiceFair 状态、采样和生命周期
+
+### 39.1 私有状态
+
+ServiceFair 只在 `kFBBRServiceFair` 下读取或更新以下状态：
+
+| 状态 | 含义 |
+|---|---|
+| `service_fair_service_rate_` | 最近一个有效 RTprop 窗口的累计 delivered service rate |
+| `service_fair_previous_service_rate_` | 上一次有效 service rate，仅用于变化率 trace |
+| `service_fair_qdelay_ewma_` | 当前排队延迟 EWMA |
+| `service_fair_previous_qdelay_ewma_` | 上一 Cruise 的 EWMA，用于上升趋势判断 |
+| `service_fair_last_update_cruise_id_` | 保证每个 Cruise 最多一次 AIMD 更新 |
+| `service_fair_last_valid_regime_this_cruise_` | 最后一个有效 I/II/III Regime，用于 publication correction |
+| `service_fair_raw_regime_candidate_bps_` | FBBR Regime executor 给出的原始候选 |
+| `service_fair_final_regime_candidate_bps_` | ServiceFair 约束后的最终候选 |
+
+连接迁移时执行 `ResetFbbrServiceFairState()` 并清除 TrustedBw；native BBR
+从非 Startup 重新进入 Startup 时也重置这些公平信号。重置时刻会阻止任何
+跨越该时刻的 delivered-service 窗口被采用。
+
+### 39.2 ACK 时更新的信号
+
+只有 ServiceFair、ProbeBW 且存在 ACK 时，`OnCongestionEvent()` 在记录
+FBBR delivered point 后调用 `UpdateFbbrServiceFairSignals()`。
+
+排队延迟样本：
+
+\[
+q_{sample}=\max(SRTT-RTprop,0)
+\]
+
+首次样本直接初始化；之后使用：
+
+\[
+q_{ewma}=\frac{7q_{ewma,old}+q_{sample}}8
+\]
+
+service rate 使用同一个 RTprop 时间窗内的累计 delivered bytes：
+
+\[
+ServiceRate=\frac{8\,[Delivered(t)-Delivered(t-RTprop)]}{RTprop}
+\]
+
+它要求第 20 节已有的全部 service-history 条件：左边界 anchor、单调
+counter、无 reset、窗口和当前均非 app-limited、以及完整 RTprop 覆盖。任一
+条件不满足时 `service_fair_service_history_valid_` 为 false，控制器不能使用
+该 service rate。
+
+### 39.3 Cruise 入口
+
+`EnterCruise()` 先按 FBBR 规则用 PreviousTrusted 或 native baseline 初始化
+`current_injection_baseline_bw_`，然后调用 `RunFbbrServiceFairCycleUpdate()`。
+同一 `cruise_id_` 的后续入口不会重复更新。
+
+## 40. ServiceFair 每 Cruise AIMD 负载执行器
+
+定义：\(R=RTprop\)，\(B\) 为当前 injection baseline，\(q=q_{ewma}\)。
+
+加性步长为：
+
+\[
+\alpha=\frac{0.5\times8\times MSS}{R}\quad bits/s
+\]
+
+当前实现的硬阈值是：
+
+\[
+q_{low}=\max(1ms,0.03R)
+\]
+
+\[
+q_{high}=\max(2ms,0.10R)
+\]
+
+\[
+q_{trend}=q_{ewma}-q_{ewma,previous},\quad
+T_{trend}=q_{low}
+\]
+
+乘性系数和绝对下限为：
+
+```text
+beta = 0.995
+minimum_service_fair_rate = 1 Mbps
+```
+
+进入函数即写入 `service_fair_last_update_cruise_id_`，因此包括 skip 在内，
+同一 Cruise 都不会再次执行 AIMD。判断优先级如下：
+
+1. baseline 无效：`SKIP_INVALID_HISTORY`；
+2. 当前 app-limited 且 service history 无效：`SKIP_APP_LIMITED`；
+3. RTprop、qdelay EWMA、service history、service rate 或 `alpha` 任一无效：
+   `SKIP_INVALID_HISTORY`；
+4. 否则进入下表的 AIMD 判断。
+
+两种 skip 都保持 baseline 不变。
+
+满足前提后按以下顺序执行：
+
+| 条件 | 动作 | 新 baseline |
+|---|---|---|
+| `q > q_high`，或已有上轮 EWMA 且 `q_trend > T_trend` | `MULTIPLICATIVE_DECREASE` | `min(B, max(1 Mbps, 0.995B))` |
+| `q < q_low` | `ADDITIVE_INCREASE` | `B + alpha`，若 MaxBw 有效则不高于 `max(B, MaxBw)` |
+| 其他 | `HOLD` | `B` |
+
+更新后，控制器保存当前 qdelay/service rate 为下一 Cruise 的 previous 值，
+增加 `service_fair_cycle_count_`，并记录 service-rate change：
+
+\[
+\frac{ServiceRate_{current}}{ServiceRate_{previous}}-1
+\]
+
+该变化率是 trace，不是另一个控制分支。
+
+## 41. Regime I/II/III 在 ServiceFair 下的执行
+
+ServiceFair 的负载判定树与 FBBR 完全相同：仍使用第 10 节 N01-N16，仍要求
+相同的 DRate/SRTT 有效性和 N12/N16 fallback。差异只出现在分类已经给出
+I/II/III 后。
+
+### 41.1 Inconclusive、无 DRate 或无合法 Regime II delivered interval
+
+与 FBBR 相同：baseline hold、TrustedBw hold、settle 后重采。公平控制不把
+无效样本伪装成负载结论。
+
+### 41.2 Regime I / UNDERLOAD
+
+先使用第 11.3 节的 FBBR raw candidate（`maxdrate`、MaxBw midpoint 或
+`1.02B`）。ServiceFair 不对 Regime I 再做额外削减；它记录 raw/final
+candidate 相同，并把该 Regime 作为本 Cruise 最后有效 Regime。
+
+### 41.3 Regime II / FULL_LOAD
+
+FBBR 的 Regime II 语义不变。特别是已经经历 I/III 后，唯一可信的候选是
+窗口边界累计 delivered rate。该候选在 TrustedBw publication 中优先级最高，
+ServiceFair 不得用公平 AIMD、MaxBw 或 service floor 改写它。
+
+### 41.4 Regime III / OVERLOAD
+
+先计算第 11.4 节的 FBBR raw candidate \(C_{raw}\)。ServiceFair 再应用：
+
+\[
+C_{yield}=\beta B
+\]
+
+\[
+C_0=\min(C_{raw},C_{yield})
+\]
+
+当 service history 有效且 \(S=ServiceRate>0\) 时：
+
+\[
+C_{floor}=\min(C_{yield},0.98S)
+\]
+
+\[
+C_{final}=\min(C_{yield},\max(C_0,C_{floor}))
+\]
+
+没有有效 service history 时不计算 \(C_{floor}\)，但 \(C_{yield}\) 仍然
+约束 candidate。这样 Regime III 一定不会高于 `0.995 * baseline`，同时在
+已确认 service 合理时避免把 baseline 压到远低于近期实际服务量。
+
+## 42. ServiceFair 的 TrustedBw publication 修正
+
+FBBR 的正常 Cruise 候选优先级仍是 Regime II cumulative delivery、spectral
+candidate、Guard、PreviousTrusted、native fallback。`ApplyFbbrServiceFairTrustedBwCorrection()`
+在候选选出后执行以下有限修正：
+
+| 条件 | 最终 TrustedBw |
+|---|---|
+| 合法 Regime II cumulative-delivery candidate | 原样保留，绝不修正 |
+| 最后有效 Regime 是 I | `max(candidate, final_baseline)`，再不高于有效 MaxBw |
+| 最后有效 Regime 是 III | `min(candidate, final_baseline)`；若 service 有效，可再抬至不超过 baseline 的 `0.98 * service_rate` |
+| 未出现有效 Regime，但本 Cruise 完成 AI 或 MD | `final_baseline` |
+| HOLD、skip 或无有效历史 | 原候选不变 |
+
+所有被修正的结果仍受 minimum pacing rate 下限保护。该 publication correction
+只修改将要发布的 `TrustedBw`；不回写历史 target/base、delivered history 或
+已生成的 envelope snapshot。
+
+## 43. ServiceFair trace、可观测性和失败路径
+
+每次 ServiceFair 事件以 `SERVICE_FAIRNESS` 写入既有 load trace。事件为：
+
+```text
+CYCLE_UPDATE       每 Cruise AIMD/hold/skip
+REGIME_EXECUTOR     I/II/III 或 invalid 分类执行后
+TRUSTED_PUBLISH     Cruise 最终候选发布时
+```
+
+每行字段顺序为：
+
+```text
+time_s
+flow_id
+cruise_id
+event
+classification
+baseline_bps
+baseline_valid
+cycle_count
+action
+qdelay_ewma_ms
+qdelay_trend_ms
+service_rate_bps
+service_rate_change
+alpha_bps
+beta
+raw_regime_candidate_bps
+final_regime_candidate_bps
+```
+
+`action` 只可能为：
+
+```text
+NOT_RUN
+ADDITIVE_INCREASE
+MULTIPLICATIVE_DECREASE
+HOLD
+SKIP_APP_LIMITED
+SKIP_INVALID_HISTORY
+```
+
+排障时必须优先区分：
+
+- `SKIP_APP_LIMITED`：采样本身不具备容量含义，不应解读为公平退让；
+- `SKIP_INVALID_HISTORY`：RTprop、qdelay、anchor、reset 或 delivered
+  history 的任一条件不足；
+- `HOLD`：输入有效，但 qdelay 位于允许带内且没有过快增长；
+- Regime II candidate：即便此前发生过 AIMD，也必须以合法 delivered
+  measurement 为准；
+- Regime III：检查 `raw_regime_candidate_bps`、`final_regime_candidate_bps`
+  和 service rate，确认 yield cap/floor 是否生效。
+
+## 44. FBBR 与 ServiceFair 的联合伪代码
+
+```text
+function OnCongestionEvent(event):
+    NativeBbrOnCongestionEvent(event)
+    UpdateFBBRObserverAndWaveformHistory(event)
+
+    if algorithm in {FBBR, FBBR-ServiceFair} and event.has_ack:
+        RecordTargetAndDeliveredHistoryForServiceEnvelope(event)
+
+    if algorithm == FBBR-ServiceFair and event.has_ack:
+        q_sample = max(SRTT - RTprop, 0)
+        qdelay_ewma = EWMA_7_8(qdelay_ewma, q_sample)
+        service_history_valid, service_rate =
+            ValidateAndMeasureDeliveredOverRtprop()
+
+    if in ProbeBW Cruise:
+        analysis = RunTimeWaveformStateMachine()
+        classification = ClassifyN01ToN16(analysis)
+        raw = ExecuteFBBRRegime(classification)
+
+        if algorithm == FBBR-ServiceFair and classification == OVERLOAD:
+            baseline = ApplyYieldCapAndServiceFloor(
+                raw, baseline_before, service_rate, service_history_valid)
+        else:
+            baseline = raw
+
+function EnterCruise():
+    baseline = PreviousTrustedOrNativeFBBRBaseline()
+
+    if algorithm == FBBR-ServiceFair and not updated_this_cruise:
+        if valid_rtprop_and_qdelay_and_service:
+            if excessive_or_rising_qdelay:
+                baseline = max(1Mbps, 0.995 * baseline)
+            else if low_qdelay:
+                baseline = min(baseline + alpha, max(baseline, MaxBw))
+            else:
+                baseline = baseline
+        mark_updated_this_cruise()
+
+function FinalizeCruise():
+    candidate = SelectFBBRTrustedBwCandidate()
+    if algorithm == FBBR-ServiceFair:
+        candidate = CorrectCandidateForLastRegimeAndFairness(candidate)
+    PublishTrustedBw(candidate)
+
+function GetCongestionWindow():
+    return ApplySharedFBBRServiceEnvelope(native_cwnd)
+```
+
+## 45. 配置、自测和源码索引
+
+FBBR 与 ServiceFair 共用 `examples/CCconfig/fbbr_default.conf`。当前没有
+ServiceFair 专属的外部配置键；其 `beta=0.995`、minimum rate `1 Mbps`、
+qdelay 比例、EWMA 系数和 \(\alpha\) 公式是源码中的固定算法语义。
+
+运行入口：
+
+```bash
+./waf --run "fbbr_4flow --algo=FBBR"
+./waf --run "fbbr_4flow --algo=FBBR-ServiceFair"
+./waf --run "fbbr_4flow --fbbrSelfTest=true"
+./waf --run "fbbr_4flow --fbbrServiceFairSelfTest=true"
+```
+
+`RunFbbrSelfTest()` 覆盖 FBBR identity、planned inflight、probe credit、
+service history、envelope、Regime 和 cwnd 不变量。`RunFbbrServiceFairSelfTest()`
+覆盖：
+
+- ServiceFair 只继承 FBBR envelope；
+- `alpha`、Regime III beta/yield、service floor 的精确数值；
+- 每 Cruise 一次的 AI/MD 与 qdelay/service 信号；
+- inconclusive window 不覆盖已完成的公平更新；
+- ProbeRTT / connection migration 不保留陈旧公平信号；
+- Regime I/III 的 TrustedBw publication correction。
+
+主要源码对应关系：
+
+| 内容 | 函数或状态 |
+|---|---|
+| FBBR/ServiceFair identity | `IsFbbr()`、`IsFbbrServiceFair()`、`UsesFbbrServiceEnvelope()` |
+| 共享 load 判定 | `ClassifyFbbrHybridRegime()`、`AnalyzeFbbrHybridWindow()` |
+| FBBR Regime executor | `ComputeFbbrV4InjectionBaseline()`、`ApplyFbbrHybridV4Classification()` |
+| FBBR envelope | `BuildFbbrV4EnvelopeSnapshot()`、`ApplyFbbrV4InflightEnvelope()` |
+| qdelay/service signal | `UpdateFbbrServiceFairSignals()` |
+| Cruise AIMD | `RunFbbrServiceFairCycleUpdate()` |
+| Regime III 保护 | `ApplyFbbrServiceFairRegimeIIIControlLimit()` |
+| TrustedBw 修正 | `ApplyFbbrServiceFairTrustedBwCorrection()` |
+| reset/trace | `ResetFbbrServiceFairState()`、`EmitFbbrServiceFairTrace()` |

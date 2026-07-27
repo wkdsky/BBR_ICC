@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze FBBR-hybirdv4 service-consistent inflight-envelope runs."""
+"""Analyze FBBR service-consistent inflight-envelope runs."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import analyze_fbbr_model_projection_v3 as common
 
 
 SCENARIOS = common.SCENARIOS
-ALGORITHMS = ("FBBR-hybrid", "FBBR-hybridv3", "FBBR-hybirdv4")
+ALGORITHMS = ("FBBR-hybrid", "FBBR-hybridv3", "FBBR")
 BASELINES = ("BBR-R", "BBRv2")
 BASELINE_SUMMARIES = {
     "fixed_4": (
@@ -376,7 +376,7 @@ def synthetic_dynamic_summary(root: Path) -> List[Dict[str, object]]:
         queue = common.read_csv(
             compare / "timeseries_queue_delay_mean_ms.csv"
         )
-        for algorithm in ("FBBR-hybridv3", "FBBR-hybirdv4"):
+        for algorithm in ("FBBR-hybridv3", "FBBR"):
             for phase, start_s, end_s in phases:
                 throughput_values = [
                     f(row.get(algorithm))
@@ -513,7 +513,7 @@ def acceptance(
     scenario: str,
     metrics: Dict[Tuple[str, str], Dict[str, str]],
 ) -> Dict[str, object]:
-    current = metrics[(scenario, "FBBR-hybirdv4")]
+    current = metrics[(scenario, "FBBR")]
     v3 = metrics[(scenario, "FBBR-hybridv3")]
     throughput = f(current["avg_aggregate_throughput_mbps_after_warmup"])
     v3_throughput = f(v3["avg_aggregate_throughput_mbps_after_warmup"])
@@ -616,14 +616,14 @@ def main() -> int:
                 Path(row["source_run_dir"])
             )
 
-        v4_dir = scenario_dir / "FBBR-hybirdv4"
+        v4_dir = scenario_dir / "FBBR"
         v4_rows.append(summarize_v4(v4_dir, scenario))
         for algorithm in ALGORITHMS:
             frequency, _ = common.summarize_frequency_run(
                 scenario_dir / algorithm, algorithm
             )
             frequency["scenario"] = scenario
-            if algorithm == "FBBR-hybirdv4":
+            if algorithm == "FBBR":
                 references: List[float] = []
                 for gate in v4_dir.glob("flow*_freq_gate_trace.csv"):
                     references.extend(
@@ -657,16 +657,16 @@ def main() -> int:
     fixed4_dir = (
         root
         / str(SCENARIOS["fixed_4"]["path"])
-        / "FBBR-hybirdv4"
+        / "FBBR"
     )
     global_jain = f(
-        metrics[("fixed_4", "FBBR-hybirdv4")][
+        metrics[("fixed_4", "FBBR")][
             "avg_jain_fairness_after_warmup"
         ]
     )
     for path in sorted(
         fixed4_dir.glob(
-            "FBBR-hybirdv4_flow*_FBBR-hybirdv4_good.txt"
+            "FBBR_flow*_FBBR_good.txt"
         ),
         key=common.flow_id,
     ):
@@ -696,7 +696,7 @@ def main() -> int:
     fixed32_dir = (
         root
         / str(SCENARIOS["fixed_32"]["path"])
-        / "FBBR-hybirdv4"
+        / "FBBR"
     )
     for summary_path in sorted(
         fixed32_dir.glob("flow*_v4_service_envelope_summary.csv"),
@@ -706,7 +706,7 @@ def main() -> int:
         summary_row = common.read_csv(summary_path)[0]
         goodput_path = next(
             fixed32_dir.glob(
-                f"FBBR-hybirdv4_flow{fid}_FBBR-hybirdv4_good.txt"
+                f"FBBR_flow{fid}_FBBR_good.txt"
             )
         )
         fixed32_rows.append(

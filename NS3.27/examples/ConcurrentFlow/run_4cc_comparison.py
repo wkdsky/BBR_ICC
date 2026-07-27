@@ -35,7 +35,7 @@ OPTIONAL_CCS = (
     "FBBR-adaptive",
     "FBBR-hybrid",
     "FBBR-hybridv3",
-    "FBBR-hybirdv4",
+    "FBBR-ServiceFair",
     "FreqCCv3",
     "BBR-R",
     "CUBIC",
@@ -459,17 +459,17 @@ ALGORITHM_PARAMS = {
         "algorithm": "FBBR-hybridv3",
         "notes": "复用 FBBR-hybrid 频域观察器，以 ReferenceBw 驱动 pacing，并用精确 RTprop pacing 积分限制最终 inflight。",
     },
-    "FBBR-hybirdv4": {
-        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
-        "config_file": str(DEFAULT_FBBR_CONFIG),
-        "algorithm": "FBBR-hybirdv4",
-        "notes": "保持 V3 pacing/Reference，以累计 delivered service 与既有正向 probing credit 构造短期 inflight envelope。",
-    },
     "FBBR": {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
         "config_file": str(DEFAULT_FBBR_CONFIG),
         "algorithm": "FBBR",
-        "notes": "FBBR 主分支，使用窗口极值调整基线，并平滑 FULL_LOAD 窗口均值。",
+        "notes": "保持 V3 pacing/Reference，以累计 delivered service 与既有正向 probing credit 构造短期 inflight envelope。",
+    },
+    "FBBR-ServiceFair": {
+        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
+        "config_file": str(DEFAULT_FBBR_CONFIG),
+        "algorithm": "FBBR-ServiceFair",
+        "notes": "在 FBBR service envelope 上按 Cruise 周期施加服务率和排队延迟公平性控制。",
     },
 }
 
@@ -608,7 +608,7 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
         "FBBR-adaptive",
         "FBBR-hybrid",
         "FBBR-hybridv3",
-        "FBBR-hybirdv4",
+        "FBBR-ServiceFair",
         "FreqCCv3",
     ):
         if cc in params:
@@ -766,7 +766,7 @@ def make_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "只运行指定 CC，可用逗号分隔。支持默认四种 CC，以及 "
-            "FBBR-adaptive、FBBR-hybrid、FBBR-hybridv3、FBBR-hybirdv4、FreqCCv3、"
+            "FBBR-adaptive、FBBR-hybrid、FBBR-hybridv3、FBBR-ServiceFair、FreqCCv3、"
             "BBR-R 和 CUBIC。"
         ),
     )

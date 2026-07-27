@@ -35,7 +35,7 @@ PLOT_COLORS = {
     "FBBR-adaptive": "#17becf",
     "FBBR-hybrid": "#e377c2",
     "FBBR-hybridv3": "#bcbd22",
-    "FBBR-hybirdv4": "#00a087",
+    "FBBR-ServiceFair": "#00a087",
     "FreqCCv3": "#9467bd",
     "BBR-R": "#8c564b",
     "CUBIC": "#7f7f7f",

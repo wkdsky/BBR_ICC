@@ -1,10 +1,11 @@
-# FBBR-hybirdv4 Service-Consistent Inflight Envelope 报告
+# FBBR Service-Consistent Inflight Envelope 报告
 
 ## 1. 结论摘要
 
 本轮在不创建 Git 分支、不修改 V1/V3 既有控制语义、不增加任何
 gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了独立算法
-`FBBR-hybirdv4`，内部枚举为 `kFBBRHybridV4`。
+`FBBR`，内部枚举为 `kFBBR`。该名称复用原 V4 的数值槽位；旧裸 FBBR
+的数值槽位已退役且不会创建算法实例。
 
 实现、编译、自测试、隔离 hash、sanity、smoke、人工动态容量、四组正式
 实验和离线分析均已完成。本轮没有实现 V5，也没有在实验失败后继续调参。
@@ -42,17 +43,17 @@ gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了�
 |---|---|---|
 | `FBBR-hybrid` | `kFBBRHybrid` | 原 Gradient-Matched V1 |
 | `FBBR-hybridv3` | `kFBBRHybridV3` | 原 Model-Consistent Inflight Projection |
-| `FBBR-hybirdv4` | `kFBBRHybridV4` | Service-Consistent Inflight Envelope |
+| `FBBR` | `kFBBR` | Service-Consistent Inflight Envelope |
 
 隔离方式：
 
-- `IsFbbrHybridV4()` 只匹配 `kFBBRHybridV4`。
+- `IsFbbr()` 只匹配 `kFBBR`。
 - `IsFbbrProjectionObserver()` 只用于共享 V3/V4 信息层入口。
 - V3 的 target-only history、积分函数、cap 函数和激活条件保持原实现。
 - V4 使用独立 `fbbr_v4_rate_history_` 和
   `fbbr_v4_delivered_history_`。
 - `RecordFbbrV4RateTargets()`、`RecordFbbrV4DeliveredPoint()`、
-  `UpdateFbbrV4Telemetry()` 均先检查 `IsFbbrHybridV4()`。
+  `UpdateFbbrV4Telemetry()` 均先检查 `IsFbbr()`。
 - 正式目录中 V1/V3 的 V4 summary 文件数均为 0；V4 分别产生
   4、32、4、8 个逐流 summary。
 - 没有全局开关把 V3 替换成 V4。
@@ -79,12 +80,12 @@ gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了�
 ### 核心枚举、工厂和发送路径
 
 - `NS3.27/src/dqc/model/thirdparty/include/proto_types.h`
-  - 追加 `kFBBRHybridV4`，没有重排旧枚举。
+  - 将原 V4 数值槽位命名为 `kFBBR`，并保留其他算法数值。
 - `NS3.27/src/dqc/model/thirdparty/congestion/proto_send_algorithm_interface.cc`
-  - 增加 V4 独立工厂 case。
+  - `kFBBR` 工厂 case 创建 service-envelope sender。
 - `NS3.27/src/dqc/model/dqc_sender.cc`
-  - 把 V4 识别为 FBBR/BBRv2 sender。
-  - flow 结束时只对 V4 调用 `FinalizeFbbrV4Trace()`。
+  - 把 FBBR 识别为 FBBR/BBRv2 sender。
+  - flow 结束时只对 FBBR 调用 `FinalizeFbbrV4Trace()`。
 - `NS3.27/src/dqc/model/thirdparty/congestion/quic_bbr2_misc.h`
   - 暴露 sampler 当前 `is_app_limited()` 状态。
 
@@ -96,7 +97,7 @@ gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了�
   - `FbbrV4EnvelopeSnapshot`
   - V4 history、telemetry 和 helper 声明。
 - `NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc`
-  - `IsFbbrHybridV4()`
+  - `IsFbbr()`
   - `IsFbbrProjectionObserver()`
   - `RecordFbbrV4RateTargets()`
   - `RecordFbbrV4DeliveredPoint()`
@@ -111,7 +112,7 @@ gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了�
   - `ApplyFbbrV4InflightEnvelope()`
   - `UpdateFbbrV4Telemetry()`
   - `EmitFbbrV4FlowSummary()`
-  - `RunFbbrHybridV4SelfTest()`
+  - `RunFbbrSelfTest()`
 
 ### trace、命令行与分析
 
@@ -119,9 +120,9 @@ gain、阈值、平滑、恢复状态机或场景特判的前提下，新增了�
   - 在既有分类窗口末尾追加 V4 字段。
   - 增加每 flow 一次的 V4 summary。
 - `NS3.27/scratch/fbbr_4flow.cc`
-  - V4 parser 和 `--fbbrHybridV4SelfTest`。
+  - `FBBR` parser 和 `--fbbrSelfTest`。
 - `NS3.27/scratch/generic_p2p_switch_flows.cc`
-  - 外部名称 `FBBR-hybirdv4`。
+  - 外部名称 `FBBR`。
 - `NS3.27/examples/ConcurrentFlow/run_4cc_comparison.py`
   - V4 选择、参数、目录和 config。
 - `NS3.27/examples/ConcurrentFlow/plot_4cc_comparison.py`

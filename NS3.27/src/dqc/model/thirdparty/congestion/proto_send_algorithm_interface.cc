@@ -408,7 +408,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                random,
                                stats,
                                false,
-                               false,
                                true,
                                kFBBRAdaptive);
         }
@@ -421,7 +420,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                random,
                                stats,
                                false,
-                               true,
                                false,
                                kFBBR);
         }
@@ -433,7 +431,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                max_congestion_window,
                                random,
                                stats,
-                               false,
                                false,
                                false,
                                kFBBRHybrid);
@@ -448,21 +445,7 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                stats,
                                false,
                                false,
-                               false,
                                kFBBRHybridV3);
-        }
-        case kFBBRHybridV4:{
-            return new FBBRSender(clock->Now(),
-                               rtt_stats,
-                               unacked_packets,
-                               initial_congestion_window,
-                               max_congestion_window,
-                               random,
-                               stats,
-                               false,
-                               false,
-                               false,
-                               kFBBRHybridV4);
         }
         case kFBBRServiceFair:{
             return new FBBRSender(clock->Now(),
@@ -472,7 +455,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                max_congestion_window,
                                random,
                                stats,
-                               false,
                                false,
                                false,
                                kFBBRServiceFair);

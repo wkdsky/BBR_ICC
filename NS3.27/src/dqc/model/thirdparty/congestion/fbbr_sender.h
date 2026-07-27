@@ -268,7 +268,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                  Random* random,
                  QuicConnectionStats* stats,
                  bool enable_ecn = false,
-                 bool fbbr_window_baseline = false,
                  bool adaptive_guard = false,
                  CongestionControlType congestion_control_type = kFBBR);
   ~FBBRSender() override = default;
@@ -291,17 +290,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static bool RunTrustedBwSelectionSelfTest(std::ostream& os);
   static bool RunTrustedBwPacingSelfTest(std::ostream& os);
   static bool RunWaveformCruiseSelfTest(std::ostream& os);
-  static bool RunFbbrBaselineSelfTest(std::ostream& os);
   static bool RunFbbrHybridSelfTest(std::ostream& os);
   static bool RunFbbrHybridV3SelfTest(std::ostream& os);
-  static bool RunFbbrHybridV4SelfTest(std::ostream& os);
+  static bool RunFbbrSelfTest(std::ostream& os);
   static bool RunFbbrServiceFairSelfTest(std::ostream& os);
   void FinalizeFbbrV3Trace();
   void FinalizeFbbrV4Trace();
-  static bool RunHybridBaselineSelfTest(std::ostream& os) {
-    return RunFbbrBaselineSelfTest(os);
-  }
-
   CongestionControlType GetCongestionControlType() const override {
     return Bbr2Sender::GetCongestionControlType();
   }
@@ -1093,9 +1087,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void RunWaveformCruiseStateMachine(QuicTime now);
   bool IsFbbrHybrid() const;
   bool IsFbbrHybridV3() const;
-  bool IsFbbrHybridV4() const;
+  bool IsFbbr() const;
   bool IsFbbrServiceFair() const;
-  bool UsesFbbrV4Envelope() const;
+  bool UsesFbbrServiceEnvelope() const;
   bool IsFbbrProjectionObserver() const;
   bool IsFbbrHybridObserver() const;
   bool HasUsableFbbrV4PreviousTrustedBw() const;
@@ -1620,7 +1614,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static double WidthScore(double width_ratio, double r0, double sigma);
   static const char* LabelToString(int label);
 
-  const bool fbbr_window_baseline_enabled_;
   const bool adaptive_guard_enabled_;
   double configured_modulation_freq_hz_;
   FBBRAmplitudeMode amplitude_mode_;
@@ -1979,8 +1972,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable uint64_t fbbr_v3_window_cap_binding_events_;
   bool fbbr_v3_flow_summary_emitted_;
 
-  // FBBR-hybirdv4 and FBBR-ServiceFair share the V4 independent target/base
-  // history and the bandwidth sampler's cumulative delivered history.
+  // FBBR and FBBR-ServiceFair share the service-envelope target/base history
+  // and the bandwidth sampler's cumulative delivered history.
   mutable std::deque<FbbrRateSegment> fbbr_v4_rate_history_;
   mutable TimeDelta fbbr_v4_max_rtprop_seen_;
   mutable bool fbbr_v4_rate_history_integrity_valid_;

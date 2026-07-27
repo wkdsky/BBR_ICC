@@ -1,5 +1,9 @@
 # FBBR 通用负载判定新版量化改造方案
 
+> **历史归档。** 本文描述的是已删除的旧裸 FBBR window-baseline 路径，
+> 不再对应任何可选算法或当前 `kFBBR`。当前 FBBR 的规范见
+> `FBBR_AND_SERVICE_FAIR_COMPLETE_ALGORITHM.md`。
+
 > 依据：仓库根目录 `ghtjykukli.pdf`（2026-07-21 13:07 更新版；1 页；SHA-256 `352a930f3e2bd3c2490ad3162ed7f718dc5f4c7a0a18e44ada9905504f5ce2f0`；替代 12:14 版本和此前 `regime判定.pdf`）
 >
 > 对照基线：当前工作区中的 `kFBBR` / `time_waveform` 路径

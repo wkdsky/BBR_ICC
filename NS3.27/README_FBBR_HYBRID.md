@@ -1,9 +1,9 @@
 # FBBR-hybrid 量化负载判定分支
 
 `FBBR-hybrid` 是按仓库根目录 `ghtjykukli.pdf` 与
-`FBBR_通用负载判定_新版量化改造方案.md` 实现的新算法分支。它保留原
-`FBBR` 和 `FBBR-adaptive` 的行为，用独立拥塞控制类型
-`kFBBRHybrid` 承载新版 N01–N16 判定树、连接状态和执行器。
+`FBBR_通用负载判定_新版量化改造方案.md` 实现的历史实验分支。它与当前
+`FBBR` 的 service envelope 以及 `FBBR-adaptive` 保持独立，用拥塞控制类型
+`kFBBRHybrid` 承载 N01–N16 判定树、连接状态和执行器。
 
 ## 使用
 
@@ -103,9 +103,10 @@ SRTT 横切只有在同一窗口里还观测到普通 SRTT 波动时才作为有
 最多到本 Cruise 初始幅度的 2 倍，达到上限仍滚动采窗。进入增强后任一信号
 恢复普通波动就退出。
 
-`FBBR`、`FBBR-adaptive` 不调用上述分类器、状态或执行器。窗口轨迹中的
-`regime_pipeline_owner` / `regime_actuator_owner` 可用于自动审计：混合分支
-固定为 `fbbr_hybrid_v2`，旧分支固定为 `legacy`。
+`FBBR-adaptive` 不调用上述 V1 分类器、状态或执行器；当前 `FBBR` 走独立的
+service-envelope 路径。窗口轨迹中的 `regime_pipeline_owner` /
+`regime_actuator_owner` 可用于自动审计：混合分支固定为
+`fbbr_hybrid_v2`，旧分支固定为 `legacy`。
 
 ## 关键默认门限
 

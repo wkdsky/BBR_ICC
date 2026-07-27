@@ -1,16 +1,18 @@
 # FBBR-ServiceFair
 
-`FBBR-ServiceFair` is an algorithm-level variant of `FBBR-hybirdv4`.
+`FBBR-ServiceFair` is an algorithm-level variant of `FBBR`.
 Its internal congestion-control type is `kFBBRServiceFair`.
 
-## Relationship To V4
+完整的 FBBR、负载判定、envelope、ServiceFair AIMD、Regime 修正和 trace
+规范见 `FBBR_AND_SERVICE_FAIR_COMPLETE_ALGORITHM.md`。
 
-- `FBBR-hybirdv4` remains the unchanged service-consistent inflight-envelope
-  baseline.
-- `FBBR-ServiceFair` inherits that V4 envelope, target/base history,
-  delivered-byte service history, pacing path, and V4 telemetry.
+## Relationship To FBBR
+
+- `FBBR` remains the unchanged service-consistent inflight-envelope baseline.
+- `FBBR-ServiceFair` inherits the FBBR envelope, target/base history,
+  delivered-byte service history, pacing path, and service-envelope telemetry.
 - The ServiceFair controller is active only for `kFBBRServiceFair`; it does
-  not alter the V4 control path.
+  not alter the FBBR control path.
 
 ## Added Control
 

@@ -7,8 +7,8 @@
 
 namespace dqc {
 
-// FreqCCv3 now carries the legacy pure FBBR algorithm:
-// fixed-frequency triangle-wave CRUISE probing plus STFT analysis.
+// FreqCCv3 uses fixed-frequency triangle-wave CRUISE probing plus STFT
+// analysis as its own congestion-control variant.
 class QUIC_EXPORT_PRIVATE FreqCCv3Sender : public FBBRSender {
  public:
   FreqCCv3Sender(QuicTime now,
@@ -27,7 +27,6 @@ class QUIC_EXPORT_PRIVATE FreqCCv3Sender : public FBBRSender {
                        random,
                        stats,
                        enable_ecn,
-                       false,
                        false,
                        kFreqCCv3) {}
 
