@@ -634,7 +634,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
                         waveform_max_interpolation_gap_period_ratio)
     SET_WAVEFORM_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
     SET_WAVEFORM_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
-    SET_WAVEFORM_DOUBLE("fbbr.regime.actuator.midpoint_trigger_ratio", fbbr_regime_actuator_midpoint_trigger_ratio)
     SET_WAVEFORM_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
     SET_WAVEFORM_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
     SET_WAVEFORM_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)

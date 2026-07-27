@@ -313,6 +313,41 @@ class QUIC_EXPORT_PRIVATE Bbr2MaxBandwidthFilter {
                                      QuicBandwidth::Zero()};
 };
 
+class QUIC_EXPORT_PRIVATE Bbr2MinBandwidthFilter {
+ public:
+  void Update(QuicBandwidth sample) {
+    if (sample.IsZero()) {
+      return;
+    }
+    if (min_bandwidth_[1].IsZero() || sample < min_bandwidth_[1]) {
+      min_bandwidth_[1] = sample;
+    }
+  }
+
+  void Advance() {
+    if (min_bandwidth_[1].IsZero()) {
+      return;
+    }
+
+    min_bandwidth_[0] = min_bandwidth_[1];
+    min_bandwidth_[1] = QuicBandwidth::Zero();
+  }
+
+  QuicBandwidth Get() const {
+    if (min_bandwidth_[0].IsZero()) {
+      return min_bandwidth_[1];
+    }
+    if (min_bandwidth_[1].IsZero()) {
+      return min_bandwidth_[0];
+    }
+    return std::min(min_bandwidth_[0], min_bandwidth_[1]);
+  }
+
+ private:
+  QuicBandwidth min_bandwidth_[2] = {QuicBandwidth::Zero(),
+                                     QuicBandwidth::Zero()};
+};
+
 // Information that are meaningful only when Bbr2Sender::OnCongestionEvent is
 // running.
 struct QUIC_EXPORT_PRIVATE Bbr2CongestionEvent {
@@ -405,7 +440,10 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   void RestartRoundEarly();
   void RestartRound() { RestartRoundEarly(); }
 
-  void AdvanceMaxBandwidthFilter() { max_bandwidth_filter_.Advance(); }
+  void AdvanceMaxBandwidthFilter() {
+    max_bandwidth_filter_.Advance();
+    min_bandwidth_filter_.Advance();
+  }
 
   void ForceSetMaxBandwidth(QuicBandwidth bandwidth) {
     max_bandwidth_filter_.ForceSet(bandwidth);
@@ -421,6 +459,22 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   }
   QuicBandwidth max_bandwidth_filter_input() const {
     return max_bandwidth_filter_input_;
+  }
+
+  // Min bandwidth uses the same two-cycle advancement as MaxBandwidth, but
+  // accepts only non-app-limited delivery-rate samples collected in Cruise.
+  void SetMinBandwidthSampleCollection(bool enabled) {
+    collect_min_bandwidth_samples_ = enabled;
+  }
+  void SetMinBandwidthSampleCorrection(double factor);
+  QuicBandwidth MinBandwidth() const {
+    return min_bandwidth_filter_.Get();
+  }
+  double min_bandwidth_sample_correction() const {
+    return min_bandwidth_sample_correction_;
+  }
+  QuicBandwidth min_bandwidth_filter_input() const {
+    return min_bandwidth_filter_input_;
   }
 
   void OnApplicationLimited() { bandwidth_sampler_.OnAppLimited(); }
@@ -642,6 +696,10 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   Bbr2MaxBandwidthFilter max_bandwidth_filter_;
   double max_bandwidth_sample_attenuation_ = 1.0;
   QuicBandwidth max_bandwidth_filter_input_ = QuicBandwidth::Zero();
+  Bbr2MinBandwidthFilter min_bandwidth_filter_;
+  bool collect_min_bandwidth_samples_ = false;
+  double min_bandwidth_sample_correction_ = 1.0;
+  QuicBandwidth min_bandwidth_filter_input_ = QuicBandwidth::Zero();
   QuicBandwidth bdp_bandwidth_override_ = QuicBandwidth::Zero();
   MinRttFilter min_rtt_filter_;
 

@@ -59,9 +59,6 @@ enum class FBBRPacingBaseSource {
   kV3TrustedReference,
   kV3GuardReference,
   kV3LastValidReference,
-  kV4TrustedReference,
-  kV4GuardReference,
-  kV4LastValidReference,
 };
 
 enum class FBBRCruiseDetectorMode {
@@ -191,7 +188,6 @@ struct FBBRConfig {
   // fields.
   double fbbr_regime_long_top_horizontal_duration_ratio = 0.20;
   double fbbr_regime_long_bottom_horizontal_duration_ratio = 0.30;
-  double fbbr_regime_actuator_midpoint_trigger_ratio = 0.50;
   uint32_t fbbr_wave_fidelity_no_wave_trigger_windows = 2;
   bool fbbr_wave_fidelity_stop_on_either_wave = true;
   uint32_t fbbr_wave_fidelity_retry_window_advance_periods = 1;
@@ -529,8 +525,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool app_limited = false;
   };
 
+  enum class FbbrV4PreviousTrustedSource {
+    kTrusted,
+    kGuard,
+    kInvalid,
+  };
+
   struct FbbrV4EnvelopeSnapshot {
-    FbbrV3ReferenceResult reference;
+    bool previous_trusted_bw_valid = false;
+    bool previous_trusted_bw_from_guard = false;
     QuicBandwidth pacing_target = QuicBandwidth::Zero();
     QuicBandwidth pacing_base_target = QuicBandwidth::Zero();
     QuicByteCount plan_inflight = 0;
@@ -832,10 +835,27 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double trusted_bw_bps = 0.0;
     double swing_bps = 0.0;
     double reference_gap_bps = 0.0;
-    bool bracket_valid = false;
-    double bracket_target_bps = 0.0;
-    bool bracket_triggered = false;
-    bool midpoint_triggered = false;
+    bool regime_i_maxdrate_triggered = false;
+    bool regime_i_maxbw_midpoint_valid = false;
+    double regime_i_maxbw_midpoint_bps = 0.0;
+    bool regime_i_maxbw_midpoint_triggered = false;
+    bool regime_i_growth_triggered = false;
+  };
+
+  struct FbbrV4ActuatorResult {
+    bool valid = false;
+    bool update_baseline = false;
+    double next_baseline_bps = 0.0;
+    bool update_trusted_bw = false;
+    double trusted_bw_bps = 0.0;
+    bool regime_iii_mindrate_triggered = false;
+    bool regime_iii_minbw_midpoint_triggered = false;
+    double regime_iii_minbw_midpoint_bps = 0.0;
+    bool regime_iii_decrease_triggered = false;
+    bool regime_i_maxdrate_triggered = false;
+    bool regime_i_maxbw_midpoint_triggered = false;
+    double regime_i_maxbw_midpoint_bps = 0.0;
+    bool regime_i_growth_triggered = false;
   };
 
   struct HybridMaxSrttObservation {
@@ -957,10 +977,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double hybrid_max_srtt_ms = 0.0;
     double hybrid_swing_bps = 0.0;
     double hybrid_reference_gap_bps = 0.0;
-    bool hybrid_bracket_valid = false;
-    double hybrid_bracket_target_bps = 0.0;
-    bool hybrid_bracket_triggered = false;
-    bool hybrid_midpoint_triggered = false;
+    bool hybrid_regime_i_maxdrate_triggered = false;
+    bool hybrid_regime_i_maxbw_midpoint_valid = false;
+    double hybrid_regime_i_maxbw_midpoint_bps = 0.0;
+    bool hybrid_regime_i_maxbw_midpoint_triggered = false;
+    bool hybrid_regime_i_growth_triggered = false;
     PlateauDetectionResult plateau;
     CycleCompletenessResult drate_without_middle_completeness;
     CycleCompletenessResult srtt_without_middle_completeness;
@@ -1063,6 +1084,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool IsFbbrHybridV4() const;
   bool IsFbbrProjectionObserver() const;
   bool IsFbbrHybridObserver() const;
+  bool HasUsableFbbrV4PreviousTrustedBw() const;
   FbbrV3ReferenceResult SelectFbbrV3ReferenceBw() const;
   static const char* FbbrV3ReferenceSourceName(
       FbbrV3ReferenceSource source);
@@ -1097,6 +1119,14 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       QuicTime now,
       uint64_t cumulative_delivered,
       bool app_limited);
+  bool ComputeFbbrV4IntervalDeliveryRateBps(
+      QuicTime window_start,
+      QuicTime window_end,
+      double* delivery_rate_bps) const;
+  bool ComputeFbbrV4TimeWeightedSrttMeanMs(
+      QuicTime window_start,
+      QuicTime window_end,
+      double* srtt_mean_ms) const;
   bool HasFullFbbrV4TargetHistory(
       QuicTime now,
       TimeDelta rtprop) const;
@@ -1135,6 +1165,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void ApplyFbbrHybridV3Classification(
       const WaveformWindowAnalysis& analysis,
       QuicTime now);
+  void ApplyFbbrHybridV4Classification(
+      const WaveformWindowAnalysis& analysis,
+      QuicTime now);
   WaveformWindowAnalysis AnalyzeFbbrHybridWindow(
       QuicTime window_start,
       QuicTime window_end,
@@ -1166,9 +1199,13 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static double ComputeMaxBwAttenuationFactor(
       double delivery_center_bps,
       double actual_fluctuation_amplitude_bps);
+  static double ComputeMinBwCorrectionFactor(
+      double delivery_center_bps,
+      double actual_fluctuation_amplitude_bps);
   uint64_t CurrentEmittedProbeAmplitudeBps() const;
   double CurrentActualDeliveryFluctuationAmplitudeBps() const;
   double CurrentMaxBwAttenuationFactor() const;
+  double CurrentMinBwCorrectionFactor() const;
   void ResetMaxBwAttenuationEstimator();
   void UpdateMaxBwAttenuationEstimator(
       double delivery_center_bps,
@@ -1449,17 +1486,24 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       double mindrate_bps,
       double maxdrate_bps,
       double meandrate_bps,
-      bool baseline_low_valid,
-      double baseline_low_bps,
       bool max_bw_valid,
       double max_bw_bps,
       double current_baseline_bps,
-      bool rtprop_drate_valid,
-      double rtprop_drate_bps,
-      double midpoint_trigger_ratio,
       double minimum_rate_bps,
       bool overload_gradient_valid = false,
       double overload_beta = 0.0);
+  static FbbrV4ActuatorResult ComputeFbbrV4InjectionBaseline(
+      WaveformClassification classification,
+      double mindrate_bps,
+      double maxdrate_bps,
+      double regime_ii_delivery_rate_bps,
+      bool min_bw_valid,
+      double min_bw_bps,
+      bool max_bw_valid,
+      double max_bw_bps,
+      double current_baseline_bps,
+      bool regime_i_or_iii_seen_this_cruise,
+      double minimum_rate_bps);
   WaveActivityFeatures DetectOrdinaryWaveActivity(
       const std::vector<double>& values,
       const std::vector<bool>& valid,
@@ -1709,7 +1753,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   double fbbr_regime_long_top_horizontal_duration_ratio_;
   double fbbr_regime_long_bottom_horizontal_duration_ratio_;
-  double fbbr_regime_actuator_midpoint_trigger_ratio_;
   uint32_t fbbr_wave_fidelity_no_wave_trigger_windows_;
   bool fbbr_wave_fidelity_stop_on_either_wave_;
   uint32_t fbbr_wave_fidelity_retry_window_advance_periods_;
@@ -1821,7 +1864,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable std::string trusted_bw_invalid_reason_;
   uint64_t unstable_episode_id_;
   bool unstable_episode_active_;
-  double w_freq_;
   mutable QuicBandwidth selection_native_bw_;
   mutable double drate_spectral_integrity_score_;
   mutable double srtt_spectral_integrity_score_;
@@ -1916,10 +1958,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   std::deque<FbbrDeliveredPoint> fbbr_v4_delivered_history_;
   bool fbbr_v4_delivered_history_integrity_valid_;
   QuicTime fbbr_v4_last_counter_reset_time_;
+  bool fbbr_v4_regime_i_or_iii_seen_this_cruise_;
 
   QuicTime fbbr_v4_telemetry_last_time_;
   bool fbbr_v4_telemetry_initialized_;
-  FbbrV3ReferenceSource fbbr_v4_telemetry_reference_source_;
+  FbbrV4PreviousTrustedSource
+      fbbr_v4_telemetry_previous_trusted_source_;
   bool fbbr_v4_telemetry_projection_active_;
   bool fbbr_v4_telemetry_service_history_valid_;
   bool fbbr_v4_telemetry_app_limited_fallback_;
@@ -1933,10 +1977,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   QuicByteCount fbbr_v4_telemetry_service_restriction_;
   QuicByteCount fbbr_v4_telemetry_enforced_excess_;
   uint64_t fbbr_v4_telemetry_total_us_;
-  uint64_t fbbr_v4_reference_trusted_us_;
-  uint64_t fbbr_v4_reference_guard_us_;
-  uint64_t fbbr_v4_reference_last_valid_us_;
-  uint64_t fbbr_v4_reference_invalid_us_;
+  uint64_t fbbr_v4_previous_trusted_us_;
+  uint64_t fbbr_v4_previous_trusted_guard_source_us_;
+  uint64_t fbbr_v4_previous_trusted_invalid_us_;
   uint64_t fbbr_v4_projection_active_us_;
   uint64_t fbbr_v4_service_history_valid_us_;
   uint64_t fbbr_v4_app_limited_fallback_us_;

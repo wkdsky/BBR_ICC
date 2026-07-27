@@ -91,6 +91,14 @@ void Bbr2NetworkModel::SetMaxBandwidthSampleAttenuation(double factor) {
   max_bandwidth_sample_attenuation_ = factor;
 }
 
+void Bbr2NetworkModel::SetMinBandwidthSampleCorrection(double factor) {
+  if (!std::isfinite(factor) || factor < 1.0) {
+    min_bandwidth_sample_correction_ = 1.0;
+    return;
+  }
+  min_bandwidth_sample_correction_ = factor;
+}
+
 void Bbr2NetworkModel::OnPacketSent(QuicTime sent_time,
                                     QuicByteCount bytes_in_flight,
                                     QuicPacketNumber packet_number,
@@ -140,6 +148,7 @@ void Bbr2NetworkModel::OnCongestionEventStart(
   congestion_event->sample_max_bandwidth = sample.sample_max_bandwidth;
 
   max_bandwidth_filter_input_ = QuicBandwidth::Zero();
+  min_bandwidth_filter_input_ = QuicBandwidth::Zero();
   if (!sample.sample_max_bandwidth.IsZero()) {
     const long double attenuated_bps =
         static_cast<long double>(
@@ -151,6 +160,23 @@ void Bbr2NetworkModel::OnCongestionEventStart(
             static_cast<long double>(std::numeric_limits<int64_t>::max())))));
     max_bandwidth_filter_input_ =
         QuicBandwidth::FromBitsPerSecond(filter_input_bps);
+    if (collect_min_bandwidth_samples_ &&
+        !sample.sample_is_app_limited) {
+      const long double corrected_bps =
+          static_cast<long double>(
+              sample.sample_max_bandwidth.ToBitsPerSecond()) *
+          static_cast<long double>(min_bandwidth_sample_correction_);
+      const int64_t min_filter_input_bps =
+          static_cast<int64_t>(std::llround(
+              std::max<long double>(
+                  1.0L,
+                  std::min<long double>(
+                      corrected_bps,
+                      static_cast<long double>(
+                          std::numeric_limits<int64_t>::max())))));
+      min_bandwidth_filter_input_ =
+          QuicBandwidth::FromBitsPerSecond(min_filter_input_bps);
+    }
   }
 
   if (sample.last_packet_send_state.is_valid) {
@@ -170,6 +196,11 @@ void Bbr2NetworkModel::OnCongestionEventStart(
     if (!sample.sample_is_app_limited ||
         max_bandwidth_filter_input_ > MaxBandwidth()) {
       max_bandwidth_filter_.Update(max_bandwidth_filter_input_);
+    }
+    if (collect_min_bandwidth_samples_ &&
+        !sample.sample_is_app_limited &&
+        !min_bandwidth_filter_input_.IsZero()) {
+      min_bandwidth_filter_.Update(min_bandwidth_filter_input_);
     }
   }
 
