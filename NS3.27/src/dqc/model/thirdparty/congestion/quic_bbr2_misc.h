@@ -440,6 +440,15 @@ class QUIC_EXPORT_PRIVATE Bbr2NetworkModel {
   void RestartRoundEarly();
   void RestartRound() { RestartRoundEarly(); }
 
+  // Restore the full-bandwidth plateau detector to its initial STARTUP state.
+  // BBRv2+ uses this when its dual-mode detector restarts from STARTUP.
+  void ResetFullBandwidthForStartup() {
+    full_bandwidth_reached_ = false;
+    full_bandwidth_baseline_ = QuicBandwidth::Zero();
+    rounds_without_bandwidth_growth_ = 0;
+    rounds_with_queueing_ = 0;
+  }
+
   void AdvanceMaxBandwidthFilter() {
     max_bandwidth_filter_.Advance();
     min_bandwidth_filter_.Advance();

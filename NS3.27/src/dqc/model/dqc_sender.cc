@@ -51,14 +51,16 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kFreqCC || type == kFreqCCv2 ||
            type == kFreqCCv3 || type == kFBBR ||
            type == kFBBRAdaptive || type == kFBBRHybrid ||
-           type == kFBBRHybridV3 || type == kFBBRHybridV4;
+           type == kFBBRHybridV3 || type == kFBBRHybridV4 ||
+           type == kFBBRServiceFair;
 }
 
 bool
 IsFBBRAlgorithm(CongestionControlType type)
 {
     return type == kFBBR || type == kFBBRAdaptive || type == kFBBRHybrid ||
-           type == kFBBRHybridV3 || type == kFBBRHybridV4;
+           type == kFBBRHybridV3 || type == kFBBRHybridV4 ||
+           type == kFBBRServiceFair;
 }
 
 std::string
@@ -524,7 +526,8 @@ void DqcSender::FinalizeCongestionControlTrace(){
     if (algo && algo->GetCongestionControlType() == kFBBRHybridV3) {
         static_cast<FBBRSender*>(algo)->FinalizeFbbrV3Trace();
     } else if (algo &&
-               algo->GetCongestionControlType() == kFBBRHybridV4) {
+               (algo->GetCongestionControlType() == kFBBRHybridV4 ||
+                algo->GetCongestionControlType() == kFBBRServiceFair)) {
         static_cast<FBBRSender*>(algo)->FinalizeFbbrV4Trace();
     }
 }
@@ -974,6 +977,17 @@ void DqcSender::ConfigureFBBR(const dqc::FBBRConfig& config,
         fbbr->ConfigureFBBR(config);
     }
 }
+
+void DqcSender::ConfigureBbr2Plus(const dqc::Bbr2PlusConfig& config){
+    SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
+    SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
+    if(algo && (algo->GetCongestionControlType() == kBBRv2Plus ||
+                algo->GetCongestionControlType() == kBBRv2PlusEcn)){
+        Bbr2PlusSender* bbr2plus = static_cast<Bbr2PlusSender*>(algo);
+        bbr2plus->Configure(config);
+    }
+}
+
 void DqcSender::SetDataChunkVariationBytes(uint32_t variation_bytes,
                                            uint64_t variation_seed){
     m_dataChunkVariationBytes = variation_bytes;

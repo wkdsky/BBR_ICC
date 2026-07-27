@@ -386,6 +386,11 @@ void DqcTrace::OnFBBRLoad(double window_start_s, double window_end_s,
         if(m_fbbrWaveformSearch.is_open()){
             m_fbbrWaveformSearch<<diagnostics<<"\n";
         }
+    }else if(label == "SERVICE_FAIRNESS"){
+        OpenFBBRServiceFairnessFile();
+        if(m_fbbrServiceFairness.is_open()){
+            m_fbbrServiceFairness<<diagnostics<<"\n";
+        }
     }else if(label == "CRUISE_SUMMARY"){
         OpenFBBRCruiseSummaryFile();
         if(m_fbbrCruiseSummary.is_open()){
@@ -444,6 +449,7 @@ void DqcTrace::Close(){
     CloseFBBRCruiseSummaryFile();
     CloseFBBRGateFile();
     CloseFBBRWaveformSearchFile();
+    CloseFBBRServiceFairnessFile();
     CloseFBBRV3SummaryFile();
     CloseFBBRV4SummaryFile();
     CloseStatsFile();
@@ -551,6 +557,12 @@ void DqcTrace::CloseFBBRWaveformSearchFile(){
     if(m_fbbrWaveformSearch.is_open()){
         m_fbbrWaveformSearch.flush();
         m_fbbrWaveformSearch.close();
+    }
+}
+void DqcTrace::CloseFBBRServiceFairnessFile(){
+    if(m_fbbrServiceFairness.is_open()){
+        m_fbbrServiceFairness.flush();
+        m_fbbrServiceFairness.close();
     }
 }
 void DqcTrace::CloseFBBRV3SummaryFile(){
@@ -904,6 +916,30 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",v4_app_limited_contaminated"
             <<",v4_projection_active,v4_service_restriction"
             <<",v4_enforced_excess,v4_cap_binding_fraction\n";
+    }
+}
+void DqcTrace::OpenFBBRServiceFairnessFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) ||
+       m_fbbrServiceFairness.is_open()) return;
+    char buf[FILENAME_MAX];
+    memset(buf,0,FILENAME_MAX);
+    std::string path;
+    if(0==kDqcTracePath.size()){
+        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
+            +std::to_string(m_id)+"_service_fairness.csv";
+    }else{
+        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
+            +"_service_fairness.csv";
+    }
+    m_fbbrServiceFairness.open(path.c_str(), std::fstream::out);
+    if(m_fbbrServiceFairness.is_open()){
+        m_fbbrServiceFairness
+            <<"time_s,flow_id,cruise_id,event,regime"
+            <<",control_baseline_bw,control_baseline_valid,fairness_cycle_count"
+            <<",fairness_action,qdelay_ewma,qdelay_trend"
+            <<",fair_service_rate,service_rate_change"
+            <<",alpha,beta,raw_regime_candidate"
+            <<",final_regime_candidate\n";
     }
 }
 void DqcTrace::OpenFBBRV3SummaryFile(){

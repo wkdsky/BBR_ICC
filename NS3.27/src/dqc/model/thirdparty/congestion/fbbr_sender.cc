@@ -772,6 +772,8 @@ constexpr double FBBRSender::kMinSrttSnr;
 constexpr double FBBRSender::kTargetSrttSnr;
 constexpr double FBBRSender::kMaxDrateShapeDistance;
 constexpr double FBBRSender::kMaxPhaseStdCycles;
+constexpr double FBBRSender::kFbbrServiceFairBeta;
+constexpr uint64_t FBBRSender::kFbbrServiceFairMinimumBps;
 constexpr double FBBRSender::kBandLowRatio;
 constexpr double FBBRSender::kBandHighRatio;
 constexpr int FBBRSender::kBandShapeBins;
@@ -1140,6 +1142,25 @@ FBBRSender::FBBRSender(
       fbbr_v4_delivered_history_integrity_valid_(true),
       fbbr_v4_last_counter_reset_time_(QuicTime::Zero()),
       fbbr_v4_regime_i_or_iii_seen_this_cruise_(false),
+      service_fair_last_valid_regime_seen_this_cruise_(false),
+      service_fair_last_valid_regime_this_cruise_(
+          WaveformClassification::kInconclusive),
+      service_fair_service_rate_(QuicBandwidth::Zero()),
+      service_fair_previous_service_rate_(QuicBandwidth::Zero()),
+      service_fair_qdelay_ewma_(TimeDelta::Zero()),
+      service_fair_previous_qdelay_ewma_(TimeDelta::Zero()),
+      service_fair_cycle_count_(0),
+      service_fair_qdelay_valid_(false),
+      service_fair_previous_qdelay_valid_(false),
+      service_fair_service_history_valid_(false),
+      service_fair_signal_reset_time_(QuicTime::Zero()),
+      service_fair_last_update_cruise_id_(-1),
+      service_fair_action_(FbbrServiceFairAction::kNotRun),
+      service_fair_qdelay_trend_(TimeDelta::Zero()),
+      service_fair_service_rate_change_(0.0),
+      service_fair_alpha_bps_(0.0),
+      service_fair_raw_regime_candidate_bps_(0.0),
+      service_fair_final_regime_candidate_bps_(0.0),
       fbbr_v4_telemetry_last_time_(QuicTime::Zero()),
       fbbr_v4_telemetry_initialized_(false),
       fbbr_v4_telemetry_previous_trusted_source_(
@@ -1298,10 +1319,10 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
 
   trusted_bw_clear_on_cruise_start_ = config.trusted_bw_clear_on_cruise_start;
 
-  if (!IsFbbrHybridV4() &&
+  if (!UsesFbbrV4Envelope() &&
       config.cruise_detector_mode == "legacy_spectral") {
     cruise_detector_mode_ = FBBRCruiseDetectorMode::kLegacySpectral;
-  } else if (IsFbbrHybridV4() ||
+  } else if (UsesFbbrV4Envelope() ||
              config.cruise_detector_mode == "time_waveform") {
     cruise_detector_mode_ = FBBRCruiseDetectorMode::kTimeWaveform;
   } else {
@@ -1508,7 +1529,7 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
     waveform_clip_floor_confirmations_ =
         config.waveform_clip_floor_confirmations;
   }
-  if (!IsFbbrHybridV4() &&
+  if (!UsesFbbrV4Envelope() &&
       cruise_detector_mode_ == FBBRCruiseDetectorMode::kTimeWaveform) {
     std::cerr << "[FBBR config] waveform.min_completeness_score, "
                  "waveform.min_rising_duration_ratio, "
@@ -3806,7 +3827,7 @@ bool FBBRSender::RunFbbrHybridV4SelfTest(std::ostream& os) {
     os << (condition ? "PASS: " : "FAIL: ") << message << "\n";
     pass = pass && condition;
   };
-  os << "# FBBR-hybirdv4 service-consistent inflight self-test\n";
+  os << "# FBBR-hybirdv4 service inflight self-test\n";
 
   RttStats rtt;
   rtt.set_initial_rtt(TimeDelta::FromMilliseconds(20));
@@ -3926,7 +3947,6 @@ bool FBBRSender::RunFbbrHybridV4SelfTest(std::ostream& os) {
     v4.fbbr_v4_last_counter_reset_time_ = QuicTime::Zero();
   };
   const TimeDelta rtprop20 = TimeDelta::FromMilliseconds(20);
-
   reset_v4_rate();
   v4.RecordFbbrV4RateTargets(at_ms(0), bw(100000000), bw(100000000));
   require(v4.ComputeFbbrV4PlannedInflightBytes(
@@ -4364,6 +4384,126 @@ bool FBBRSender::RunFbbrHybridV4SelfTest(std::ostream& os) {
   return pass;
 }
 
+bool FBBRSender::RunFbbrServiceFairSelfTest(std::ostream& os) {
+  bool pass = true;
+  auto require = [&pass, &os](bool condition,
+                              const std::string& message) {
+    os << (condition ? "PASS: " : "FAIL: ") << message << "\n";
+    pass = pass && condition;
+  };
+  os << "# FBBR-ServiceFair self-test\n";
+
+  RttStats rtt;
+  rtt.set_initial_rtt(TimeDelta::FromMilliseconds(20));
+  Random random;
+  QuicConnectionStats stats;
+  auto at_ms = [](int64_t milliseconds) {
+    return QuicTime::Zero() +
+        TimeDelta::FromMilliseconds(milliseconds);
+  };
+  auto bw = [](uint64_t bps) {
+    return QuicBandwidth::FromBitsPerSecond(bps);
+  };
+  FBBRSender service_fair(
+      QuicTime::Zero(), &rtt, nullptr, 10, 1000,
+      &random, &stats, false, false, false, kFBBRServiceFair);
+  service_fair.ConfigureFBBR(FBBRConfig());
+  require(service_fair.IsFbbrServiceFair() &&
+              service_fair.UsesFbbrV4Envelope() &&
+              service_fair.IsFbbrProjectionObserver() &&
+              !service_fair.IsFbbrHybridV4() &&
+              kFBBRServiceFair != kFBBRHybridV4,
+          "ServiceFair inherits the V4 envelope without changing V4 identity");
+
+  const TimeDelta rtprop20 = TimeDelta::FromMilliseconds(20);
+  const double expected_alpha =
+      0.5 * 8.0 * static_cast<double>(kDefaultTCPMSS) / 0.020;
+  const double alpha = ComputeFbbrServiceFairAlphaBps(rtprop20);
+  const double regime_iii_limited =
+      ApplyFbbrServiceFairRegimeIIIControlLimit(
+          120000000.0, 100000000.0, 0.0, false);
+  const double regime_iii_service_floor =
+      ApplyFbbrServiceFairRegimeIIIControlLimit(
+          50000000.0, 100000000.0, 90000000.0, true);
+  require(std::abs(alpha - expected_alpha) < 1e-9 &&
+              std::abs(regime_iii_limited - 99500000.0) < 1e-6 &&
+              std::abs(regime_iii_service_floor - 88200000.0) < 1e-6,
+          "cycle AI, Regime III beta yield, and service protection are exact");
+
+  service_fair.mode_ = Bbr2Mode::PROBE_BW;
+  service_fair.cruise_id_ = 1;
+  service_fair.current_injection_baseline_bw_ = bw(100000000);
+  service_fair.service_fair_qdelay_ewma_ = TimeDelta::Zero();
+  service_fair.service_fair_qdelay_valid_ = true;
+  service_fair.service_fair_service_rate_ = bw(50000000);
+  service_fair.service_fair_service_history_valid_ = true;
+  service_fair.RunFbbrServiceFairCycleUpdate(at_ms(100));
+  const QuicBandwidth fair_after_ai =
+      service_fair.current_injection_baseline_bw_;
+  service_fair.RunFbbrServiceFairCycleUpdate(at_ms(101));
+  const bool one_update_per_cycle =
+      service_fair.service_fair_cycle_count_ == 1 &&
+      service_fair.current_injection_baseline_bw_ == fair_after_ai;
+  service_fair.cruise_id_ = 2;
+  service_fair.service_fair_qdelay_ewma_ =
+      TimeDelta::FromMilliseconds(3);
+  service_fair.service_fair_service_rate_ = bw(61000000);
+  service_fair.RunFbbrServiceFairCycleUpdate(at_ms(200));
+  require(one_update_per_cycle &&
+              service_fair.service_fair_cycle_count_ == 2 &&
+              service_fair.service_fair_action_ ==
+                  FbbrServiceFairAction::kMultiplicativeDecrease &&
+              service_fair.service_fair_service_rate_change_ > 0.20,
+          "fair AIMD runs once per Cruise and tracks qdelay/service changes");
+
+  WaveformWindowAnalysis inconclusive_window;
+  inconclusive_window.classification =
+      WaveformClassification::kInconclusive;
+  inconclusive_window.invalid_reason = "self_test_inconclusive";
+  const QuicBandwidth before_inconclusive =
+      service_fair.current_injection_baseline_bw_;
+  service_fair.ApplyFbbrHybridV3Classification(
+      inconclusive_window, at_ms(250));
+  require(service_fair.service_fair_cycle_count_ == 2 &&
+              service_fair.current_injection_baseline_bw_ ==
+                  before_inconclusive,
+          "an inconclusive classifier window preserves a completed fairness update");
+
+  service_fair.mode_ = Bbr2Mode::PROBE_RTT;
+  service_fair.RunFbbrServiceFairCycleUpdate(at_ms(300));
+  service_fair.OnConnectionMigration();
+  require(service_fair.service_fair_cycle_count_ == 0 &&
+              !service_fair.service_fair_service_history_valid_ &&
+              service_fair.service_fair_previous_service_rate_.IsZero(),
+          "ProbeRTT and migration do not retain stale fairness signals");
+
+  service_fair.model_.ForceSetMaxBandwidth(bw(150000000));
+  service_fair.current_injection_baseline_bw_ = bw(80000000);
+  service_fair.service_fair_last_valid_regime_seen_this_cruise_ = true;
+  service_fair.service_fair_last_valid_regime_this_cruise_ =
+      WaveformClassification::kUnderload;
+  TrustedBwSelectionResult selection{
+      bw(150000000), bw(70000000), true, 1.0,
+      kTrustedBwSourceNativeFallback, 0.0, 0.0, 0.0,
+      false, false, false, kLimitingSpectralSignalEqual,
+      false, false, 0, 0, 0, 0};
+  service_fair.ApplyFbbrServiceFairTrustedBwCorrection(&selection, false);
+  const bool underload_correction = selection.trusted_bw == bw(80000000);
+  service_fair.service_fair_last_valid_regime_this_cruise_ =
+      WaveformClassification::kOverload;
+  service_fair.current_injection_baseline_bw_ = bw(75000000);
+  service_fair.service_fair_service_rate_ = bw(70000000);
+  service_fair.service_fair_service_history_valid_ = true;
+  selection.trusted_bw = bw(50000000);
+  selection.trusted_bw_valid = true;
+  service_fair.ApplyFbbrServiceFairTrustedBwCorrection(&selection, false);
+  require(underload_correction && selection.trusted_bw == bw(68600000),
+          "Trusted publication preserves bounded Regime I and III corrections");
+
+  os << "RESULT: " << (pass ? "PASS" : "FAIL") << "\n";
+  return pass;
+}
+
 Bbr2ProbeBwMode::CyclePhase FBBRSender::GetCurrentProbeBwPhase() const {
   DebugState state = ExportDebugState();
   if (state.mode == Bbr2Mode::PROBE_BW) {
@@ -4414,6 +4554,15 @@ float FBBRSender::GetProbeBwCwndGain(
     Bbr2ProbeBwMode::CyclePhase phase,
     float cwnd_gain) const {
   return FBBRCwndGainForPhase(phase, cwnd_gain);
+}
+
+bool FBBRSender::ShouldExitProbeUpAfterRound() const {
+  // ServiceFair can deliberately pace below native MaxBw and cap inflight
+  // below the native queue-building threshold. In that case native ProbeBW_UP has
+  // no reachable queue exit.  Preserve one complete packet-timed probing
+  // round, then allow the cycle to continue so MaxBw and fairness feedback
+  // keep receiving fresh ProbeBW cycles.
+  return IsFbbrServiceFair() && HasUsableFbbrV4PreviousTrustedBw();
 }
 
 bool FBBRSender::BaseShouldOscillate() const {
@@ -4832,7 +4981,7 @@ double FBBRSender::TriangleWave(QuicTime now) const {
 void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                                            QuicTime now) {
   model_.SetMinBandwidthSampleCollection(
-      IsFbbrHybridV4() &&
+      UsesFbbrV4Envelope() &&
       phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE);
   if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
     rtprop_probe_down_active_ = false;
@@ -4862,6 +5011,11 @@ void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
 void FBBRSender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
   fbbr_v4_regime_i_or_iii_seen_this_cruise_ = false;
+  if (IsFbbrServiceFair()) {
+    service_fair_last_valid_regime_seen_this_cruise_ = false;
+    service_fair_last_valid_regime_this_cruise_ =
+        WaveformClassification::kInconclusive;
+  }
   current_cruise_rtprop_updated_ = false;
   previous_cruise_rtprop_updated_ = false;
   // Replace the constructor's initial-RTT placeholder once, using the first
@@ -4927,7 +5081,7 @@ void FBBRSender::EnterCruise(QuicTime now) {
   }
   initial_cruise_baseline_bw_ = current_native_max_bw;
   current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
-  if (IsFbbrHybridV4() && HasUsableFbbrV4PreviousTrustedBw()) {
+  if (UsesFbbrV4Envelope() && HasUsableFbbrV4PreviousTrustedBw()) {
     initial_cruise_baseline_bw_ = trusted_bw_;
     current_injection_baseline_bw_ = trusted_bw_;
   } else if (IsFbbrHybridV3()) {
@@ -4936,6 +5090,9 @@ void FBBRSender::EnterCruise(QuicTime now) {
       initial_cruise_baseline_bw_ = reference.bandwidth;
       current_injection_baseline_bw_ = reference.bandwidth;
     }
+  }
+  if (IsFbbrServiceFair()) {
+    RunFbbrServiceFairCycleUpdate(now);
   }
   const bool hybrid_lower_bound_search_needed =
       IsFbbrHybrid() && ShouldStartFbbrHybridLowerBoundSearch(
@@ -5697,12 +5854,21 @@ void FBBRSender::UpdateFreqWeightAndToolState() {
 
 void FBBRSender::ClearTrustedBw(const char* reason) {
   const std::string clear_reason = reason == nullptr ? "unknown" : reason;
-  const bool preserve_across_probe_rtt =
+  const bool preserve_v4_probe_rtt =
       IsFbbrHybridV4() && mode_ == Bbr2Mode::PROBE_RTT &&
       (clear_reason == "non_probe_bw" ||
        clear_reason == "stable_closure");
-  if (preserve_across_probe_rtt) {
-    trusted_bw_invalid_reason_ = "probe_rtt_preserved";
+  const bool preserve_service_fair_control =
+      IsFbbrServiceFair() && trusted_bw_valid_ &&
+      IsFinitePositiveBandwidth(trusted_bw_) &&
+      (clear_reason == "stable_closure" ||
+       (mode_ == Bbr2Mode::PROBE_RTT &&
+        clear_reason == "non_probe_bw"));
+  if (preserve_v4_probe_rtt || preserve_service_fair_control) {
+    trusted_bw_invalid_reason_ =
+        preserve_v4_probe_rtt || mode_ == Bbr2Mode::PROBE_RTT
+            ? "probe_rtt_preserved"
+            : "stable_control_preserved";
     ClearTrustedBwApplication(reason);
     return;
   }
@@ -5832,7 +5998,7 @@ void FBBRSender::PublishTrustedBwSelection(
   trusted_bw_ready_for_post_cruise_ = true;
   trusted_bw_application_phase_ = "POST_CRUISE_READY";
   trusted_bw_invalid_reason_ = "none";
-  if (IsFbbrHybridV4() && HasUsableFbbrV4PreviousTrustedBw()) {
+  if (UsesFbbrV4Envelope() && HasUsableFbbrV4PreviousTrustedBw()) {
     current_injection_baseline_bw_ = trusted_bw_;
   } else if (IsFbbrHybridV3()) {
     const FbbrV3ReferenceResult reference = SelectFbbrV3ReferenceBw();
@@ -6058,7 +6224,7 @@ void FBBRSender::EmitFreqGateCsvRow(
   const Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
   const double trace_freq_weight = bbr_stable_
       ? 0.0
-      : (IsFbbrHybridV4()
+      : (UsesFbbrV4Envelope()
              ? 1.0
              : Clamp01(1.0 - static_cast<double>(stable_cnt_) /
                                   static_cast<double>(stable_rounds_)));
@@ -6174,7 +6340,7 @@ void FBBRSender::PublishFbbrHybridCruiseTrustedBw(
           ? kTrustedBwSourceNone : trusted_bw_candidate_source_;
   const bool waveform_candidate_source_valid =
       waveform_candidate_source == kTrustedBwSourceFbbrWindowMean ||
-      (IsFbbrHybridV4() && waveform_candidate_source ==
+      (UsesFbbrV4Envelope() && waveform_candidate_source ==
            kTrustedBwSourceFbbrWindowDeliveredRate);
   const bool waveform_frequency_ready =
       fbbr_hybrid_regime_ii_seen_this_cruise_ &&
@@ -6211,7 +6377,7 @@ void FBBRSender::PublishFbbrHybridCruiseTrustedBw(
     selection.limiting_spectral_signal = kLimitingSpectralSignalEqual;
   } else if ((IsFbbrHybridV4() &&
               HasUsableFbbrV4PreviousTrustedBw()) ||
-             (!IsFbbrHybridV4() &&
+             (!UsesFbbrV4Envelope() &&
               IsFinitePositiveBandwidth(trusted_bw_))) {
     selection.trusted_bw = trusted_bw_;
     selection.trusted_bw_valid = true;
@@ -6222,10 +6388,10 @@ void FBBRSender::PublishFbbrHybridCruiseTrustedBw(
     selection.dual_signal_spectral_gate_pass = false;
     selection.limiting_spectral_signal = kLimitingSpectralSignalEqual;
   } else {
-    QuicBandwidth native_fallback = IsFbbrHybridV4()
+    QuicBandwidth native_fallback = UsesFbbrV4Envelope()
         ? model_.MaxBandwidth() : initial_cruise_baseline_bw_;
     if (!IsFinitePositiveBandwidth(native_fallback)) {
-      native_fallback = IsFbbrHybridV4()
+      native_fallback = UsesFbbrV4Envelope()
           ? initial_cruise_baseline_bw_ : model_.MaxBandwidth();
     }
     if (!IsFinitePositiveBandwidth(native_fallback)) {
@@ -6245,6 +6411,10 @@ void FBBRSender::PublishFbbrHybridCruiseTrustedBw(
     selection.limiting_spectral_signal = kLimitingSpectralSignalEqual;
   }
 
+  if (IsFbbrServiceFair()) {
+    ApplyFbbrServiceFairTrustedBwCorrection(
+        &selection, waveform_frequency_ready);
+  }
   PublishTrustedBwSelection(selection);
 }
 void FBBRSender::OnPacketSent(QuicTime sent_time,
@@ -6264,6 +6434,14 @@ void FBBRSender::OnPacketSent(QuicTime sent_time,
                            packet_number,
                            bytes,
                            is_retransmittable);
+}
+
+void FBBRSender::OnConnectionMigration() {
+  if (IsFbbrServiceFair()) {
+    ResetFbbrServiceFairState();
+    ClearTrustedBw("connection_migration");
+  }
+  Bbr2Sender::OnConnectionMigration();
 }
 
 void FBBRSender::OnCongestionEvent(
@@ -6292,13 +6470,18 @@ void FBBRSender::OnCongestionEvent(
   max_bw_attenuation_factor_ = CurrentMaxBwAttenuationFactor();
   model_.SetMaxBandwidthSampleAttenuation(max_bw_attenuation_factor_);
   model_.SetMinBandwidthSampleCorrection(
-      IsFbbrHybridV4() ? CurrentMinBwCorrectionFactor() : 1.0);
+      UsesFbbrV4Envelope() ? CurrentMinBwCorrectionFactor() : 1.0);
 
   Bbr2Sender::OnCongestionEvent(rtt_updated,
                                 prior_in_flight,
                                 event_time,
                                 acked_packets,
                                 lost_packets);
+  if (IsFbbrServiceFair() &&
+      mode_before_event != Bbr2Mode::STARTUP &&
+      mode_ == Bbr2Mode::STARTUP) {
+    ResetFbbrServiceFairState();
+  }
   const QuicBandwidth hybrid_max_bw_after =
       IsFbbrHybridObserver() ? model_.MaxBandwidth()
                              : QuicBandwidth::Zero();
@@ -6392,11 +6575,14 @@ void FBBRSender::OnCongestionEvent(
   // Record the cumulative counter before a due waveform analysis so an ACK
   // exactly at the window end contributes to Delivered(t_end). Points after
   // the boundary remain excluded by the interval lookup.
-  if (IsFbbrHybridV4() && !acked_packets.empty()) {
+  if (UsesFbbrV4Envelope() && !acked_packets.empty()) {
     RecordFbbrV4DeliveredPoint(
         event_time,
         static_cast<uint64_t>(model_.total_bytes_acked()),
         model_.is_app_limited());
+  }
+  if (IsFbbrServiceFair() && !acked_packets.empty()) {
+    UpdateFbbrServiceFairSignals(event_time);
   }
 
   if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
@@ -6414,7 +6600,7 @@ void FBBRSender::OnCongestionEvent(
         latest_congestion_event_inflight_valid_
             ? latest_congestion_event_inflight_ : prior_in_flight);
   }
-  if (IsFbbrHybridV4() && !acked_packets.empty()) {
+  if (UsesFbbrV4Envelope() && !acked_packets.empty()) {
     UpdateFbbrV4Telemetry(
         event_time,
         latest_congestion_event_inflight_valid_
@@ -6434,7 +6620,7 @@ QuicBandwidth FBBRSender::PacingRate(
   const bool use_projection_reference =
       IsFbbrHybridV3() && projection_reference.valid;
   const bool use_v4_previous_trusted_bw =
-      IsFbbrHybridV4() && mode_ == Bbr2Mode::PROBE_BW &&
+      UsesFbbrV4Envelope() && mode_ == Bbr2Mode::PROBE_BW &&
       HasUsableFbbrV4PreviousTrustedBw() &&
       (!IsCruisePhase(phase) ||
        !fbbr_v4_regime_i_or_iii_seen_this_cruise_);
@@ -6530,7 +6716,7 @@ QuicBandwidth FBBRSender::PacingRate(
   // limits, units, and integer rounding as the commanded target.  It removes
   // only positive phase and waveform increments; all negative gains remain.
   QuicBandwidth base_target_before_wave = baseline_pacing;
-  if (IsFbbrHybridV4()) {
+  if (UsesFbbrV4Envelope()) {
     const float base_phase_gain =
         static_cast<float>(std::min(phase_gain, 1.0));
     if (use_projection_reference_for_pacing) {
@@ -6560,7 +6746,7 @@ QuicBandwidth FBBRSender::PacingRate(
               static_cast<uint64_t>(std::numeric_limits<int64_t>::max())))) {
     baseline_pacing =
         QuicBandwidth::FromBitsPerSecond(cruise_baseline_cap_bps_);
-    if (IsFbbrHybridV4() &&
+    if (UsesFbbrV4Envelope() &&
         base_target_before_wave.ToBitsPerSecond() >
             static_cast<int64_t>(std::min<uint64_t>(
                 cruise_baseline_cap_bps_,
@@ -6603,7 +6789,7 @@ QuicBandwidth FBBRSender::PacingRate(
           ? native_pacing
           : final_pacing;
   QuicBandwidth returned_base_target = returned_pacing;
-  if (IsFbbrHybridV4()) {
+  if (UsesFbbrV4Envelope()) {
     const int64_t base_offset_bps = std::min<int64_t>(0, offset_bps);
     const int64_t base_final_bps = AddPacingOffsetWithFloor(
         base_target_before_wave.ToBitsPerSecond(),
@@ -6708,8 +6894,16 @@ bool FBBRSender::IsFbbrHybridV4() const {
   return GetCongestionControlType() == kFBBRHybridV4;
 }
 
+bool FBBRSender::IsFbbrServiceFair() const {
+  return GetCongestionControlType() == kFBBRServiceFair;
+}
+
+bool FBBRSender::UsesFbbrV4Envelope() const {
+  return IsFbbrHybridV4() || IsFbbrServiceFair();
+}
+
 bool FBBRSender::IsFbbrProjectionObserver() const {
-  return IsFbbrHybridV3() || IsFbbrHybridV4();
+  return IsFbbrHybridV3() || UsesFbbrV4Envelope();
 }
 
 bool FBBRSender::IsFbbrHybridObserver() const {
@@ -6717,7 +6911,7 @@ bool FBBRSender::IsFbbrHybridObserver() const {
 }
 
 bool FBBRSender::HasUsableFbbrV4PreviousTrustedBw() const {
-  return IsFbbrHybridV4() && trusted_bw_valid_ &&
+  return UsesFbbrV4Envelope() && trusted_bw_valid_ &&
       IsFinitePositiveBandwidth(trusted_bw_);
 }
 
@@ -6772,7 +6966,7 @@ FBBRSender::SelectFbbrV3ReferenceBw() const {
   }
   // PREVIOUS_TRUSTED is the existing bounded carry-forward state.  V3 does
   // not create a separate permanent reference or extend its lifetime.
-  if (!IsFbbrHybridV4() && trusted_value_valid && source_is_last) {
+  if (!UsesFbbrV4Envelope() && trusted_value_valid && source_is_last) {
     result.bandwidth = trusted_bw_;
     result.source = FbbrV3ReferenceSource::kLastValid;
     result.valid = true;
@@ -7002,7 +7196,7 @@ QuicByteCount FBBRSender::ApplyFbbrV3InflightProjection(
 }
 
 QuicByteCount FBBRSender::GetCongestionWindow() const {
-  if (IsFbbrHybridV4()) {
+  if (UsesFbbrV4Envelope()) {
     return ApplyFbbrV4InflightEnvelope(cwnd_);
   }
   return ApplyFbbrV3InflightProjection(cwnd_);
@@ -7131,7 +7325,7 @@ void FBBRSender::RecordFbbrV4RateTargets(
     QuicTime now,
     QuicBandwidth target_rate,
     QuicBandwidth base_target_rate) const {
-  if (!IsFbbrHybridV4() ||
+  if (!UsesFbbrV4Envelope() ||
       !IsFinitePositiveBandwidth(target_rate) ||
       !IsFinitePositiveBandwidth(base_target_rate)) {
     return;
@@ -7182,7 +7376,7 @@ void FBBRSender::RecordFbbrV4RateTargets(
 bool FBBRSender::HasFullFbbrV4TargetHistory(
     QuicTime now,
     TimeDelta rtprop) const {
-  if (!IsFbbrHybridV4() ||
+  if (!UsesFbbrV4Envelope() ||
       !fbbr_v4_rate_history_integrity_valid_ ||
       rtprop.IsZero() || rtprop.IsInfinite() ||
       rtprop.ToMicroseconds() <= 0 ||
@@ -7296,7 +7490,7 @@ void FBBRSender::RecordFbbrV4DeliveredPoint(
     QuicTime now,
     uint64_t cumulative_delivered,
     bool app_limited) {
-  if (!IsFbbrHybridV4()) {
+  if (!UsesFbbrV4Envelope()) {
     return;
   }
   if (fbbr_v4_delivered_history_.empty()) {
@@ -7319,6 +7513,7 @@ void FBBRSender::RecordFbbrV4DeliveredPoint(
   if (cumulative_delivered < last.cumulative_delivered_bytes) {
     // Begin a fresh counter generation.  The reset remains invalid until it
     // lies strictly before a subsequently covered RTprop window.
+    ResetFbbrServiceFairState();
     fbbr_v4_delivered_history_.clear();
     fbbr_v4_last_counter_reset_time_ = now;
   }
@@ -7361,7 +7556,7 @@ bool FBBRSender::ComputeFbbrV4IntervalDeliveryRateBps(
   if (delivery_rate_bps != nullptr) {
     *delivery_rate_bps = 0.0;
   }
-  if (!IsFbbrHybridV4() || delivery_rate_bps == nullptr ||
+  if (!UsesFbbrV4Envelope() || delivery_rate_bps == nullptr ||
       !fbbr_v4_delivered_history_integrity_valid_ ||
       window_end <= window_start ||
       fbbr_v4_delivered_history_.empty()) {
@@ -7414,7 +7609,7 @@ bool FBBRSender::ComputeFbbrV4TimeWeightedSrttMeanMs(
   if (srtt_mean_ms != nullptr) {
     *srtt_mean_ms = 0.0;
   }
-  if (!IsFbbrHybridV4() || srtt_mean_ms == nullptr ||
+  if (!UsesFbbrV4Envelope() || srtt_mean_ms == nullptr ||
       window_end <= window_start || srtt_history_.empty()) {
     return false;
   }
@@ -7487,7 +7682,7 @@ bool FBBRSender::HasValidFbbrV4ServiceHistory(
   if (app_limited_contaminated != nullptr) {
     *app_limited_contaminated = false;
   }
-  if (!IsFbbrHybridV4() ||
+  if (!UsesFbbrV4Envelope() ||
       !fbbr_v4_delivered_history_integrity_valid_ ||
       rtprop.IsZero() || rtprop.IsInfinite() ||
       rtprop.ToMicroseconds() <= 0 ||
@@ -7538,6 +7733,358 @@ bool FBBRSender::HasValidFbbrV4ServiceHistory(
     *app_limited_contaminated = contaminated;
   }
   return !contaminated;
+}
+
+void FBBRSender::ResetFbbrServiceFairState() {
+  if (!IsFbbrServiceFair()) {
+    return;
+  }
+  service_fair_service_rate_ = QuicBandwidth::Zero();
+  service_fair_previous_service_rate_ = QuicBandwidth::Zero();
+  service_fair_qdelay_ewma_ = TimeDelta::Zero();
+  service_fair_previous_qdelay_ewma_ = TimeDelta::Zero();
+  service_fair_cycle_count_ = 0;
+  service_fair_qdelay_valid_ = false;
+  service_fair_previous_qdelay_valid_ = false;
+  service_fair_service_history_valid_ = false;
+  service_fair_signal_reset_time_ = current_time_;
+  service_fair_last_update_cruise_id_ = -1;
+  service_fair_action_ = FbbrServiceFairAction::kNotRun;
+  service_fair_qdelay_trend_ = TimeDelta::Zero();
+  service_fair_service_rate_change_ = 0.0;
+  service_fair_alpha_bps_ = 0.0;
+  service_fair_raw_regime_candidate_bps_ = 0.0;
+  service_fair_final_regime_candidate_bps_ = 0.0;
+  service_fair_last_valid_regime_seen_this_cruise_ = false;
+  service_fair_last_valid_regime_this_cruise_ =
+      WaveformClassification::kInconclusive;
+}
+
+void FBBRSender::UpdateFbbrServiceFairSignals(QuicTime now) {
+  if (!IsFbbrServiceFair() || mode_ != Bbr2Mode::PROBE_BW) {
+    return;
+  }
+  const TimeDelta rtprop = CurrentFbbrV3Rtprop();
+  const TimeDelta srtt = CurrentSmoothedRtt();
+  if (!rtprop.IsZero() && !rtprop.IsInfinite() &&
+      !srtt.IsZero() && !srtt.IsInfinite()) {
+    const int64_t sample_us = std::max<int64_t>(
+        0, srtt.ToMicroseconds() - rtprop.ToMicroseconds());
+    if (!service_fair_qdelay_valid_) {
+      service_fair_qdelay_ewma_ = TimeDelta::FromMicroseconds(sample_us);
+      service_fair_qdelay_valid_ = true;
+    } else {
+      const int64_t old_us = service_fair_qdelay_ewma_.ToMicroseconds();
+      const int64_t ewma_us = static_cast<int64_t>(std::llround(
+          (7.0 * static_cast<double>(old_us) +
+           static_cast<double>(sample_us)) /
+          8.0));
+      service_fair_qdelay_ewma_ =
+          TimeDelta::FromMicroseconds(std::max<int64_t>(0, ewma_us));
+    }
+  }
+
+  service_fair_service_history_valid_ = false;
+  if (rtprop.IsZero() || rtprop.IsInfinite() ||
+      rtprop.ToMicroseconds() <= 0 ||
+      now < QuicTime::Zero() + rtprop) {
+    return;
+  }
+  const QuicTime window_start = now - rtprop;
+  if (service_fair_signal_reset_time_ != QuicTime::Zero() &&
+      service_fair_signal_reset_time_ >= window_start) {
+    return;
+  }
+  bool app_limited_contaminated = false;
+  if (!HasValidFbbrV4ServiceHistory(
+          now, rtprop, model_.is_app_limited(),
+          &app_limited_contaminated)) {
+    return;
+  }
+  double service_rate_bps = 0.0;
+  if (!ComputeFbbrV4IntervalDeliveryRateBps(
+          window_start, now, &service_rate_bps)) {
+    return;
+  }
+  service_fair_service_rate_ = BandwidthFromBps(service_rate_bps);
+  service_fair_service_history_valid_ =
+      IsFinitePositiveBandwidth(service_fair_service_rate_);
+}
+
+double FBBRSender::ComputeFbbrServiceFairAlphaBps(TimeDelta rtprop) {
+  if (rtprop.IsZero() || rtprop.IsInfinite() ||
+      rtprop.ToMicroseconds() <= 0) {
+    return 0.0;
+  }
+  const double rtprop_s =
+      static_cast<double>(rtprop.ToMicroseconds()) / 1000000.0;
+  return 0.5 * 8.0 * static_cast<double>(kDefaultTCPMSS) /
+      rtprop_s;
+}
+
+double FBBRSender::ApplyFbbrServiceFairRegimeIIIControlLimit(
+    double raw_candidate_bps,
+    double current_baseline_bps,
+    double service_rate_bps,
+    bool service_history_valid) {
+  if (!std::isfinite(raw_candidate_bps) || raw_candidate_bps <= 0.0 ||
+      !std::isfinite(current_baseline_bps) ||
+      current_baseline_bps <= 0.0) {
+    return raw_candidate_bps;
+  }
+  const double yield_cap_bps =
+      kFbbrServiceFairBeta * current_baseline_bps;
+  double next_bps = std::min(raw_candidate_bps, yield_cap_bps);
+  if (service_history_valid &&
+      std::isfinite(service_rate_bps) && service_rate_bps > 0.0) {
+    const double service_floor_bps =
+        std::min(yield_cap_bps, 0.98 * service_rate_bps);
+    next_bps = std::max(next_bps, service_floor_bps);
+  }
+  return std::min(yield_cap_bps, next_bps);
+}
+
+void FBBRSender::ApplyFbbrServiceFairTrustedBwCorrection(
+    TrustedBwSelectionResult* selection,
+    bool regime_ii_candidate_selected) {
+  if (!IsFbbrServiceFair() || selection == nullptr ||
+      !selection->trusted_bw_valid ||
+      !IsFinitePositiveBandwidth(selection->trusted_bw) ||
+      !IsFinitePositiveBandwidth(current_injection_baseline_bw_)) {
+    return;
+  }
+
+  const double candidate_bps =
+      static_cast<double>(
+          selection->trusted_bw.ToBitsPerSecond());
+  const double final_cruise_baseline_bps =
+      static_cast<double>(
+          current_injection_baseline_bw_.ToBitsPerSecond());
+  double corrected_bps = candidate_bps;
+
+  // A legal Regime II cumulative-delivery interval is the highest-priority
+  // measurement and must not be altered by either fairness or MaxBw.
+  if (regime_ii_candidate_selected) {
+    service_fair_raw_regime_candidate_bps_ = candidate_bps;
+    service_fair_final_regime_candidate_bps_ = candidate_bps;
+    EmitFbbrServiceFairTrace(
+        current_time_, "TRUSTED_PUBLISH",
+        WaveformClassification::kFullLoad);
+    return;
+  }
+
+  if (service_fair_last_valid_regime_seen_this_cruise_ &&
+      service_fair_last_valid_regime_this_cruise_ ==
+          WaveformClassification::kUnderload) {
+    corrected_bps =
+        std::max(candidate_bps, final_cruise_baseline_bps);
+    const QuicBandwidth max_bw = model_.MaxBandwidth();
+    if (IsFinitePositiveBandwidth(max_bw)) {
+      corrected_bps = std::min(
+          corrected_bps,
+          static_cast<double>(max_bw.ToBitsPerSecond()));
+    }
+  } else if (service_fair_last_valid_regime_seen_this_cruise_ &&
+             service_fair_last_valid_regime_this_cruise_ ==
+                 WaveformClassification::kOverload) {
+    corrected_bps =
+        std::min(candidate_bps, final_cruise_baseline_bps);
+    if (service_fair_service_history_valid_ &&
+        IsFinitePositiveBandwidth(service_fair_service_rate_)) {
+      const double service_floor_bps = std::min(
+          final_cruise_baseline_bps,
+          0.98 * static_cast<double>(
+              service_fair_service_rate_.ToBitsPerSecond()));
+      corrected_bps =
+          std::max(corrected_bps, service_floor_bps);
+    }
+  } else if (service_fair_action_ ==
+                 FbbrServiceFairAction::kAdditiveIncrease ||
+             service_fair_action_ ==
+                 FbbrServiceFairAction::kMultiplicativeDecrease) {
+    // A Cruise may end before the waveform classifier has a complete
+    // decision.  Preserve a completed queue/service AIMD step on Bcruise;
+    // HOLD and invalid histories leave the normal candidate untouched.
+    corrected_bps = final_cruise_baseline_bps;
+  }
+  corrected_bps = std::max(
+      static_cast<double>(minimum_pacing_rate_bps_),
+      corrected_bps);
+
+  service_fair_raw_regime_candidate_bps_ = candidate_bps;
+  service_fair_final_regime_candidate_bps_ = corrected_bps;
+  selection->trusted_bw = BandwidthFromBps(corrected_bps);
+  selection->trusted_bw_valid =
+      IsFinitePositiveBandwidth(selection->trusted_bw);
+  EmitFbbrServiceFairTrace(
+      current_time_, "TRUSTED_PUBLISH",
+      service_fair_last_valid_regime_seen_this_cruise_
+          ? service_fair_last_valid_regime_this_cruise_
+          : WaveformClassification::kInconclusive);
+}
+
+const char* FBBRSender::FbbrServiceFairActionName(
+    FbbrServiceFairAction action) {
+  switch (action) {
+    case FbbrServiceFairAction::kAdditiveIncrease:
+      return "ADDITIVE_INCREASE";
+    case FbbrServiceFairAction::kMultiplicativeDecrease:
+      return "MULTIPLICATIVE_DECREASE";
+    case FbbrServiceFairAction::kHold:
+      return "HOLD";
+    case FbbrServiceFairAction::kSkipAppLimited:
+      return "SKIP_APP_LIMITED";
+    case FbbrServiceFairAction::kSkipInvalidHistory:
+      return "SKIP_INVALID_HISTORY";
+    default:
+      return "NOT_RUN";
+  }
+}
+
+void FBBRSender::EmitFbbrServiceFairTrace(
+    QuicTime now,
+    const char* event,
+    WaveformClassification classification) const {
+  if (!IsFbbrServiceFair() || !cruise_load_trace_cb_) {
+    return;
+  }
+  const double time_s = now == QuicTime::Zero()
+      ? 0.0
+      : static_cast<double>(
+            (now - QuicTime::Zero()).ToMicroseconds()) /
+            1000000.0;
+  const double qdelay_ewma_ms =
+      static_cast<double>(service_fair_qdelay_ewma_.ToMicroseconds()) / 1000.0;
+  const double qdelay_trend_ms =
+      static_cast<double>(service_fair_qdelay_trend_.ToMicroseconds()) / 1000.0;
+  const bool baseline_valid =
+      IsFinitePositiveBandwidth(current_injection_baseline_bw_);
+  std::ostringstream row;
+  row << time_s << ","
+      << trace_flow_id_ << ","
+      << cruise_id_ << ","
+      << (event == nullptr ? "UNKNOWN" : event) << ","
+      << WaveformClassificationName(classification) << ","
+      << (baseline_valid
+              ? current_injection_baseline_bw_.ToBitsPerSecond() : 0) << ","
+      << (baseline_valid ? "true" : "false") << ","
+      << service_fair_cycle_count_ << ","
+      << FbbrServiceFairActionName(service_fair_action_) << ","
+      << qdelay_ewma_ms << ","
+      << qdelay_trend_ms << ","
+      << (IsFinitePositiveBandwidth(service_fair_service_rate_)
+              ? service_fair_service_rate_.ToBitsPerSecond() : 0) << ","
+      << service_fair_service_rate_change_ << ","
+      << service_fair_alpha_bps_ << ","
+      << kFbbrServiceFairBeta << ","
+      << service_fair_raw_regime_candidate_bps_ << ","
+      << service_fair_final_regime_candidate_bps_;
+  cruise_load_trace_cb_(time_s, time_s, 0.0, 0.0, 0.0, 0.0,
+                        "SERVICE_FAIRNESS", false, row.str());
+}
+
+void FBBRSender::RunFbbrServiceFairCycleUpdate(QuicTime now) {
+  if (!IsFbbrServiceFair() || mode_ != Bbr2Mode::PROBE_BW ||
+      service_fair_last_update_cruise_id_ == cruise_id_) {
+    return;
+  }
+  service_fair_last_update_cruise_id_ = cruise_id_;
+  service_fair_qdelay_trend_ = TimeDelta::Zero();
+  service_fair_service_rate_change_ = 0.0;
+  if (!IsFinitePositiveBandwidth(current_injection_baseline_bw_)) {
+    service_fair_action_ = FbbrServiceFairAction::kSkipInvalidHistory;
+    EmitFbbrServiceFairTrace(
+        now, "CYCLE_UPDATE",
+        WaveformClassification::kInconclusive);
+    return;
+  }
+
+  service_fair_raw_regime_candidate_bps_ =
+      static_cast<double>(
+          current_injection_baseline_bw_.ToBitsPerSecond());
+  service_fair_final_regime_candidate_bps_ =
+      service_fair_raw_regime_candidate_bps_;
+
+  const TimeDelta rtprop = CurrentFbbrV3Rtprop();
+  service_fair_alpha_bps_ = ComputeFbbrServiceFairAlphaBps(rtprop);
+  if (model_.is_app_limited() && !service_fair_service_history_valid_) {
+    service_fair_action_ = FbbrServiceFairAction::kSkipAppLimited;
+    EmitFbbrServiceFairTrace(
+        now, "CYCLE_UPDATE",
+        WaveformClassification::kInconclusive);
+    return;
+  }
+  if (rtprop.IsZero() || rtprop.IsInfinite() ||
+      rtprop.ToMicroseconds() <= 0 ||
+      !service_fair_qdelay_valid_ || !service_fair_service_history_valid_ ||
+      !IsFinitePositiveBandwidth(service_fair_service_rate_) ||
+      service_fair_alpha_bps_ <= 0.0) {
+    service_fair_action_ = FbbrServiceFairAction::kSkipInvalidHistory;
+    EmitFbbrServiceFairTrace(
+        now, "CYCLE_UPDATE",
+        WaveformClassification::kInconclusive);
+    return;
+  }
+
+  if (service_fair_previous_qdelay_valid_) {
+    service_fair_qdelay_trend_ = TimeDelta::FromMicroseconds(
+        service_fair_qdelay_ewma_.ToMicroseconds() -
+        service_fair_previous_qdelay_ewma_.ToMicroseconds());
+  }
+  if (IsFinitePositiveBandwidth(service_fair_previous_service_rate_)) {
+    service_fair_service_rate_change_ =
+        static_cast<double>(service_fair_service_rate_.ToBitsPerSecond()) /
+            static_cast<double>(
+                service_fair_previous_service_rate_.ToBitsPerSecond()) -
+        1.0;
+  }
+
+  const int64_t rtprop_us = rtprop.ToMicroseconds();
+  const int64_t q_low_us = std::max<int64_t>(
+      1000, static_cast<int64_t>(std::llround(0.03 * rtprop_us)));
+  const int64_t q_high_us = std::max<int64_t>(
+      2000, static_cast<int64_t>(std::llround(0.10 * rtprop_us)));
+  const int64_t trend_threshold_us = q_low_us;
+  const double current_baseline_bps =
+      static_cast<double>(
+          current_injection_baseline_bw_.ToBitsPerSecond());
+  double next_baseline_bps = current_baseline_bps;
+  if (service_fair_qdelay_ewma_.ToMicroseconds() > q_high_us ||
+      (service_fair_previous_qdelay_valid_ &&
+       service_fair_qdelay_trend_.ToMicroseconds() > trend_threshold_us)) {
+    next_baseline_bps = std::min(
+        current_baseline_bps,
+        std::max(static_cast<double>(kFbbrServiceFairMinimumBps),
+                 kFbbrServiceFairBeta * current_baseline_bps));
+    service_fair_action_ =
+        FbbrServiceFairAction::kMultiplicativeDecrease;
+  } else if (service_fair_qdelay_ewma_.ToMicroseconds() < q_low_us) {
+    next_baseline_bps += service_fair_alpha_bps_;
+    const QuicBandwidth max_bw = model_.MaxBandwidth();
+    if (IsFinitePositiveBandwidth(max_bw)) {
+      next_baseline_bps = std::min(
+          next_baseline_bps,
+          std::max(current_baseline_bps,
+                   static_cast<double>(
+                       max_bw.ToBitsPerSecond())));
+    }
+    service_fair_action_ = FbbrServiceFairAction::kAdditiveIncrease;
+  } else {
+    service_fair_action_ = FbbrServiceFairAction::kHold;
+  }
+
+  current_injection_baseline_bw_ =
+      BandwidthFromBps(next_baseline_bps);
+  service_fair_final_regime_candidate_bps_ =
+      static_cast<double>(
+          current_injection_baseline_bw_.ToBitsPerSecond());
+  service_fair_previous_qdelay_ewma_ = service_fair_qdelay_ewma_;
+  service_fair_previous_qdelay_valid_ = true;
+  service_fair_previous_service_rate_ = service_fair_service_rate_;
+  ++service_fair_cycle_count_;
+  EmitFbbrServiceFairTrace(
+      now, "CYCLE_UPDATE",
+      WaveformClassification::kInconclusive);
 }
 
 QuicByteCount FBBRSender::ComputeFbbrV4ServiceInflightBytes(
@@ -7670,7 +8217,7 @@ FBBRSender::BuildFbbrV4EnvelopeSnapshot(
               snapshot.target_history_valid
           ? actual_inflight - snapshot.inflight_cap : 0;
   snapshot.projection_active =
-      IsFbbrHybridV4() && !rtprop.IsZero() &&
+      UsesFbbrV4Envelope() && !rtprop.IsZero() &&
       snapshot.target_history_valid && drain_completed_ &&
       mode_ == Bbr2Mode::PROBE_BW;
   snapshot.service_limited =
@@ -7686,7 +8233,7 @@ FBBRSender::BuildFbbrV4EnvelopeSnapshot(
 
 QuicByteCount FBBRSender::ApplyFbbrV4InflightEnvelope(
     QuicByteCount native_cwnd_target) const {
-  if (!IsFbbrHybridV4()) {
+  if (!UsesFbbrV4Envelope()) {
     return native_cwnd_target;
   }
   const FbbrV4EnvelopeSnapshot snapshot =
@@ -7703,7 +8250,7 @@ QuicByteCount FBBRSender::ApplyFbbrV4InflightEnvelope(
 void FBBRSender::UpdateFbbrV4Telemetry(
     QuicTime now,
     QuicByteCount actual_inflight) {
-  if (!IsFbbrHybridV4()) {
+  if (!UsesFbbrV4Envelope()) {
     return;
   }
   if (fbbr_v4_telemetry_initialized_ &&
@@ -7807,7 +8354,7 @@ void FBBRSender::UpdateFbbrV4Telemetry(
 }
 
 void FBBRSender::EmitFbbrV4FlowSummary() const {
-  if (!IsFbbrHybridV4() || !cruise_load_trace_cb_) {
+  if (!UsesFbbrV4Envelope() || !cruise_load_trace_cb_) {
     return;
   }
   auto ratio = [this](uint64_t value) {
@@ -7832,7 +8379,8 @@ void FBBRSender::EmitFbbrV4FlowSummary() const {
     return duration_us > 0.0L ? byte_us / duration_us : 0.0L;
   };
   std::ostringstream row;
-  row << "FBBR-hybirdv4,"
+  row << (IsFbbrServiceFair() ? "FBBR-ServiceFair" : "FBBR-hybirdv4")
+      << ","
       << trace_flow_id_ << ","
       << ratio(fbbr_v4_previous_trusted_us_) << ","
       << ratio(fbbr_v4_previous_trusted_guard_source_us_) << ","
@@ -11562,7 +12110,7 @@ FBBRSender::AnalyzeFbbrHybridWindow(QuicTime window_start,
       srtt.values, srtt.valid, &result.srtt_min_ms,
       &result.srtt_max_ms, &result.srtt_mean_ms,
       &result.srtt_stat_sample_count) && result.srtt_input_valid;
-  if (IsFbbrHybridV4() && result.srtt_stats_valid) {
+  if (UsesFbbrV4Envelope() && result.srtt_stats_valid) {
     double time_weighted_srtt_mean_ms = 0.0;
     result.srtt_stats_valid = ComputeFbbrV4TimeWeightedSrttMeanMs(
         window_start, window_end, &time_weighted_srtt_mean_ms);
@@ -13024,6 +13572,7 @@ void FBBRSender::ApplyFbbrHybridClassification(
 void FBBRSender::ApplyFbbrHybridV4Classification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
+  const bool is_service_fair = IsFbbrServiceFair();
   WaveformWindowAnalysis trace_analysis = analysis;
   const double baseline_before_bps = static_cast<double>(
       current_injection_baseline_bw_.ToBitsPerSecond());
@@ -13041,12 +13590,18 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
   trace_analysis.hybrid_regime_i_maxbw_midpoint_bps = 0.0;
   trace_analysis.hybrid_regime_i_maxbw_midpoint_triggered = false;
   trace_analysis.hybrid_regime_i_growth_triggered = false;
+  if (is_service_fair) {
+    service_fair_raw_regime_candidate_bps_ = baseline_before_bps;
+    service_fair_final_regime_candidate_bps_ = baseline_before_bps;
+  }
 
   if (analysis.classification == WaveformClassification::kInconclusive) {
     waveform_last_action_ = "V4_INCONCLUSIVE_BASELINE_HOLD";
     waveform_last_invalid_reason_ = analysis.invalid_reason;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
+    EmitFbbrServiceFairTrace(
+        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
@@ -13057,6 +13612,8 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
     trace_analysis.invalid_reason = waveform_last_invalid_reason_;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
+    EmitFbbrServiceFairTrace(
+        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
@@ -13082,6 +13639,8 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
       trace_analysis.invalid_reason = waveform_last_invalid_reason_;
       EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                               baseline_before_bps, amplitude_before_bps);
+      EmitFbbrServiceFairTrace(
+          now, "REGIME_EXECUTOR", analysis.classification);
       ScheduleWaveformCollectionAfterSettle(now, false);
       return;
     }
@@ -13106,12 +13665,34 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
     trace_analysis.invalid_reason = waveform_last_invalid_reason_;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
+    EmitFbbrServiceFairTrace(
+        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
 
   ApplyFbbrHybridRegimeStateUpdates(&trace_analysis, now);
-  if (actuator.update_baseline) {
+  const double raw_candidate_bps = actuator.update_baseline
+      ? actuator.next_baseline_bps : baseline_before_bps;
+  double final_candidate_bps = raw_candidate_bps;
+  if (is_service_fair) {
+    service_fair_last_valid_regime_seen_this_cruise_ = true;
+    service_fair_last_valid_regime_this_cruise_ =
+        analysis.classification;
+    service_fair_raw_regime_candidate_bps_ = raw_candidate_bps;
+    if (analysis.classification == WaveformClassification::kOverload) {
+      final_candidate_bps = ApplyFbbrServiceFairRegimeIIIControlLimit(
+          raw_candidate_bps, baseline_before_bps,
+          IsFinitePositiveBandwidth(service_fair_service_rate_)
+              ? static_cast<double>(
+                    service_fair_service_rate_.ToBitsPerSecond())
+              : 0.0,
+          service_fair_service_history_valid_);
+    }
+    service_fair_final_regime_candidate_bps_ = final_candidate_bps;
+    current_injection_baseline_bw_ =
+        BandwidthFromBps(final_candidate_bps);
+  } else if (actuator.update_baseline) {
     current_injection_baseline_bw_ =
         BandwidthFromBps(actuator.next_baseline_bps);
   }
@@ -13135,9 +13716,12 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
     trace_analysis.latest_trusted_bw_bps = actuator.trusted_bw_bps;
     trace_analysis.smoothed_trusted_bw_bps = actuator.trusted_bw_bps;
   }
-  const double baseline_delta = actuator.update_baseline
-      ? std::abs(actuator.next_baseline_bps - baseline_before_bps) : 0.0;
-  if (baseline_delta > 0.5 &&
+  const double raw_baseline_delta = actuator.update_baseline
+      ? std::abs(raw_candidate_bps - baseline_before_bps) : 0.0;
+  const double applied_baseline_delta = is_service_fair
+      ? std::abs(final_candidate_bps - baseline_before_bps)
+      : raw_baseline_delta;
+  if (applied_baseline_delta > 0.5 &&
       baseline_adjustment_count_ < std::numeric_limits<uint32_t>::max()) {
     ++baseline_adjustment_count_;
   }
@@ -13168,11 +13752,11 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
     trace_analysis.delta_source =
         kWaveformDeltaSourceV4RegimeIIDeliveryRateBaseline;
   }
-  trace_analysis.raw_delta_bw_bps = baseline_delta;
-  trace_analysis.applied_delta_bw_bps = baseline_delta;
+  trace_analysis.raw_delta_bw_bps = raw_baseline_delta;
+  trace_analysis.applied_delta_bw_bps = applied_baseline_delta;
   waveform_last_delta_source_ = trace_analysis.delta_source;
-  waveform_last_raw_delta_bw_bps_ = baseline_delta;
-  waveform_last_applied_delta_bw_bps_ = baseline_delta;
+  waveform_last_raw_delta_bw_bps_ = raw_baseline_delta;
+  waveform_last_applied_delta_bw_bps_ = applied_baseline_delta;
   waveform_last_invalid_reason_ = "none";
 
   if (analysis.classification == WaveformClassification::kFullLoad) {
@@ -13196,13 +13780,15 @@ void FBBRSender::ApplyFbbrHybridV4Classification(
   }
   EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                           baseline_before_bps, amplitude_before_bps);
+  EmitFbbrServiceFairTrace(
+      now, "REGIME_EXECUTOR", analysis.classification);
   ScheduleWaveformCollectionAfterSettle(now, false);
 }
 
 void FBBRSender::ApplyFbbrHybridV3Classification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
-  if (IsFbbrHybridV4()) {
+  if (UsesFbbrV4Envelope()) {
     ApplyFbbrHybridV4Classification(analysis, now);
     return;
   }
@@ -14113,7 +14699,8 @@ void FBBRSender::EmitWaveformSearchTrace(
       << (latest_waveform_overload_srtt_mean_valid_ ? "true" : "false")
       << ","
       << latest_waveform_overload_srtt_mean_ms_ << ","
-      << (IsFbbrHybridV4() ? "FBBR-hybirdv4"
+      << (IsFbbrServiceFair() ? "FBBR-ServiceFair"
+                           : IsFbbrHybridV4() ? "FBBR-hybirdv4"
                            : IsFbbrHybridV3() ? "FBBR-hybridv3"
                            : IsFbbrHybrid() ? "FBBR-hybrid"
                          : (adaptive_guard_enabled_ ? "FBBR-adaptive"
@@ -14309,7 +14896,7 @@ void FBBRSender::EmitWaveformSearchTrace(
     fbbr_v3_window_ack_events_ = 0;
     fbbr_v3_window_cap_binding_events_ = 0;
   }
-  if (IsFbbrHybridV4()) {
+  if (UsesFbbrV4Envelope()) {
     fbbr_v4_window_ack_events_ = 0;
     fbbr_v4_window_cap_binding_events_ = 0;
   }

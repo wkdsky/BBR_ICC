@@ -12,6 +12,11 @@ Bbr2StartupMode::Bbr2StartupMode(Bbr2Sender* sender,
                                  Bbr2NetworkModel* model,
                                  QuicTime now)
     : Bbr2ModeBase(sender, model) {
+  Enter(now, nullptr);
+}
+
+void Bbr2StartupMode::Enter(QuicTime now,
+                            const Bbr2CongestionEvent* /*congestion_event*/) {
   // Increment instead of reset so data recorded before a sender switch is kept.
   ++sender_->connection_stats_->slowstart_count;
   if (!sender_->connection_stats_->slowstart_duration.IsRunning()) {
@@ -19,11 +24,8 @@ Bbr2StartupMode::Bbr2StartupMode(Bbr2Sender* sender,
   }
   model_->set_pacing_gain(Params().startup_pacing_gain);
   model_->set_cwnd_gain(Params().startup_cwnd_gain);
-}
-
-void Bbr2StartupMode::Enter(QuicTime /*now*/,
-                            const Bbr2CongestionEvent* /*congestion_event*/) {
-  QUIC_BUG << "Bbr2StartupMode::Enter should not be called";
+  max_bw_at_round_beginning_ = QuicBandwidth::Zero();
+  rounds_ecn_ = 0;
 }
 
 void Bbr2StartupMode::Leave(QuicTime now,

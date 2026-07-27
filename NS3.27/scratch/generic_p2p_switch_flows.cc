@@ -1223,6 +1223,10 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFBBRHybridV4, "FBBR-hybirdv4", false, true};
     }
+    if (key == "FBBR-ServiceFair")
+    {
+        return {dqc::kFBBRServiceFair, "FBBR-ServiceFair", false, true};
+    }
     if (key == "FreqCCv3")
     {
         return {dqc::kFreqCCv3, "FreqCCv3", false, true};
@@ -1233,7 +1237,7 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
-                                              "FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, "
+                                              "FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FBBR-ServiceFair, "
                                               "FreqCCv3, BBRv2)");
 }
 
@@ -1959,7 +1963,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FreqCCv3, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FBBR-ServiceFair, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",

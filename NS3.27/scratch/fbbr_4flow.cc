@@ -145,6 +145,7 @@ bool g_fbbr_baseline_self_test = false;
 bool g_fbbr_hybrid_self_test = false;
 bool g_fbbr_hybrid_v3_self_test = false;
 bool g_fbbr_hybrid_v4_self_test = false;
+bool g_fbbr_service_fair_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
@@ -725,7 +726,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
 		    // Configure FBBR oscillation parameters
 		    if(cc_type == kFBBR || cc_type == kFBBRAdaptive ||
                cc_type == kFBBRHybrid || cc_type == kFBBRHybridV3 ||
-               cc_type == kFBBRHybridV4){
+               cc_type == kFBBRHybridV4 || cc_type == kFBBRServiceFair){
 	        sendApp->ConfigureFBBR(g_fbbr_config, flow_index);
 	        sendApp->ConfigureFBBRConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
@@ -866,12 +867,14 @@ void ns3_fbbr(int ins, std::string algo, DqcTraceState *stat, double sim_time=60
         cc = kFBBRHybridV3;
     } else if(algo_key == "FBBR-hybirdv4"){
         cc = kFBBRHybridV4;
+    } else if(algo_key == "FBBR-ServiceFair"){
+        cc = kFBBRServiceFair;
     } else if(algo_key == "FBBR"){
         cc = kFBBR;
     } else {
         NS_ABORT_MSG("unsupported algorithm: " << algo
                                                << " (supported: FBBR, "
-                                                  "FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, BBRv2)");
+                                                  "FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FBBR-ServiceFair, BBRv2)");
     }
 
     uint32_t max_bps=0;
@@ -1015,7 +1018,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.AddValue("outputDir", "Output trace directory path", output_dir);
-    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, or BBRv2", algo);
+    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-hybirdv4, FBBR-ServiceFair, or BBRv2", algo);
     cmd.AddValue("runId", "ns-3 RNG run id", run_id);
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FBBR convergence-gate CSV trace", g_enable_convergence_gate_trace);
@@ -1036,6 +1039,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("fbbrHybridSelfTest", "Run FBBR-hybrid N01-N15 and boundary self-test and exit", g_fbbr_hybrid_self_test);
 	    cmd.AddValue("fbbrHybridV3SelfTest", "Run FBBR-hybridv3 projection self-test and exit", g_fbbr_hybrid_v3_self_test);
 	    cmd.AddValue("fbbrHybridV4SelfTest", "Run FBBR-hybirdv4 service-envelope self-test and exit", g_fbbr_hybrid_v4_self_test);
+	    cmd.AddValue("fbbrServiceFairSelfTest", "Run FBBR-ServiceFair fairness self-test and exit", g_fbbr_service_fair_self_test);
 	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_fbbr_config.cruise_detector_mode);
 	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_fbbr_config.waveform_recv_signal_mode);
 	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_fbbr_config.waveform_initial_settle_rtt_mult);
@@ -1135,6 +1139,9 @@ int main (int argc, char *argv[]){
 	    }
 	    if(g_fbbr_hybrid_v4_self_test){
 	        return FBBRSender::RunFbbrHybridV4SelfTest(std::cout) ? 0 : 1;
+	    }
+	    if(g_fbbr_service_fair_self_test){
+	        return FBBRSender::RunFbbrServiceFairSelfTest(std::cout) ? 0 : 1;
 	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);

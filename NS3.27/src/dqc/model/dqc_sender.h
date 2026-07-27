@@ -22,6 +22,7 @@
 #include "ns3/dqc_trace.h"
 namespace dqc{
 struct FBBRConfig;
+struct Bbr2PlusConfig;
 }
 namespace ns3{
 class DqcSender;
@@ -96,6 +97,7 @@ public:
     // FreqCC configuration methods
 	    void ConfigureFreqCC(double freq_hz, const std::string& amplitude_mode, double fixed_mbps=0.0, const std::string& osc_mode="after_drain", const std::string& recv_signal_mode="delivery_rate_latest");
 	    void ConfigureFBBR(const dqc::FBBRConfig& config, uint32_t flow_id);
+	    void ConfigureBbr2Plus(const dqc::Bbr2PlusConfig& config);
 	    void ConfigureFBBRConvergenceGate(bool enable_trace,
 	                                          bool enable_control,
 	                                          const std::string& gate_trace_mode="round_only",

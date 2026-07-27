@@ -137,7 +137,10 @@ kNs3Cubic,
 kFBBRHybridV3,
 // Service-consistent inflight envelope variant.  The external experiment key
 // deliberately retains the requested "hybirdv4" spelling.
-kFBBRHybridV4};
+kFBBRHybridV4,
+// Service-aware, Cruise-cycle AIMD fairness control layered on top of the
+// FBBR-hybirdv4 inflight envelope.  Appended to preserve existing values.
+kFBBRServiceFair};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);

@@ -218,6 +218,9 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
 
   // Helper functions for subclasses
   QuicByteCount GetTargetCongestionWindow(float gain) const;
+  // Extra room that a derived algorithm needs in the actual cwnd target.
+  // It is applied while cwnd grows, rather than only when cwnd is reported.
+  virtual QuicByteCount GetCwndCompensationBytes() const;
   const QuicLimits<QuicByteCount>& cwnd_limits() const;
   virtual void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event);
@@ -229,7 +232,11 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   virtual bool ShouldEnterProbeUpFromGuard() const;
   virtual bool ShouldProbeAgainFromPostUp() const;
   virtual bool ShouldDelayProbeUpExit(QuicTime now) const;
+  virtual bool ShouldExitProbeUpAfterRound() const;
   virtual bool ShouldDelayProbeBwCruiseExit(QuicTime now) const;
+  // A ProbeBW extension can request a one-shot return to STARTUP.
+  virtual bool ConsumeStartupRestartRequest();
+  void PrepareForStartupRestart();
   virtual bool HasCustomProbeDownLogic() const;
   virtual bool ShouldExitCustomProbeDown(
       QuicByteCount bytes_in_flight,

@@ -5,6 +5,7 @@
 #include "quic_bbr2_sender.h"
 
 #include <cstddef>
+#include <limits>
 
 #include "quic_bandwidth_sampler.h"
 #include "quic_bbr2_drain.h"
@@ -301,6 +302,12 @@ void Bbr2Sender::UpdatePacingRate(QuicByteCount bytes_acked) {
 
 void Bbr2Sender::UpdateCongestionWindow(QuicByteCount bytes_acked) {
   QuicByteCount target_cwnd = GetTargetCongestionWindow(model_.cwnd_gain());
+  const QuicByteCount compensation = GetCwndCompensationBytes();
+  if (compensation > std::numeric_limits<QuicByteCount>::max() - target_cwnd) {
+    target_cwnd = std::numeric_limits<QuicByteCount>::max();
+  } else {
+    target_cwnd += compensation;
+  }
 
   const QuicByteCount prior_cwnd = cwnd_;
   if (model_.full_bandwidth_reached() || Params().startup_include_extra_acked) {
@@ -330,6 +337,10 @@ void Bbr2Sender::UpdateCongestionWindow(QuicByteCount bytes_acked) {
 QuicByteCount Bbr2Sender::GetTargetCongestionWindow(float gain) const {
   return std::max(model_.BDP(model_.BandwidthEstimate(), gain),
                   cwnd_limits().Min());
+}
+
+QuicByteCount Bbr2Sender::GetCwndCompensationBytes() const {
+  return 0;
 }
 
 void Bbr2Sender::OnPacketSent(QuicTime sent_time,
@@ -629,8 +640,24 @@ bool Bbr2Sender::ShouldDelayProbeUpExit(QuicTime /*now*/) const {
   return false;
 }
 
+bool Bbr2Sender::ShouldExitProbeUpAfterRound() const {
+  return false;
+}
+
 bool Bbr2Sender::ShouldDelayProbeBwCruiseExit(QuicTime /*now*/) const {
   return false;
+}
+
+bool Bbr2Sender::ConsumeStartupRestartRequest() {
+  return false;
+}
+
+void Bbr2Sender::PrepareForStartupRestart() {
+  // STARTUP requires a fresh lower bound and full-bandwidth detector.
+  model_.clear_bandwidth_lo();
+  model_.clear_inflight_lo();
+  model_.ResetFullBandwidthForStartup();
+  model_.RestartRoundEarly();
 }
 
 bool Bbr2Sender::HasCustomProbeDownLogic() const {

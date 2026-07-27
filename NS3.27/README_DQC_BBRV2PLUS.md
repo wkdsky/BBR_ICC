@@ -1,66 +1,82 @@
-# DQC BBRv2plus Migration Notes
+# DQC BBRv2+ Migration Notes
 
-This repository does not treat Linux `tcp_bbr2plus.c` as the runtime host.
-The host is the existing DQC `BBRv2` implementation in ns-3.
+The runtime host in this repository is DQC's existing QUIC `BBRv2`, not the
+Linux TCP module.  `BBRv2plus` is therefore implemented as BBRv2+-specific
+logic layered on the DQC BBRv2 packet model and state machine.
 
-## Design Rule
+## Paper Mechanisms Covered
 
-`BBRv2plus` is implemented as a set of incremental mechanisms on top of DQC
-`BBRv2`, not as a line-by-line Linux port.
+The implementation covers the functional mechanisms in Sections 4.2--4.4 of
+Yang *et al.*, *BBRv2+: Enhancing BBRv2 for high mobility and high jitter
+networks* (Computer Networks, 2022):
 
-That means:
+- Two-step `ProbeTry`: `PRE_UP` uses a 1.1 pacing gain for one RTT and
+  `GUARD` uses 1.0 for one RTT.  The transition to `PROBE_UP` is gated by
+  `MinRTTcurr <= gamma * MinRTTprev` (`gamma = 1.02` by default).
+- Continuous probing: after `POST_UP`, BBRv2+ re-enters `PROBE_UP` whenever
+  the probe RTT remains within the same gamma bound.  It is not artificially
+  limited to one re-probe per cycle.
+- Fast BtlBW expiry: during `PROBE_CRUISE`, `PROBE_DOWN`, and DQC's
+  `PROBE_DOWN_SLIGHTLY` adaptation, a round whose minimum RTT exceeds
+  `theta * RTprop` expires a max-bandwidth-filter slot (`theta = 1.10` by
+  default).  A 25-round fallback prevents a stale filter from persisting.
+- Dual ProbeBW mode: at the end of each Cruise interval, two consecutive
+  Cruise RTT minima above `1.10 * RTprop` switch to native BBRv2 ProbeBW and
+  restart Startup.  Four consecutive Cruise intervals at or below `1.05 * RTprop`
+  restore the RTT-aware BBRv2+ ProbeBW state machine.
+- Jitter-aware BDP compensation: the maximum RTT variation in the latest four
+  RTT rounds is used when it exceeds `mu * RTprop` (`mu = 0.5`).  The resulting
+  extra BDP is placed in BBRv2's real cwnd target, rather than only being added
+  when `GetCongestionWindow()` is queried.
+- BBRv2 loss threshold (`alpha`) and multiplicative reduction factor (`beta`)
+  are exposed per sender.  The default remains BBRv2's `alpha=0.02`,
+  `beta=0.30`; the paper's experiments commonly use `alpha=0.20`, selected to
+  suit the bottleneck buffer.
 
-- DQC `BBRv2` remains the baseline control law and packet model.
-- Only `BBRv2plus`-specific mechanisms are added on top.
-- Default DQC `BBRv2` behavior must remain unchanged.
-- Linux `BBRv2plus` is used as a semantic reference for the incremental logic,
-  not as a requirement for identical internal plumbing.
+## Configuration
 
-## Implemented Incremental Mechanisms
+All BBRv2+ paper parameters are available through `dqc::Bbr2PlusConfig` and
+can be set for an individual DQC sender before the simulation starts:
 
-The current DQC `BBRv2plus` adds these mechanisms relative to DQC `BBRv2`:
+```cpp
+#include "ns3/dqc_sender.h"
+#include "ns3/quic_bbr2plus_sender.h"
 
-- RTT-variance-based congestion-window compensation.
-- ProbeBW subphases:
-  `PRE_UP`, `GUARD`, `POST_UP`, `DOWN_SLIGHTLY`.
-- RTT-gated transition from `GUARD` to `UP`.
-- RTT-gated optional re-probe from `POST_UP`.
-- Probe cycle waiting in round units for fast convergence.
-- RTT-triggered advancing of the max-bandwidth filter during non-probing
-  phases.
+dqc::Bbr2PlusConfig config;
+config.loss_threshold = 0.20f;
+config.bandwidth_drop_rtt_multiplier = 1.10f;  // theta
+config.probe_rtt_growth_multiplier = 1.02f;    // gamma
+config.switch_to_bbr2_rtt_multiplier = 1.10f;  // lambda1
+config.switch_to_bbr2plus_rtt_multiplier = 1.05f;  // lambda2
+config.switch_to_bbr2_cruise_count = 2;        // eta1
+config.switch_to_bbr2plus_cruise_count = 4;    // eta2
+config.rtt_jitter_threshold_multiplier = 0.50f;  // mu
+sender->ConfigureBbr2Plus(config);
+```
 
-## Deliberate DQC-Host Adaptations
+`Bbr2PlusConfig` also exposes the probe interval, optional RTT error cap
+(`0` keeps the paper's direct gamma comparison), jitter window, ProbeTry/Down
+pacing gains, BDP compensation gains, and switches for RTT-aware probing and
+RTT compensation.
 
-Some Linux details are intentionally adapted instead of copied verbatim:
+## DQC-Host Adaptations
 
-- Linux-specific ACK-phase machinery is not fully reproduced.
-- DQC RTT statistics (`latest_rtt`, `smoothed_rtt`, `mean_deviation`) are used
-  instead of Linux TCP internal RTT fields.
-- The `POST_UP` re-probe is bounded to at most one extra re-probe per ProbeBW
-  cycle, to keep the algorithm closer to the DQC `BBRv2` host cycle shape.
+The behavior is semantically aligned with the paper, but it is not a bitwise
+Linux-kernel reproduction:
 
-These choices are intentional. They preserve the meaning of the `plus`
-mechanisms while keeping the implementation defensible as a DQC-native
-variant.
-
-## Current Interpretation For Papers
-
-The safest description is:
-
-`DQC BBRv2plus`: a DQC-hosted `BBRv2plus` migration that preserves DQC `BBRv2`
-as the baseline and adds `plus`-specific RTT-aware probing and cwnd
-compensation mechanisms.
-
-The safest description is not:
-
-- "exact Linux BBRv2plus reproduction"
-- "bit-for-bit kernel-equivalent implementation"
+- DQC's `latest_rtt`, `smoothed_rtt`, and `mean_deviation` replace Linux TCP
+  internal RTT fields.
+- The Linux ACK-phase implementation maps to DQC BBRv2's `PRE_UP`, `GUARD`,
+  `POST_UP`, and `DOWN_SLIGHTLY` ProbeBW subphases.
+- DQC's BBRv2 max-bandwidth filter and packet-timed round counter remain the
+  underlying estimator and clock.
+- Ordinary DQC `BBRv2` does not enable any of these extension hooks, so its
+  default behavior is unchanged.
 
 ## Main Code Paths
 
 - `src/dqc/model/thirdparty/congestion/quic_bbr2plus_sender.h`
 - `src/dqc/model/thirdparty/congestion/quic_bbr2plus_sender.cc`
-- `src/dqc/model/thirdparty/congestion/quic_bbr2_probe_bw.h`
 - `src/dqc/model/thirdparty/congestion/quic_bbr2_probe_bw.cc`
-- `src/dqc/model/thirdparty/congestion/quic_bbr2_sender.h`
-- `src/dqc/model/thirdparty/congestion/quic_bbr2_sender.cc`
+- `src/dqc/model/thirdparty/congestion/quic_bbr2_sender.{h,cc}`
+- `src/dqc/model/dqc_sender.{h,cc}`

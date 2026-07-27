@@ -77,6 +77,7 @@ private:
     void OpenFBBRCruiseSummaryFile();
     void OpenFBBRGateFile();
     void OpenFBBRWaveformSearchFile();
+    void OpenFBBRServiceFairnessFile();
     void OpenFBBRV3SummaryFile();
     void OpenFBBRV4SummaryFile();
     void OpenStatsFile();
@@ -98,6 +99,7 @@ private:
     void CloseFBBRCruiseSummaryFile();
     void CloseFBBRGateFile();
     void CloseFBBRWaveformSearchFile();
+    void CloseFBBRServiceFairnessFile();
     void CloseFBBRV3SummaryFile();
     void CloseFBBRV4SummaryFile();
     void CloseStatsFile();
@@ -124,6 +126,7 @@ private:
     std::fstream m_fbbrCruiseSummary;
     std::fstream m_fbbrGate;
     std::fstream m_fbbrWaveformSearch;
+    std::fstream m_fbbrServiceFairness;
     std::fstream m_fbbrV3Summary;
     std::fstream m_fbbrV4Summary;
     std::fstream m_stats;

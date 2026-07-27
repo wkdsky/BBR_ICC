@@ -295,6 +295,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static bool RunFbbrHybridSelfTest(std::ostream& os);
   static bool RunFbbrHybridV3SelfTest(std::ostream& os);
   static bool RunFbbrHybridV4SelfTest(std::ostream& os);
+  static bool RunFbbrServiceFairSelfTest(std::ostream& os);
   void FinalizeFbbrV3Trace();
   void FinalizeFbbrV4Trace();
   static bool RunHybridBaselineSelfTest(std::ostream& os) {
@@ -316,6 +317,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                          QuicTime event_time,
                          const AckedPacketVector& acked_packets,
                          const LostPacketVector& lost_packets) override;
+  void OnConnectionMigration() override;
 
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
   QuicByteCount GetCongestionWindow() const override;
@@ -529,6 +531,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     kTrusted,
     kGuard,
     kInvalid,
+  };
+
+  enum class FbbrServiceFairAction {
+    kNotRun,
+    kAdditiveIncrease,
+    kMultiplicativeDecrease,
+    kHold,
+    kSkipAppLimited,
+    kSkipInvalidHistory,
   };
 
   struct FbbrV4EnvelopeSnapshot {
@@ -1016,6 +1027,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                              float pacing_gain) const override;
   float GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase phase,
                            float cwnd_gain) const override;
+  bool ShouldExitProbeUpAfterRound() const override;
   void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event) override;
   QuicByteCount AdjustProbeRttInflightTarget(
@@ -1082,6 +1094,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool IsFbbrHybrid() const;
   bool IsFbbrHybridV3() const;
   bool IsFbbrHybridV4() const;
+  bool IsFbbrServiceFair() const;
+  bool UsesFbbrV4Envelope() const;
   bool IsFbbrProjectionObserver() const;
   bool IsFbbrHybridObserver() const;
   bool HasUsableFbbrV4PreviousTrustedBw() const;
@@ -1135,6 +1149,24 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       TimeDelta rtprop,
       bool current_app_limited,
       bool* app_limited_contaminated) const;
+  void ResetFbbrServiceFairState();
+  void UpdateFbbrServiceFairSignals(QuicTime now);
+  void RunFbbrServiceFairCycleUpdate(QuicTime now);
+  static double ComputeFbbrServiceFairAlphaBps(TimeDelta rtprop);
+  static double ApplyFbbrServiceFairRegimeIIIControlLimit(
+      double raw_candidate_bps,
+      double current_baseline_bps,
+      double service_rate_bps,
+      bool service_history_valid);
+  void ApplyFbbrServiceFairTrustedBwCorrection(
+      TrustedBwSelectionResult* selection,
+      bool regime_ii_candidate_selected);
+  static const char* FbbrServiceFairActionName(
+      FbbrServiceFairAction action);
+  void EmitFbbrServiceFairTrace(
+      QuicTime now,
+      const char* event,
+      WaveformClassification classification) const;
   QuicByteCount ComputeFbbrV4PlannedInflightBytes(
       QuicTime now,
       TimeDelta rtprop) const;
@@ -1947,9 +1979,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable uint64_t fbbr_v3_window_cap_binding_events_;
   bool fbbr_v3_flow_summary_emitted_;
 
-  // FBBR-hybirdv4 extends V3 with an independent target/base history and the
-  // bandwidth sampler's cumulative delivered history.  These fields are
-  // touched only by kFBBRHybridV4.
+  // FBBR-hybirdv4 and FBBR-ServiceFair share the V4 independent target/base
+  // history and the bandwidth sampler's cumulative delivered history.
   mutable std::deque<FbbrRateSegment> fbbr_v4_rate_history_;
   mutable TimeDelta fbbr_v4_max_rtprop_seen_;
   mutable bool fbbr_v4_rate_history_integrity_valid_;
@@ -1959,6 +1990,27 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool fbbr_v4_delivered_history_integrity_valid_;
   QuicTime fbbr_v4_last_counter_reset_time_;
   bool fbbr_v4_regime_i_or_iii_seen_this_cruise_;
+  bool service_fair_last_valid_regime_seen_this_cruise_;
+  WaveformClassification service_fair_last_valid_regime_this_cruise_;
+
+  // ServiceFair modifies only the current Cruise baseline. The published
+  // TrustedBw is its sole cross-Cruise bandwidth state.
+  QuicBandwidth service_fair_service_rate_;
+  QuicBandwidth service_fair_previous_service_rate_;
+  TimeDelta service_fair_qdelay_ewma_;
+  TimeDelta service_fair_previous_qdelay_ewma_;
+  uint64_t service_fair_cycle_count_;
+  bool service_fair_qdelay_valid_;
+  bool service_fair_previous_qdelay_valid_;
+  bool service_fair_service_history_valid_;
+  QuicTime service_fair_signal_reset_time_;
+  int64_t service_fair_last_update_cruise_id_;
+  FbbrServiceFairAction service_fair_action_;
+  TimeDelta service_fair_qdelay_trend_;
+  double service_fair_service_rate_change_;
+  double service_fair_alpha_bps_;
+  double service_fair_raw_regime_candidate_bps_;
+  double service_fair_final_regime_candidate_bps_;
 
   QuicTime fbbr_v4_telemetry_last_time_;
   bool fbbr_v4_telemetry_initialized_;
@@ -2013,6 +2065,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static constexpr double kTargetSrttSnr = 3.00;
   static constexpr double kMaxDrateShapeDistance = 0.40;
   static constexpr double kMaxPhaseStdCycles = 0.25;
+  static constexpr double kFbbrServiceFairBeta = 0.995;
+  static constexpr uint64_t kFbbrServiceFairMinimumBps = 1000000;
   static constexpr double kBandLowRatio = 0.70;
   static constexpr double kBandHighRatio = 1.30;
   static constexpr int kBandShapeBins = 16;

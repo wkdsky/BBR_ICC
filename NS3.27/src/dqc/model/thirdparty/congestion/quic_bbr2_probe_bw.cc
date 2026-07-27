@@ -90,13 +90,26 @@ Bbr2Mode Bbr2ProbeBwMode::OnCongestionEvent(
     UpdateProbeRefill(congestion_event);
   }
 
-  // Do not need to set the gains if switching to PROBE_RTT, they will be set
-  // when Bbr2ProbeRttMode::Enter is called.
-  if (!switch_to_probe_rtt) {
+  // BBRv2+ can ask to restart STARTUP after its dual-mode detector observes
+  // persistent queueing in Cruise.  This takes precedence over a simultaneous
+  // ProbeRTT transition, as the BBRv2+ design explicitly refreshes the
+  // bandwidth model from STARTUP in that case.
+  const bool switch_to_startup = sender_->ConsumeStartupRestartRequest();
+  if (switch_to_startup) {
+    switch_to_probe_rtt = false;
+    sender_->PrepareForStartupRestart();
+  }
+
+  // Do not need to set gains when switching modes: Enter() does that for the
+  // destination mode.
+  if (!switch_to_probe_rtt && !switch_to_startup) {
     model_->set_pacing_gain(PacingGainForPhase(cycle_.phase));
     model_->set_cwnd_gain(CwndGainForPhase(cycle_.phase));
   }
 
+  if (switch_to_startup) {
+    return Bbr2Mode::STARTUP;
+  }
   return switch_to_probe_rtt ? Bbr2Mode::PROBE_RTT : Bbr2Mode::PROBE_BW;
 }
 
@@ -150,6 +163,8 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
     const Bbr2CongestionEvent& congestion_event) {
   DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_DOWN);
 
+  bool advanced_max_bandwidth_filter = false;
+
   if (cycle_.rounds_in_phase == 1 && congestion_event.end_of_round_trip) {
     cycle_.is_sample_from_probing = false;
 
@@ -159,6 +174,8 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
           << " Advancing max bw filter after one round in PROBE_DOWN.";
       model_->AdvanceMaxBandwidthFilter();
       cycle_.has_advanced_max_bw = true;
+      advanced_max_bandwidth_filter = true;
+      sender_->OnMaxBandwidthFilterAdvanced(cycle_.phase);
     }
 
     if (!sender_->HasCustomProbeDownLogic() &&
@@ -166,6 +183,16 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
       EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
       return;
     }
+  }
+
+  // BBRv2+ expires stale BtlBW samples on RTT inflation in both Cruise and
+  // Down. Avoid a duplicate advance on the native first Down round.
+  if (congestion_event.end_of_round_trip &&
+      !advanced_max_bandwidth_filter &&
+      sender_->ShouldAdvanceMaxBandwidthFilterOnRoundStart(cycle_.phase)) {
+    model_->AdvanceMaxBandwidthFilter();
+    cycle_.has_advanced_max_bw = true;
+    sender_->OnMaxBandwidthFilterAdvanced(cycle_.phase);
   }
 
   MaybeAdaptUpperBounds(congestion_event);
@@ -610,6 +637,19 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
       return;
     }
     EnterProbeDown(/*probed_too_high=*/false, /*stopped_risky_probe=*/is_risky,
+                   congestion_event.event_time);
+    return;
+  }
+
+  // A sender may deliberately pace PROBE_UP from a connection-level
+  // baseline below native MaxBw.  Such a sender cannot build the native BDP
+  // queue that normally ends this phase, so let it retain the normal UP gain
+  // for one complete packet-timed round and then continue the native cycle.
+  if (cycle_.rounds_in_phase > 0 &&
+      congestion_event.end_of_round_trip &&
+      sender_->ShouldExitProbeUpAfterRound()) {
+    EnterProbeDown(/*probed_too_high=*/false,
+                   /*stopped_risky_probe=*/false,
                    congestion_event.event_time);
   }
 }
