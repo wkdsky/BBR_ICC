@@ -32,9 +32,6 @@ DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
 CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
 OPTIONAL_CCS = (
-    "FBBR-adaptive",
-    "FBBR-hybrid",
-    "FBBR-hybridv3",
     "FBBR-ServiceFair",
     "FreqCCv3",
     "BBR-R",
@@ -54,7 +51,6 @@ class RunnerConfig:
     stop_times: str = ""
     initial_rates: str = "0"
     rate_schedules: str = ""
-    fbbr_cruise_base_caps: str = "0"
     capacity_schedule: str = ""
     access_rate: str = "1Gbps"
     service_rate: str = "20Mbps"
@@ -148,7 +144,6 @@ def build_ns3_args(cfg: RunnerConfig) -> List[str]:
         "flowStopTimes": cfg.stop_times,
         "initialRates": cfg.initial_rates,
         "rateSchedules": cfg.rate_schedules,
-        "fbbrCruiseBaseCaps": cfg.fbbr_cruise_base_caps,
         "capacitySchedule": cfg.capacity_schedule,
         "accessRate": cfg.access_rate,
         "serviceRate": cfg.service_rate,
@@ -212,8 +207,6 @@ def print_summary(cfg: RunnerConfig, ns3_args: Iterable[str]) -> None:
         preview = ", ".join(schedule_entries[:3])
         suffix = " ..." if len(schedule_entries) > 3 else ""
         print(f"动态 bottleneck 容量：{len(schedule_entries)} 个采样点；{preview}{suffix}")
-    if cfg.fbbr_cruise_base_caps != "0":
-        print(f"FBBR CRUISE 基线上限：{cfg.fbbr_cruise_base_caps}")
     print(f"sender/receiver access 链路：{cfg.access_rate}, {cfg.access_delay_ms} ms")
     print(f"共享 bottleneck 链路：{cfg.service_rate}, {cfg.service_delay_ms} ms")
     print(f"共享 bottleneck 出口 buffer：{cfg.switch_buffer_bytes} bytes；0 表示按 {cfg.switch_buffer_bdp} BDP 自动计算")
@@ -441,29 +434,11 @@ ALGORITHM_PARAMS = {
         "algorithm": "FreqCCv3",
         "notes": "承载原纯净 FreqCCv3（三角波 + STFT）算法。",
     },
-    "FBBR-adaptive": {
-        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
-        "config_file": str(DEFAULT_FBBR_CONFIG),
-        "algorithm": "FBBR-adaptive",
-        "notes": "FBBR 的 Adaptive Guard 分支使用窗口边界、过载确认和队列守卫。",
-    },
-    "FBBR-hybrid": {
-        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
-        "config_file": str(DEFAULT_FBBR_CONFIG),
-        "algorithm": "FBBR-hybrid",
-        "notes": "独立 N01-N16 量化判定、MaxRTT/RTpropDRate 状态、50% 执行器和两窗无波保真增强分支。",
-    },
-    "FBBR-hybridv3": {
-        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
-        "config_file": str(DEFAULT_FBBR_CONFIG),
-        "algorithm": "FBBR-hybridv3",
-        "notes": "复用 FBBR-hybrid 频域观察器，以 ReferenceBw 驱动 pacing，并用精确 RTprop pacing 积分限制最终 inflight。",
-    },
     "FBBR": {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
         "config_file": str(DEFAULT_FBBR_CONFIG),
         "algorithm": "FBBR",
-        "notes": "保持 V3 pacing/Reference，以累计 delivered service 与既有正向 probing credit 构造短期 inflight envelope。",
+        "notes": "以累计 delivered service 与正向 probing credit 构造短期 inflight envelope。",
     },
     "FBBR-ServiceFair": {
         "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
@@ -522,7 +497,6 @@ def build_sub_config(args: argparse.Namespace, root: Path, cc: str) -> RunnerCon
     cfg.stop_times = args.stop_times
     cfg.initial_rates = args.initial_rates
     cfg.rate_schedules = args.rate_schedules
-    cfg.fbbr_cruise_base_caps = args.fbbr_cruise_base_caps
     cfg.capacity_schedule = args.capacity_schedule
     cfg.access_rate = args.access_rate
     cfg.service_rate = args.service_rate
@@ -565,7 +539,6 @@ def scenario_metadata(args: argparse.Namespace, ccs: Iterable[str]) -> Dict[str,
         "stop_times_s": args.stop_times or str(args.sim_time),
         "initial_rates": args.initial_rates,
         "rate_schedules": args.rate_schedules,
-        "fbbr_cruise_base_caps": args.fbbr_cruise_base_caps,
         "capacity_schedule": summarize_capacity_schedule(args.capacity_schedule),
         "data_generator_batch": args.data_generator_batch,
         "stream_buffer_bytes": args.stream_buffer_bytes,
@@ -605,9 +578,6 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
     }
     for cc in (
         "FBBR",
-        "FBBR-adaptive",
-        "FBBR-hybrid",
-        "FBBR-hybridv3",
         "FBBR-ServiceFair",
         "FreqCCv3",
     ):
@@ -766,7 +736,7 @@ def make_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "只运行指定 CC，可用逗号分隔。支持默认四种 CC，以及 "
-            "FBBR-adaptive、FBBR-hybrid、FBBR-hybridv3、FBBR-ServiceFair、FreqCCv3、"
+            "FBBR-ServiceFair、FreqCCv3、"
             "BBR-R 和 CUBIC。"
         ),
     )
@@ -782,15 +752,6 @@ def make_parser() -> argparse.ArgumentParser:
         help=(
             "每流运行时 pacing 上限，time:rate 用逗号分隔，流之间用 @ 分隔；"
             "例如 0:20Mbps,6:55Mbps@0:20Mbps,6:55Mbps。"
-        ),
-    )
-    parser.add_argument(
-        "--fbbr-cruise-base-caps",
-        dest="fbbr_cruise_base_caps",
-        default="0",
-        help=(
-            "每流 FBBR CRUISE 原生 pacing 基线上限；0 关闭。"
-            "该上限在加扰动前应用，用于给完整波形留出余量。"
         ),
     )
     parser.add_argument(

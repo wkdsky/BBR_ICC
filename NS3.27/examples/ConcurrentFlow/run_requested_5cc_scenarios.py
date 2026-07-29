@@ -19,8 +19,8 @@ NS3_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 CCS = (
-    "FBBR-adaptive",
     "FBBR",
+    "FBBR-ServiceFair",
     "BBRv2",
     "BBRv2plus",
     "oBBR",

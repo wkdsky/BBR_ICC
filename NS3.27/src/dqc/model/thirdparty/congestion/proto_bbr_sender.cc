@@ -367,12 +367,30 @@ bool ProtoBbrSender::ShouldRefreshMinRttTimestamp(
   return false;
 }
 
+void ProtoBbrSender::OnUpdatedRttSample(TimeDelta /*sample_rtt*/) {}
+
 TimeDelta ProtoBbrSender::GetGainCycleDuration() const {
   return GetMinRtt();
 }
 
 bool ProtoBbrSender::RequireDrainTargetBeforeGainCycleAdvance() const {
   return false;
+}
+
+bool ProtoBbrSender::UsePriorInflightForGainCycleDrain() const {
+  return false;
+}
+
+bool ProtoBbrSender::RequireProbeInflightStrictlyAboveTarget() const {
+  return false;
+}
+
+bool ProtoBbrSender::ShouldAddAckAggregationToCongestionWindow() const {
+  return true;
+}
+
+float ProtoBbrSender::GetProbeBandwidthCongestionWindowGain() const {
+  return congestion_window_gain_constant_;
 }
 
 QuicByteCount ProtoBbrSender::GetTargetCongestionWindow(float gain) const {
@@ -402,7 +420,7 @@ void ProtoBbrSender::EnterStartupMode(ProtoTime now) {
 
 void ProtoBbrSender::EnterProbeBandwidthMode(ProtoTime now) {
   mode_ = PROBE_BW;
-  congestion_window_gain_ = congestion_window_gain_constant_;
+  congestion_window_gain_ = GetProbeBandwidthCongestionWindowGain();
 
   // Pick a random offset for the gain cycle out of {0, 2..7} range. 1 is
   // excluded because in that case increased gain and decreased gain would not
@@ -449,6 +467,7 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
     ProtoTime now,
     const AckedPacketVector& acked_packets) {
   TimeDelta sample_min_rtt = TimeDelta::Infinite();
+  TimeDelta latest_sample_rtt = TimeDelta::Zero();
   for (const auto& packet : acked_packets) {
     if (!always_get_bw_sample_when_acked_ && packet.bytes_acked == 0) {
       // Skip acked packets with 0 in flight bytes when updating bandwidth.
@@ -469,6 +488,7 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
     bandwidth_latest_ = bandwidth_sample.bandwidth;
     if (!bandwidth_sample.rtt.IsZero()) {
       sample_min_rtt = std::min(sample_min_rtt, bandwidth_sample.rtt);
+      latest_sample_rtt = bandwidth_sample.rtt;
     }
 
     if (!bandwidth_sample.state_at_send.is_app_limited ||
@@ -509,6 +529,7 @@ bool ProtoBbrSender::UpdateBandwidthAndMinRtt(
   }
   DCHECK(!min_rtt_.IsZero());
 
+  OnUpdatedRttSample(latest_sample_rtt);
   return min_rtt_expired;
 }
 
@@ -543,7 +564,9 @@ void ProtoBbrSender::UpdateGainCyclePhase(ProtoTime now,
   // as there are no losses suggesting that the buffers are not able to hold
   // that much.
   if (pacing_gain_ > 1.0 && !has_losses &&
-      prior_in_flight < GetTargetCongestionWindow(pacing_gain_)) {
+      (RequireProbeInflightStrictlyAboveTarget()
+           ? prior_in_flight <= GetTargetCongestionWindow(pacing_gain_)
+           : prior_in_flight < GetTargetCongestionWindow(pacing_gain_))) {
     should_advance_gain_cycling = false;
   }
 
@@ -552,8 +575,11 @@ void ProtoBbrSender::UpdateGainCyclePhase(ProtoTime now,
   // of bytes in flight falls down to the estimated BDP value earlier, conclude
   // that the queue has been successfully drained and exit this cycle early.
   if (pacing_gain_ < 1.0) {
+    const QuicByteCount drain_in_flight =
+        UsePriorInflightForGainCycleDrain() ? prior_in_flight
+                                             : bytes_in_flight;
     const bool drain_target_reached =
-        bytes_in_flight <= GetTargetCongestionWindow(1);
+        drain_in_flight <= GetTargetCongestionWindow(1);
     if (RequireDrainTargetBeforeGainCycleAdvance()) {
       should_advance_gain_cycling =
           should_advance_gain_cycling && drain_target_reached;
@@ -795,8 +821,10 @@ void ProtoBbrSender::CalculateCongestionWindow(QuicByteCount bytes_acked,
   QuicByteCount target_window =
       GetTargetCongestionWindow(congestion_window_gain_);
   if (is_at_full_bandwidth_) {
-    // Add the max recently measured ack aggregation to CWND.
-    target_window += max_ack_height_.GetBest();
+    if (ShouldAddAckAggregationToCongestionWindow()) {
+      // Add the max recently measured ack aggregation to CWND.
+      target_window += max_ack_height_.GetBest();
+    }
   } else if (enable_ack_aggregation_during_startup_) {
     // Add the most recent excess acked.  Because CWND never decreases in
     // STARTUP, this will automatically create a very localized max filter.

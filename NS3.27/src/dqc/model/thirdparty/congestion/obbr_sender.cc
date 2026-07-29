@@ -93,9 +93,6 @@ ObbrSender::ObbrSender(ProtoTime now,
       round_trip_count_(0),
       max_bandwidth_(kBandwidthWindowSize, QuicBandwidth::Zero(), 0),
       bandwidth_latest_(QuicBandwidth::Zero()),
-      max_ack_height_(kBandwidthWindowSize, 0, 0),
-      aggregation_epoch_start_time_(ProtoTime::Zero()),
-      aggregation_epoch_bytes_(0),
       min_rtt_(TimeDelta::Zero()),
       min_rtt_timestamp_(ProtoTime::Zero()),
       congestion_window_(initial_tcp_congestion_window * kDefaultTCPMSS),
@@ -130,8 +127,6 @@ ObbrSender::ObbrSender(ProtoTime now,
       rate_based_startup_(false),
       startup_rate_reduction_multiplier_(0),
       startup_bytes_lost_(0),
-      enable_ack_aggregation_during_startup_(false),
-      expire_ack_aggregation_in_startup_(false),
       drain_to_target_(drain_to_target),
       probe_rtt_based_on_bdp_(false),
       probe_rtt_skipped_if_similar_rtt_(false),
@@ -140,6 +135,9 @@ ObbrSender::ObbrSender(ProtoTime now,
       min_rtt_since_last_probe_rtt_(TimeDelta::Infinite()),
       always_get_bw_sample_when_acked_(
           GetQuicReloadableFlag(quic_always_get_bw_sample_when_acked)),
+      obbr_latest_raw_rtt_(TimeDelta::Zero()),
+      obbr_has_latest_raw_rtt_(false),
+      obbr_has_current_delivery_sample_(false),
       obbr_recent_probe_bw_samples_(),
       obbr_bw_down_count_(0),
       obbr_up_rtt_count_(0),
@@ -185,10 +183,6 @@ void ObbrSender::OnPacketSent(ProtoTime sent_time,
 
   if (bytes_in_flight == 0 && sampler_.is_app_limited()) {
     exiting_quiescence_ = true;
-  }
-
-  if (!aggregation_epoch_start_time_.IsInitialized()) {
-    aggregation_epoch_start_time_ = sent_time;
   }
 
   sampler_.OnPacketSent(sent_time, packet_number, bytes, bytes_in_flight,
@@ -304,12 +298,21 @@ void ObbrSender::AdjustNetworkParameters(QuicBandwidth bandwidth,
   }
 }
 
-void ObbrSender::OnCongestionEvent(bool /*rtt_updated*/,
+void ObbrSender::OnCongestionEvent(bool rtt_updated,
                                   QuicByteCount prior_in_flight,
                                   ProtoTime event_time,
                                   const AckedPacketVector& acked_packets,
                                   const LostPacketVector& lost_packets) {
   const QuicByteCount total_bytes_acked_before = sampler_.total_bytes_acked();
+
+  // In nginx-quic, qc->latest_rtt is updated only when the ACK frame's
+  // largest packet is newly acknowledged.  It remains the RTT attached to
+  // subsequent valid delivery samples until the next such ACK arrives.
+  if (rtt_updated && !rtt_stats_->latest_raw_rtt().IsZero()) {
+    obbr_latest_raw_rtt_ = rtt_stats_->latest_raw_rtt();
+    obbr_has_latest_raw_rtt_ = true;
+  }
+  obbr_has_current_delivery_sample_ = false;
 
   bool is_round_start = false;
   bool min_rtt_expired = false;
@@ -317,7 +320,6 @@ void ObbrSender::OnCongestionEvent(bool /*rtt_updated*/,
   DiscardLostPackets(lost_packets);
 
   // Input the new data into the BBR model of the connection.
-  QuicByteCount excess_acked = 0;
   if (!acked_packets.empty()) {
     QuicPacketNumber last_acked_packet = acked_packets.rbegin()->packet_number;
     is_round_start = UpdateRoundTripCounter(last_acked_packet);
@@ -325,10 +327,6 @@ void ObbrSender::OnCongestionEvent(bool /*rtt_updated*/,
     UpdateRecoveryState(last_acked_packet, !lost_packets.empty(),
                         is_round_start);
 
-    const QuicByteCount bytes_acked =
-        sampler_.total_bytes_acked() - total_bytes_acked_before;
-
-    excess_acked = UpdateAckAggregationBytes(event_time, bytes_acked);
   }
 
   // Handle logic specific to PROBE_BW mode.
@@ -360,7 +358,7 @@ void ObbrSender::OnCongestionEvent(bool /*rtt_updated*/,
   // After the model is updated, recalculate the pacing rate and congestion
   // window.
   CalculatePacingRate();
-  CalculateCongestionWindow(bytes_acked, excess_acked);
+  CalculateCongestionWindow(bytes_acked);
   CalculateRecoveryWindow(bytes_acked, bytes_lost);
 
   // Cleanup internal state.
@@ -462,7 +460,7 @@ bool ObbrSender::UpdateRoundTripCounter(QuicPacketNumber last_acked_packet) {
 bool ObbrSender::UpdateBandwidthAndMinRtt(
     ProtoTime now,
     const AckedPacketVector& acked_packets) {
-  TimeDelta sample_min_rtt = TimeDelta::Infinite();
+  DCHECK(!acked_packets.empty());
   for (const auto& packet : acked_packets) {
     if (!always_get_bw_sample_when_acked_ && packet.bytes_acked == 0) {
       // Skip acked packets with 0 in flight bytes when updating bandwidth.
@@ -485,7 +483,7 @@ bool ObbrSender::UpdateBandwidthAndMinRtt(
       bandwidth_latest_ = bandwidth_sample.bandwidth;
     }
     if (!bandwidth_sample.rtt.IsZero()) {
-      sample_min_rtt = std::min(sample_min_rtt, bandwidth_sample.rtt);
+      obbr_has_current_delivery_sample_ = true;
     }
 
     if (!bandwidth_sample.state_at_send.is_app_limited ||
@@ -511,26 +509,28 @@ bool ObbrSender::UpdateBandwidthAndMinRtt(
     }
   }
 
-  // If none of the RTT samples are valid, return immediately.
-  if (sample_min_rtt.IsInfinite()) {
+  // ngx_generate_sample() supplies the previously recorded raw latest RTT to
+  // BBR only when it has a valid delivery sample for this ACK event.
+  if (!obbr_has_current_delivery_sample_ || !obbr_has_latest_raw_rtt_) {
     return false;
   }
+  const TimeDelta raw_rtt = obbr_latest_raw_rtt_;
   min_rtt_since_last_probe_rtt_ =
-      std::min(min_rtt_since_last_probe_rtt_, sample_min_rtt);
+      std::min(min_rtt_since_last_probe_rtt_, raw_rtt);
 
   // Do not expire min_rtt if none was ever available.
   bool min_rtt_expired =
       !min_rtt_.IsZero() && (now > (min_rtt_timestamp_ + kMinRttExpiry));
 
-  if (min_rtt_expired || sample_min_rtt < min_rtt_ || min_rtt_.IsZero()) {
+  if (min_rtt_expired || raw_rtt <= min_rtt_ || min_rtt_.IsZero()) {
     //QUIC_DVLOG(2) << "Min RTT updated, old value: " << min_rtt_
-    //              << ", new value: " << sample_min_rtt
+    //              << ", new value: " << raw_rtt
     //              << ", current time: " << now.ToDebuggingValue();
 
     if (min_rtt_expired && ShouldExtendMinRttExpiry()) {
       min_rtt_expired = false;
     } else {
-      min_rtt_ = sample_min_rtt;
+      min_rtt_ = raw_rtt;
     }
     min_rtt_timestamp_ = now;
     // Reset since_last_probe_rtt fields.
@@ -562,7 +562,6 @@ bool ObbrSender::ShouldExtendMinRttExpiry() const {
 void ObbrSender::UpdateGainCyclePhase(ProtoTime now,
                                      QuicByteCount prior_in_flight,
                                      bool has_losses) {
-  const QuicByteCount bytes_in_flight = unacked_packets_->bytes_in_flight();
   // In most cases, the cycle is advanced after an RTT passes.
   bool should_advance_gain_cycling = now - last_cycle_start_ > GetMinRtt();
 
@@ -577,10 +576,10 @@ void ObbrSender::UpdateGainCyclePhase(ProtoTime now,
   }
 
   // If pacing gain is below 1.0, the connection is trying to drain the extra
-  // queue which could have been incurred by probing prior to it.  If the number
-  // of bytes in flight falls down to the estimated BDP value earlier, conclude
-  // that the queue has been successfully drained and exit this cycle early.
-  if (pacing_gain_ < 1.0 && bytes_in_flight <= GetTargetCongestionWindow(1)) {
+  // queue which could have been incurred by probing prior to it.  nginx-quic
+  // evaluates the ACK-preceding inflight amount against BDP.
+  if (pacing_gain_ < 1.0 &&
+      prior_in_flight <= GetTargetCongestionWindow(1)) {
     should_advance_gain_cycling = true;
   }
 
@@ -591,7 +590,7 @@ void ObbrSender::UpdateGainCyclePhase(ProtoTime now,
     // Low gain mode will be exited immediately when the target BDP is achieved.
     if (drain_to_target_ && pacing_gain_ < 1 &&
         kPacingGain[cycle_current_offset_] == 1 &&
-        bytes_in_flight > GetTargetCongestionWindow(1)) {
+        prior_in_flight > GetTargetCongestionWindow(1)) {
       return;
     }
     pacing_gain_ = kPacingGain[cycle_current_offset_];
@@ -607,10 +606,6 @@ void ObbrSender::CheckIfFullBandwidthReached() {
   if (BandwidthEstimate() >= target) {
     bandwidth_at_last_round_ = BandwidthEstimate();
     rounds_without_bandwidth_gain_ = 0;
-    if (expire_ack_aggregation_in_startup_) {
-      // Expire old excess delivery measurements now that bandwidth increased.
-      max_ack_height_.Reset(0, round_trip_count_);
-    }
     return;
   }
 
@@ -671,7 +666,11 @@ void ObbrSender::MaybeEnterOrExitProbeRtt(ProtoTime now,
       // packet.
       if (unacked_packets_->bytes_in_flight() <
           ProbeRttCongestionWindow() + kMaxOutgoingPacketSize) {
-        exit_probe_rtt_at_ = now + kProbeRttTime;
+        // nginx-quic holds PROBE_RTT for min(2 * srtt, 200ms).  Its srtt is
+        // ACK-delay-corrected, so use DQC's smoothed RTT for this timer only.
+        const TimeDelta probe_rtt_duration = std::min(
+            rtt_stats_->SmoothedOrInitialRtt() * 2, kProbeRttTime);
+        exit_probe_rtt_at_ = now + probe_rtt_duration;
         probe_rtt_round_passed_ = false;
       }
     } else {
@@ -739,31 +738,6 @@ void ObbrSender::UpdateRecoveryState(QuicPacketNumber last_acked_packet,
   }
 }
 
-// TODO(ianswett): Move this logic into BandwidthSampler.
-QuicByteCount ObbrSender::UpdateAckAggregationBytes(
-    ProtoTime ack_time,
-    QuicByteCount newly_acked_bytes) {
-  // Compute how many bytes are expected to be delivered, assuming max bandwidth
-  // is correct.
-  QuicByteCount expected_bytes_acked =
-      max_bandwidth_.GetBest() * (ack_time - aggregation_epoch_start_time_);
-  // Reset the current aggregation epoch as soon as the ack arrival rate is less
-  // than or equal to the max bandwidth.
-  if (aggregation_epoch_bytes_ <= expected_bytes_acked) {
-    // Reset to start measuring a new aggregation epoch.
-    aggregation_epoch_bytes_ = newly_acked_bytes;
-    aggregation_epoch_start_time_ = ack_time;
-    return 0;
-  }
-
-  // Compute how many extra bytes were delivered vs max bandwidth.
-  // Include the bytes most recently acknowledged to account for stretch acks.
-  aggregation_epoch_bytes_ += newly_acked_bytes;
-  max_ack_height_.Update(aggregation_epoch_bytes_ - expected_bytes_acked,
-                         round_trip_count_);
-  return aggregation_epoch_bytes_ - expected_bytes_acked;
-}
-
 void ObbrSender::ResetObbrScoreWindow(ProtoTime now) {
   obbr_score_sent_base_ = sampler_.total_bytes_sent();
   obbr_score_delivered_base_ = sampler_.total_bytes_acked();
@@ -774,6 +748,12 @@ void ObbrSender::ResetObbrScoreWindow(ProtoTime now) {
 void ObbrSender::UpdateObbrState(ProtoTime now,
                                      QuicByteCount bytes_acked,
                                      bool has_losses) {
+  // nginx-quic reaches ngx_bbr_update_cc_mode() only after a valid current
+  // delivery sample has been generated.
+  if (!obbr_has_current_delivery_sample_ || !obbr_has_latest_raw_rtt_) {
+    return;
+  }
+
   if (mode_ == STARTUP) {
     const QuicByteCount total_acked = sampler_.total_bytes_acked();
     if (total_acked == 0 ||
@@ -783,17 +763,16 @@ void ObbrSender::UpdateObbrState(ProtoTime now,
   }
 
   const TimeDelta min_rtt = GetMinRtt();
-  const TimeDelta latest_rtt = rtt_stats_->latest_rtt();
+  const TimeDelta raw_rtt = obbr_latest_raw_rtt_;
 
-  if (!min_rtt.IsZero() && !latest_rtt.IsZero() &&
-      latest_rtt > min_rtt * kObbrQueueingRttThreshold) {
+  if (!min_rtt.IsZero() && raw_rtt > min_rtt * kObbrQueueingRttThreshold) {
     ++obbr_up_rtt_count_;
   } else {
     obbr_up_rtt_count_ = 0;
   }
 
-  if (has_losses && !min_rtt.IsZero() && !latest_rtt.IsZero()) {
-    const TimeDelta queueing_rtt = latest_rtt - min_rtt;
+  if (has_losses && !min_rtt.IsZero()) {
+    const TimeDelta queueing_rtt = raw_rtt - min_rtt;
     float gain = 1.0f;
     if (queueing_rtt > TimeDelta::Zero()) {
       gain += kObbrU * static_cast<float>(queueing_rtt.ToMicroseconds()) /
@@ -868,7 +847,10 @@ void ObbrSender::UpdateObbrState(ProtoTime now,
            now - obbr_last_revert_time_ > GetMinRtt() * 10);
       if (can_revert &&
           (obbr_score3_ + obbr_score4_) < (obbr_score1_ + obbr_score2_)) {
-        max_bandwidth_.Reset(obbr_saved_bandwidth_, round_trip_count_);
+        // ngx_win_filter_max() reinserts the saved value into the BBR max
+        // filter; it does not discard a better bandwidth sample already in
+        // the window.
+        max_bandwidth_.Update(obbr_saved_bandwidth_, round_trip_count_);
         obbr_last_revert_time_ = now;
       }
       obbr_cc_stage_ = -1;
@@ -925,8 +907,7 @@ void ObbrSender::CalculatePacingRate() {
   pacing_rate_ = std::max(pacing_rate_, target_rate);
 }
 
-void ObbrSender::CalculateCongestionWindow(QuicByteCount bytes_acked,
-                                          QuicByteCount excess_acked) {
+void ObbrSender::CalculateCongestionWindow(QuicByteCount bytes_acked) {
   if (mode_ == PROBE_RTT) {
     return;
   }
@@ -944,14 +925,8 @@ void ObbrSender::CalculateCongestionWindow(QuicByteCount bytes_acked,
 
   QuicByteCount target_window = GetTargetCongestionWindow(cwnd_gain);
   target_window += 3 * GetQuantum();
-  if (is_at_full_bandwidth_) {
-    // Add the max recently measured ack aggregation to CWND.
-    target_window += max_ack_height_.GetBest();
-  } else if (enable_ack_aggregation_during_startup_) {
-    // Add the most recent excess acked.  Because CWND never decreases in
-    // STARTUP, this will automatically create a very localized max filter.
-    target_window += excess_acked;
-  }
+  // ngx_bbr_extra_ack_gain is zero in the oBBR reference implementation, so
+  // ACK aggregation must not inflate its target congestion window.
 
   // Instead of immediately setting the target CWND as the new one, BBR grows
   // the CWND towards |target_window| by only increasing it |bytes_acked| at a
@@ -1036,7 +1011,13 @@ void ObbrSender::CalculateRecoveryWindow(QuicByteCount bytes_acked,
 
 std::string ObbrSender::GetDebugState() const {
   std::ostringstream stream;
-  stream << ExportDebugState();
+  stream << ExportDebugState()
+         << "\noBBR raw latest RTT (us): "
+         << (obbr_has_latest_raw_rtt_
+                 ? obbr_latest_raw_rtt_.ToMicroseconds()
+                 : 0)
+         << "\noBBR current delivery sample: "
+         << (obbr_has_current_delivery_sample_ ? "yes" : "no");
   return stream.str();
 }
 

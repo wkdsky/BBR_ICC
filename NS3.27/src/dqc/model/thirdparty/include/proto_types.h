@@ -121,10 +121,10 @@ kDwcBytes,kCoupleBBR,kBBR_DELAY,
 kBBR,kBBRD,kBBRPlus,kOBBR,
 kBBRRand,kTsunami,kHighSpeedRail,
 kGoogCC,kBBRv2,kBBRv2Ecn,kBBRv2NoProbeRtt,kBBRv2Plus,kBBRv2PlusEcn,kFreqCC,kFreqCCv2,kFreqCCv3,
-// Leave the retired bare-FBBR numeric slot unused so all surviving algorithm
-// values, including the active FBBR service-envelope slot below, stay stable.
-kFBBRAdaptive = kFreqCCv3 + 2,kFBBRHybrid,
-kCopa,kPCC,kVivace,
+// Reserve the retired FBBR branch values without exposing them as algorithms.
+// kCopa keeps its historical value so unrelated congestion-control values do
+// not change when the old Adaptive and Hybrid branches are removed.
+kCopa = kFreqCCv3 + 4,kPCC,kVivace,
 kWebRTCVivace,kVegas,
 kLedbat,kLpTcp,kLpBBR,kLpBBRNo,
 kLearningBytes,kLearningBytesHalf,
@@ -135,15 +135,17 @@ kBBRR,
 // ns-3.47 TcpCubic semantics adapted to the DQC transport interface.  Keep
 // this at the end so existing serialized enum values remain stable.
 kNs3Cubic,
-// Model-consistent inflight projection variant.  Appended so every existing
-// serialized CongestionControlType value remains unchanged.
-kFBBRHybridV3,
-// The service-consistent inflight envelope is the active FBBR algorithm.
-// It retains the former V4 numeric slot so ServiceFair's value is stable.
-kFBBR,
+// Preserve the retired HybridV3 slot while exposing only the two supported
+// FBBR algorithms.
+kFBBR = kNs3Cubic + 2,
 // Service-aware, Cruise-cycle AIMD fairness control layered on top of the
 // FBBR inflight envelope.  Appended to preserve existing values.
-kFBBRServiceFair};
+kFBBRServiceFair,
+// Experiment-only aliases that construct the same supported FBBR algorithms
+// with ProbeRTT disabled.  Their sender identity remains kFBBR or
+// kFBBRServiceFair, so the established FBBR control path is unchanged.
+kFBBRNoProbeRtt,
+kFBBRServiceFairNoProbeRtt};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);

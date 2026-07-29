@@ -24,8 +24,8 @@ Bbr2Mode Bbr2ProbeRttMode::OnCongestionEvent(
     const Bbr2CongestionEvent& congestion_event) {
   if (sender_->MarkProbeRttAppLimited()) {
     // Current BBR deliberately prevents its controlled low-rate ProbeRTT
-    // samples from lowering the path-capacity model.  FBBR-Hybrid consumes
-    // those samples only in a separate RTpropDRate estimator.
+    // samples from lowering the path-capacity model. FBBR keeps RTprop
+    // publication separate from the native capacity model.
     model_->OnApplicationLimited();
   }
   if (exit_time_ == QuicTime::Zero()) {

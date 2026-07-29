@@ -77,16 +77,6 @@ else
   exit 1
 fi
 
-echo "[self-test] gateStateMachineSelfTest"
-if ./waf --run "scratch/fbbr_4flow --gateStateMachineSelfTest=true" \
-    > "${REPORT_DIR}/gate_state_machine_self_test_long_lived.log" 2>&1; then
-  echo "PASS" > "${REPORT_DIR}/gate_state_machine_self_test_long_lived_status.txt"
-else
-  echo "FAIL" > "${REPORT_DIR}/gate_state_machine_self_test_long_lived_status.txt"
-  tail -80 "${REPORT_DIR}/gate_state_machine_self_test_long_lived.log" >&2 || true
-  exit 1
-fi
-
 for seed in "${SEED_LIST[@]}"; do
   for group in "${GROUP_IDS[@]}"; do
     out_dir="${MATRIX_DIR}/${group}/seed_${seed}"

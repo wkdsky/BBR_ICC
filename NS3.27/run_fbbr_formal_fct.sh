@@ -96,16 +96,6 @@ else
   exit 1
 fi
 
-echo "[self-test] gateStateMachineSelfTest"
-if ./waf --run "scratch/fbbr_4flow --gateStateMachineSelfTest=true" \
-    > "${REPORT_DIR}/gate_state_machine_self_test_fct.log" 2>&1; then
-  echo "PASS" > "${REPORT_DIR}/gate_state_machine_self_test_fct_status.txt"
-else
-  echo "FAIL" > "${REPORT_DIR}/gate_state_machine_self_test_fct_status.txt"
-  tail -80 "${REPORT_DIR}/gate_state_machine_self_test_fct.log" >&2 || true
-  exit 1
-fi
-
 for size_idx in "${!SIZE_LABEL_LIST[@]}"; do
   size_label="${SIZE_LABEL_LIST[$size_idx]}"
   flow_size_bytes="${SIZE_BYTE_LIST[$size_idx]}"

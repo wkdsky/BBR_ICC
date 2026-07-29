@@ -3,7 +3,7 @@
   "description": "Five congestion-control comparison on the project cellular taxi Mahimahi trace.",
   "ccs": [
     "FBBR",
-    "FBBR-adaptive",
+    "FBBR-ServiceFair",
     "oBBR",
     "BBRv2plus",
     "BBRv2"

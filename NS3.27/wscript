@@ -750,8 +750,10 @@ def add_examples_programs(bld):
             for dir in os.listdir('examples'):
                 if dir.startswith('.') or dir == 'CVS':
                     continue
-                if os.path.isdir(os.path.join('examples', dir)):
-                    bld.recurse(os.path.join('examples', dir))
+                example_dir = os.path.join('examples', dir)
+                if (os.path.isdir(example_dir) and
+                        os.path.isfile(os.path.join(example_dir, 'wscript'))):
+                    bld.recurse(example_dir)
         except OSError:
             return
 
@@ -1370,4 +1372,3 @@ def lcov_report(bld):
             raise SystemExit(1)
     finally:
         os.chdir("..")
-

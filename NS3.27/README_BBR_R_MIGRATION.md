@@ -11,8 +11,8 @@ ns-3 的 DQC 拥塞控制框架。场景参数使用 `BBR-R` 即可选择该算�
 
 参考源码是 Linux 4.14 TCP 拥塞控制模块，依赖 `tcp_sock`、内核 pacing、
 rate sample、jiffies 和 `minmax` 等设施，不能直接编译进 ns-3。当前实现以
-本仓库 `ProtoBbrSender`（DQC BBRv1）为宿主，保留宿主的采样器、ACK/丢包
-接口、带宽模型、cwnd 和恢复逻辑，只迁移 BBR-R 相对 BBRv1 的机制：
+本仓库 `ProtoBbrSender`（DQC BBRv1）为宿主；在 DQC 能表达的范围内，BBR-R
+分支向参考实现对齐：
 
 - 在 `PROBE_BW` 且 pacing gain 不高于 1.0 时检测 RTT 膨胀；
 - RTT 不高于 `1.05 * min_rtt` 时复位竞争状态；
@@ -24,10 +24,28 @@ rate sample、jiffies 和 `minmax` 等设施，不能直接编译进 ns-3。当�
 - 低增益 phase 需要同时满足“经过自适应 RTT 周期”和“inflight 已排空到
   BDP”才进入下一 phase。
 
+此外，BBR-R 专用的宿主参数和事件语义也已对齐：
+
+- STARTUP pacing/cwnd gain 固定为 Linux `bbr_high_gain = 739 / 256`，DRAIN
+  pacing gain 固定为 `88 / 256`；
+- PROBE_BW cwnd gain 固定为参考实现的 `2.0`，不受 DQC 通用 BBR flag 影响；
+- RTT 膨胀判定使用 DQC `BandwidthSample` 中未扣除 ACK delay 的原始 RTT，而非
+  `RttStats::latest_rtt()`；
+- 10 个膨胀样本的最小 RTT 使用参考源码同款三候选 `minmax_rtt` 算法；
+- PROBE_BW 高/低增益 phase 均按 ACK 前 inflight 判定；高增益要求严格超过目标
+  inflight，低增益同时满足自适应 RTT 周期和 BDP 排空；
+- BBR-R 不叠加 DQC/QUIC BBR 的 ACK-aggregation cwnd allowance，保持 Linux
+  BBRv1 的 cwnd 计算口径。
+
 `bbr_r.c` 将 RTT 自适应变量定义成文件级全局变量。直接照搬会让 ns-3 中
 的四条流共享状态并相互污染，因此迁移版将这些变量放入 `BbrRSender`，每个
 sender 独立维护。BBR-R 仅调整 pacing 使用的带宽，cwnd 仍使用未经折减的
 BBR 带宽估计，与参考源码的 `bw1` / `bw2` 分工一致。
+
+仍保留的 DQC 边界是：每个 ACK frame 可能批量确认多个包、没有 Linux TCP 的
+TSO/GSO/FQ pacing 与 socket recovery 细节，也没有 Linux BBRv1 的 traffic
+policer 长期带宽采样。因此本实现是尽可能贴近 `bbr_r.c` 的 DQC 版本，不宣称
+跨传输栈的逐事件完全等价。
 
 核心实现位于：
 
@@ -112,12 +130,12 @@ results/bbrr_4flows_shared_100M_2BDP_180s_20260719/
 | BBRv2 | 97.9365 | 0.9794 | 72.5569 | 83.7504 | 0.9532 |
 | BBRv2plus | 97.8383 | 0.9784 | 59.2428 | 83.1744 | 0.8768 |
 | oBBR | 95.7808 | 0.9578 | 50.6213 | 60.4282 | 0.9751 |
-| FBBR-adaptive | 96.6718 | 0.9667 | 22.7906 | 47.2818 | 0.9407 |
 | FBBR | 95.4809 | 0.9548 | 24.7470 | 57.8123 | 0.8963 |
 
 BBR-R 的仿真返回码为 0，四条流均完成 180 秒；总接收速率为 97.612 Mbps，
 丢包率为 0。pacing/max-bw trace 中四条流都出现了大量约 0.95 的比例，且
 出现了 0.80 折减样本，说明 RTT 自适应 pacing 分支在实际多流场景中被执行。
 
-这是一份 DQC-hosted 语义迁移，不宣称逐行复现 Linux 内核的定时、TSO、
-ACK 聚合和 socket 恢复细节。
+这是一份 DQC-hosted BBR-R 对齐实现；其核心 RTT 降速规则、固定 gain、phase
+判定和 cwnd 口径均已向 Linux 参考源码收敛，但不宣称复现 Linux 内核的定时、
+TSO、FQ pacing、traffic policer 或 socket 恢复细节。

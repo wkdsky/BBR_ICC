@@ -127,7 +127,6 @@ link_config_t p4p[]={
 double g_freq_hz[NUM_FLOWS] = {5.0, 5.0, 5.0, 5.0};           // Oscillation frequency in Hz
 std::string g_amp_mode[NUM_FLOWS] = {"fixed_mbps", "fixed_mbps", "fixed_mbps", "fixed_mbps"};  // Amplitude mode
 double g_fixed_mbps[NUM_FLOWS] = {50.0, 50.0, 50.0, 50.0};        // Fixed amplitude in Mbps
-double g_interval_window_rtt_mult = 1.0;                     // Interval STFT window = mult * min_rtt
 bool g_dynamic_delay_enable = true;
 bool g_enable_convergence_gate_trace = false;
 bool g_enable_convergence_gate_control = false;
@@ -137,14 +136,6 @@ uint64_t g_flow_size_bytes = 15ULL * 1000ULL * 1000ULL;
 int64_t g_process_interval_us = 100;
 bool g_smoke_mode = false;
 bool g_enable_heavy_trace = false;
-bool g_gate_state_machine_self_test = false;
-bool g_trusted_bw_selection_self_test = false;
-bool g_trusted_bw_pacing_self_test = false;
-bool g_waveform_cruise_self_test = false;
-bool g_fbbr_hybrid_self_test = false;
-bool g_fbbr_hybrid_v3_self_test = false;
-bool g_fbbr_self_test = false;
-bool g_fbbr_service_fair_self_test = false;
 bool g_use_engine_timer = true;
 std::string g_gate_trace_mode = "round_only";
 uint64_t g_gate_trace_sample_interval_us = 10000;
@@ -332,31 +323,7 @@ bool SetFBBRConfigValue(FBBRConfig* config,
     SET_DOUBLE("stability.consecutive_exit_threshold", stability_consecutive_exit_threshold)
     SET_U32("stability.stable_rounds", stability_stable_rounds)
     SET_DOUBLE("stability.full_pipe_growth_threshold", stability_full_pipe_growth_threshold)
-    SET_DOUBLE("spectral.drate_integrity_threshold", spectral_drate_integrity_threshold)
-    SET_DOUBLE("spectral.srtt_integrity_threshold", spectral_srtt_integrity_threshold)
-    SET_DOUBLE("spectral.min_drate_snr", spectral_min_drate_snr)
-    SET_DOUBLE("spectral.min_srtt_snr", spectral_min_srtt_snr)
-    SET_DOUBLE("spectral.max_drate_width_ratio", spectral_max_drate_width_ratio)
-    SET_DOUBLE("spectral.max_srtt_width_ratio", spectral_max_srtt_width_ratio)
-    SET_DOUBLE("spectral.min_drate_phase_coherence", spectral_min_drate_phase_coherence)
-    SET_DOUBLE("spectral.min_srtt_phase_coherence", spectral_min_srtt_phase_coherence)
-    SET_DOUBLE("spectral.freq_sigma_ratio", spectral_freq_sigma_ratio)
-    SET_DOUBLE("spectral.snr_slope", spectral_snr_slope)
-    SET_DOUBLE("spectral.energy_threshold", spectral_energy_threshold)
-    SET_DOUBLE("spectral.energy_slope", spectral_energy_slope)
-    SET_DOUBLE("spectral.width_r0_drate", spectral_width_r0_drate)
-    SET_DOUBLE("spectral.width_r0_srtt", spectral_width_r0_srtt)
-    SET_DOUBLE("spectral.width_sigma", spectral_width_sigma)
-    SET_BOOL("merged_rescue.enable", merged_rescue_enable)
-    SET_DOUBLE("merged_rescue.window_multiplier", merged_rescue_window_multiplier)
-    SET_U32("merged_rescue.max_passes", merged_rescue_max_passes)
-    SET_DOUBLE("merged_rescue.max_trend_ratio", merged_rescue_max_trend_ratio)
-    SET_DOUBLE("merged_rescue.confidence_discount", merged_rescue_confidence_discount)
     SET_BOOL("trusted_bw.clear_on_cruise_start", trusted_bw_clear_on_cruise_start)
-    if(key == "cruise_detector.mode"){
-        config->cruise_detector_mode = value;
-        return true;
-    }
     if(key == "waveform.recv_signal_mode"){
         config->waveform_recv_signal_mode = value;
         return true;
@@ -371,15 +338,6 @@ bool SetFBBRConfigValue(FBBRConfig* config,
     SET_DOUBLE("waveform.min_periodicity_correlation", waveform_min_periodicity_correlation)
     SET_DOUBLE("waveform.min_cycle_coverage_ratio", waveform_min_cycle_coverage_ratio)
     SET_DOUBLE("waveform.masked_min_cycle_coverage_ratio", waveform_masked_min_cycle_coverage_ratio)
-    SET_DOUBLE("waveform.min_completeness_score", waveform_min_completeness_score)
-    SET_DOUBLE("waveform.min_rising_duration_ratio", waveform_min_rising_duration_ratio)
-    SET_DOUBLE("waveform.min_falling_duration_ratio", waveform_min_falling_duration_ratio)
-    SET_DOUBLE("waveform.min_shape_ncc", waveform_min_shape_ncc)
-    SET_DOUBLE("waveform.min_slope_direction_agreement", waveform_min_slope_direction_agreement)
-    SET_DOUBLE("waveform.min_drate_ncc", waveform_min_drate_ncc)
-    SET_DOUBLE("waveform.min_srtt_integral_ncc", waveform_min_srtt_integral_ncc)
-    SET_DOUBLE("waveform.min_srtt_derivative_ncc", waveform_min_srtt_derivative_ncc)
-    SET_DOUBLE("waveform.min_response_snr", waveform_min_response_snr)
     SET_DOUBLE("waveform.local_slope_window_period_ratio", waveform_local_slope_window_period_ratio)
     SET_DOUBLE("waveform.min_local_slope_window_ms", waveform_min_local_slope_window_ms)
     SET_DOUBLE("waveform.clip_min_duration_ratio", waveform_clip_min_duration_ratio)
@@ -387,17 +345,6 @@ bool SetFBBRConfigValue(FBBRConfig* config,
     SET_DOUBLE("waveform.clip_max_slope_ratio", waveform_clip_max_slope_ratio)
     SET_DOUBLE("waveform.delta_drate_amplitude_ratio", waveform_delta_drate_amplitude_ratio)
     SET_DOUBLE("waveform.delta_fallback_baseline_ratio", waveform_delta_fallback_baseline_ratio)
-    SET_DOUBLE("waveform.adaptive_delta_fallback_baseline_ratio", waveform_adaptive_delta_fallback_baseline_ratio)
-    SET_DOUBLE("waveform.delta_ewma_alpha", waveform_delta_ewma_alpha)
-    SET_DOUBLE("waveform.delta_min_baseline_ratio", waveform_delta_min_baseline_ratio)
-    SET_DOUBLE("waveform.delta_max_baseline_ratio", waveform_delta_max_baseline_ratio)
-    SET_DOUBLE("waveform.overload_max_delta_multiplier", waveform_overload_max_delta_multiplier)
-    SET_DOUBLE("waveform.underload_max_delta_multiplier", waveform_underload_max_delta_multiplier)
-    SET_U32("waveform.overload_confirmations", waveform_overload_confirmations)
-    SET_BOOL("waveform.queue_guard_enabled", waveform_queue_guard_enabled)
-    SET_DOUBLE("waveform.queue_low_min_rtt_ratio", waveform_queue_low_min_rtt_ratio)
-    SET_DOUBLE("waveform.queue_target_min_rtt_ratio", waveform_queue_target_min_rtt_ratio)
-    SET_DOUBLE("waveform.queue_high_min_rtt_ratio", waveform_queue_high_min_rtt_ratio)
     SET_DOUBLE("waveform.plateau_min_duration_ratio", waveform_plateau_min_duration_ratio)
     SET_DOUBLE("waveform.plateau_max_slope_ratio", waveform_plateau_max_slope_ratio)
     SET_DOUBLE("waveform.plateau_max_level_span_ratio", waveform_plateau_max_level_span_ratio)
@@ -411,6 +358,7 @@ bool SetFBBRConfigValue(FBBRConfig* config,
     SET_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio", waveform_inconclusive_signal_amplification_max_ratio)
     SET_DOUBLE("waveform.max_app_limited_sample_ratio", waveform_max_app_limited_sample_ratio)
     SET_DOUBLE("waveform.max_interpolation_gap_period_ratio", waveform_max_interpolation_gap_period_ratio)
+    SET_DOUBLE("goertzel.min_coherent_power_ratio", goertzel_min_coherent_power_ratio)
     SET_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
     SET_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
     SET_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
@@ -723,16 +671,13 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         }
     }
 		    // Configure FBBR oscillation parameters
-		    if(cc_type == kFBBR || cc_type == kFBBRAdaptive ||
-               cc_type == kFBBRHybrid || cc_type == kFBBRHybridV3 ||
-               cc_type == kFBBRServiceFair){
+		    if(cc_type == kFBBR || cc_type == kFBBRServiceFair){
 	        sendApp->ConfigureFBBR(g_fbbr_config, flow_index);
 	        sendApp->ConfigureFBBRConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
 	                                                  g_gate_trace_mode,
 	                                                  g_gate_trace_sample_interval_us);
-        sendApp->SetFreqCCIntervalWindowMultiplier(g_interval_window_rtt_mult);
-        sendApp->SetFreqCCFairShareBandwidth(fair_share_bps);
+        sendApp->SetFBBRFairShareBandwidth(fair_share_bps);
     }
     return sendApp;
 }
@@ -858,20 +803,13 @@ void ns3_fbbr(int ins, std::string algo, DqcTraceState *stat, double sim_time=60
     dqc::CongestionControlType cc = kFBBR;
     if(algo_key == "BBRv2"){
         cc = kBBRv2;
-    } else if(algo_key == "FBBR-adaptive"){
-        cc = kFBBRAdaptive;
-    } else if(algo_key == "FBBR-hybrid"){
-        cc = kFBBRHybrid;
-    } else if(algo_key == "FBBR-hybridv3"){
-        cc = kFBBRHybridV3;
     } else if(algo_key == "FBBR-ServiceFair"){
         cc = kFBBRServiceFair;
     } else if(algo_key == "FBBR"){
         cc = kFBBR;
     } else {
         NS_ABORT_MSG("unsupported algorithm: " << algo
-                                               << " (supported: FBBR, "
-                                                  "FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-ServiceFair, BBRv2)");
+                                               << " (supported: FBBR, FBBR-ServiceFair, BBRv2)");
     }
 
     uint32_t max_bps=0;
@@ -1015,7 +953,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.AddValue("outputDir", "Output trace directory path", output_dir);
-    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-ServiceFair, or BBRv2", algo);
+    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-ServiceFair, or BBRv2", algo);
     cmd.AddValue("runId", "ns-3 RNG run id", run_id);
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FBBR convergence-gate CSV trace", g_enable_convergence_gate_trace);
@@ -1028,15 +966,6 @@ int main (int argc, char *argv[]){
     cmd.AddValue("enableHeavyTrace", "Enable per-packet/per-pacing heavy trace callbacks", g_enable_heavy_trace);
     cmd.AddValue("gateTraceMode", "FBBR gate trace mode: off, round_only, sampled_pacing, full", g_gate_trace_mode);
 	    cmd.AddValue("gateTraceSampleIntervalUs", "Minimum interval for sampled_pacing gate trace rows", g_gate_trace_sample_interval_us);
-	    cmd.AddValue("gateStateMachineSelfTest", "Run synthetic convergence-gate state-machine self-test and exit", g_gate_state_machine_self_test);
-	    cmd.AddValue("trustedBwSelectionSelfTest", "Run TrustedBw dual-signal selection self-test and exit", g_trusted_bw_selection_self_test);
-	    cmd.AddValue("trustedBwPacingSelfTest", "Run TrustedBw pacing-baseline self-test and exit", g_trusted_bw_pacing_self_test);
-	    cmd.AddValue("waveformCruiseSelfTest", "Run deterministic time-waveform CRUISE self-test and exit", g_waveform_cruise_self_test);
-	    cmd.AddValue("fbbrHybridSelfTest", "Run FBBR-hybrid N01-N15 and boundary self-test and exit", g_fbbr_hybrid_self_test);
-	    cmd.AddValue("fbbrHybridV3SelfTest", "Run FBBR-hybridv3 projection self-test and exit", g_fbbr_hybrid_v3_self_test);
-	    cmd.AddValue("fbbrSelfTest", "Run FBBR service-envelope self-test and exit", g_fbbr_self_test);
-	    cmd.AddValue("fbbrServiceFairSelfTest", "Run FBBR-ServiceFair fairness self-test and exit", g_fbbr_service_fair_self_test);
-	    cmd.AddValue("cruiseDetectorMode", "CRUISE detector: time_waveform or legacy_spectral", g_fbbr_config.cruise_detector_mode);
 	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_fbbr_config.waveform_recv_signal_mode);
 	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_fbbr_config.waveform_initial_settle_rtt_mult);
 	    cmd.AddValue("waveformPostAdjustSettleRttMult", "Post-adjust waveform settle RTT multiplier", g_fbbr_config.waveform_post_adjust_settle_rtt_mult);
@@ -1047,15 +976,6 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformPeriodToleranceRatio", "Waveform period error tolerance", g_fbbr_config.waveform_period_tolerance_ratio);
 	    cmd.AddValue("waveformMinCycleCoverageRatio", "Minimum waveform cycle coverage", g_fbbr_config.waveform_min_cycle_coverage_ratio);
 	    cmd.AddValue("waveformMaskedMinCycleCoverageRatio", "Minimum coverage after masking sequential middle plateaus", g_fbbr_config.waveform_masked_min_cycle_coverage_ratio);
-	    cmd.AddValue("waveformMinCompletenessScore", "Minimum waveform completeness score", g_fbbr_config.waveform_min_completeness_score);
-	    cmd.AddValue("waveformMinRisingDurationRatio", "Minimum rising duration ratio", g_fbbr_config.waveform_min_rising_duration_ratio);
-	    cmd.AddValue("waveformMinFallingDurationRatio", "Minimum falling duration ratio", g_fbbr_config.waveform_min_falling_duration_ratio);
-	    cmd.AddValue("waveformMinShapeNcc", "Minimum auxiliary waveform NCC", g_fbbr_config.waveform_min_shape_ncc);
-	    cmd.AddValue("waveformMinSlopeDirectionAgreement", "Minimum waveform slope-direction agreement", g_fbbr_config.waveform_min_slope_direction_agreement);
-	    cmd.AddValue("waveformMinDrateNcc", "Minimum Delivery Rate ZNCC", g_fbbr_config.waveform_min_drate_ncc);
-	    cmd.AddValue("waveformMinSrttIntegralNcc", "Minimum SRTT integral-template ZNCC", g_fbbr_config.waveform_min_srtt_integral_ncc);
-	    cmd.AddValue("waveformMinSrttDerivativeNcc", "Minimum SRTT derivative-template ZNCC", g_fbbr_config.waveform_min_srtt_derivative_ncc);
-	    cmd.AddValue("waveformMinResponseSnr", "Minimum robust fitted response SNR", g_fbbr_config.waveform_min_response_snr);
 	    cmd.AddValue("waveformLocalSlopeWindowPeriodRatio", "SRTT local slope window as period ratio", g_fbbr_config.waveform_local_slope_window_period_ratio);
 	    cmd.AddValue("waveformMinLocalSlopeWindowMs", "Minimum SRTT local slope window in ms", g_fbbr_config.waveform_min_local_slope_window_ms);
 	    cmd.AddValue("waveformClipMinDurationRatio", "Minimum half-cycle clipping duration ratio", g_fbbr_config.waveform_clip_min_duration_ratio);
@@ -1063,7 +983,6 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformClipMaxSlopeRatio", "Maximum clipping slope ratio", g_fbbr_config.waveform_clip_max_slope_ratio);
 	    cmd.AddValue("waveformDeltaDrateAmplitudeRatio", "Search delta ratio of recent Delivery Rate amplitude", g_fbbr_config.waveform_delta_drate_amplitude_ratio);
 	    cmd.AddValue("waveformDeltaFallbackBaselineRatio", "Fallback search delta ratio of injection baseline", g_fbbr_config.waveform_delta_fallback_baseline_ratio);
-	    cmd.AddValue("waveformAdaptiveDeltaFallbackBaselineRatio", "Deprecated Adaptive compatibility option; the bracket controller ignores it", g_fbbr_config.waveform_adaptive_delta_fallback_baseline_ratio);
 	    cmd.AddValue("waveformPlateauMinDurationRatio", "Minimum plateau duration ratio", g_fbbr_config.waveform_plateau_min_duration_ratio);
 	    cmd.AddValue("waveformPlateauMaxSlopeRatio", "Maximum plateau slope ratio", g_fbbr_config.waveform_plateau_max_slope_ratio);
 	    cmd.AddValue("waveformPlateauMaxLevelSpanRatio", "Maximum plateau level span ratio", g_fbbr_config.waveform_plateau_max_level_span_ratio);
@@ -1083,18 +1002,6 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("stabilityConsecutiveExitThreshold", "TrustedBw selection MaxDRate consecutive exit threshold", g_fbbr_config.stability_consecutive_exit_threshold);
 	    cmd.AddValue("stabilityStableRounds", "TrustedBw selection stable rounds", g_fbbr_config.stability_stable_rounds);
 	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "TrustedBw selection full-pipe growth threshold", g_fbbr_config.stability_full_pipe_growth_threshold);
-	    cmd.AddValue("spectralDrateIntegrityThreshold", "Delivery Rate spectral integrity threshold", g_fbbr_config.spectral_drate_integrity_threshold);
-	    cmd.AddValue("spectralSrttIntegrityThreshold", "SRTT spectral integrity threshold", g_fbbr_config.spectral_srtt_integrity_threshold);
-	    cmd.AddValue("spectralMinDrateSnr", "Spectral Validity Gate V2 minimum DRate SNR", g_fbbr_config.spectral_min_drate_snr);
-	    cmd.AddValue("spectralMinSrttSnr", "Spectral Validity Gate V2 minimum SRTT SNR", g_fbbr_config.spectral_min_srtt_snr);
-	    cmd.AddValue("spectralMaxDrateWidthRatio", "Spectral Validity Gate V2 maximum DRate width ratio", g_fbbr_config.spectral_max_drate_width_ratio);
-	    cmd.AddValue("spectralMaxSrttWidthRatio", "Spectral Validity Gate V2 maximum SRTT width ratio", g_fbbr_config.spectral_max_srtt_width_ratio);
-	    cmd.AddValue("spectralMinDratePhaseCoherence", "Spectral Validity Gate V2 minimum DRate phase coherence", g_fbbr_config.spectral_min_drate_phase_coherence);
-	    cmd.AddValue("spectralMinSrttPhaseCoherence", "Spectral Validity Gate V2 minimum SRTT phase coherence", g_fbbr_config.spectral_min_srtt_phase_coherence);
-	    cmd.AddValue("mergedRescueEnable", "Enable merged-window rescue", g_fbbr_config.merged_rescue_enable);
-	    cmd.AddValue("mergedRescueWindowMultiplier", "Merged-window rescue duration multiplier", g_fbbr_config.merged_rescue_window_multiplier);
-	    cmd.AddValue("mergedRescueMaxPasses", "Merged-window rescue max passes", g_fbbr_config.merged_rescue_max_passes);
-	    cmd.AddValue("mergedRescueMaxTrendRatio", "Merged-window rescue max trend ratio", g_fbbr_config.merged_rescue_max_trend_ratio);
 	    // Per-flow parameters
     cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
     cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);
@@ -1108,34 +1015,9 @@ int main (int argc, char *argv[]){
     cmd.AddValue("fixed2", "Flow 2 fixed amplitude (Mbps)", g_fixed_mbps[1]);
     cmd.AddValue("fixed3", "Flow 3 fixed amplitude (Mbps)", g_fixed_mbps[2]);
     cmd.AddValue("fixed4", "Flow 4 fixed amplitude (Mbps)", g_fixed_mbps[3]);
-    cmd.AddValue("interval_win_rtt_mult", "Interval-phase STFT window multiplier on min_rtt", g_interval_window_rtt_mult);
 	    cmd.AddValue("dynamic_delay_enable", "Enable scheduled propagation delay changes at 4,7,12,18,22,27s", g_dynamic_delay_enable);
 	    cmd.Parse(argc, argv);
 	    ApplyGlobalsToFBBRConfig(&g_fbbr_config);
-	    if(g_gate_state_machine_self_test){
-	        return FBBRSender::RunConvergenceGateStateMachineSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_trusted_bw_selection_self_test){
-	        return FBBRSender::RunTrustedBwSelectionSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_trusted_bw_pacing_self_test){
-	        return FBBRSender::RunTrustedBwPacingSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_waveform_cruise_self_test){
-	        return FBBRSender::RunWaveformCruiseSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_fbbr_hybrid_self_test){
-	        return FBBRSender::RunFbbrHybridSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_fbbr_hybrid_v3_self_test){
-	        return FBBRSender::RunFbbrHybridV3SelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_fbbr_self_test){
-	        return FBBRSender::RunFbbrSelfTest(std::cout) ? 0 : 1;
-	    }
-	    if(g_fbbr_service_fair_self_test){
-	        return FBBRSender::RunFbbrServiceFairSelfTest(std::cout) ? 0 : 1;
-	    }
     if(g_smoke_mode){
         sim_time = std::min(sim_time, 0.5);
         if(g_flow_size_bytes == 0 || g_flow_size_bytes > 20000ULL){
@@ -1171,13 +1053,8 @@ int main (int argc, char *argv[]){
     std::cout << "Congestion control: " << algo << std::endl;
 	    std::cout << "Run id / seed: " << run_id << " / " << seed << std::endl;
 	    std::cout << "FreqBBR config: " << g_fbbr_config_path << std::endl;
-	    std::cout << "CRUISE detector / receive signal: "
-	              << g_fbbr_config.cruise_detector_mode << " / "
-	              << (g_fbbr_config.cruise_detector_mode ==
-	                          "legacy_spectral"
-	                      ? "bandwidth_latest (legacy)"
-	                      : g_fbbr_config.waveform_recv_signal_mode)
-	              << std::endl;
+	    std::cout << "CRUISE detector / receive signal: time_waveform / "
+	              << "delivery_rate_latest" << std::endl;
 	    std::cout << "Flow start mode: " << g_flow_start_mode << std::endl;
     std::cout << "Flow size bytes: " << g_flow_size_bytes << std::endl;
     std::cout << "Process interval us: " << g_process_interval_us << std::endl;
@@ -1201,7 +1078,6 @@ int main (int argc, char *argv[]){
     for(int i = 0; i < NUM_FLOWS; i++){
         std::cout << "  Flow " << (i+1) << ": freq=" << g_freq_hz[i] << "Hz, amp=" << g_amp_mode[i] << ", fixed=" << g_fixed_mbps[i] << "Mbps" << std::endl;
     }
-    std::cout << "Interval window multiplier: " << g_interval_window_rtt_mult << " * min_rtt" << std::endl;
     if (g_dynamic_delay_enable) {
         std::cout << "Dynamic propagation delay schedule:" << std::endl;
         std::cout << "  t=4s:  edge=1ms, bottleneck=8ms, path_rtt=20ms" << std::endl;

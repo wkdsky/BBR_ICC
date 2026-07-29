@@ -11,7 +11,8 @@ const float kBeta = 0.25f;
 const float kOneMinusBeta = (1 - kBeta);
 
 RttStats::RttStats()
-    : latest_rtt_(TimeDelta::Zero()),
+    : latest_raw_rtt_(TimeDelta::Zero()),
+      latest_rtt_(TimeDelta::Zero()),
       min_rtt_(TimeDelta::Zero()),
       smoothed_rtt_(TimeDelta::Zero()),
       previous_srtt_(TimeDelta::Zero()),
@@ -51,6 +52,7 @@ void RttStats::UpdateRtt(TimeDelta send_delta,
     return;
   }
   last_update_time_ = now;
+  latest_raw_rtt_ = send_delta;
   // Update min_rtt_ first. min_rtt_ does not use an rtt_sample corrected for
   // ack_delay but the raw observed send_delta, since poor clock granularity at
   // the client may cause a high ack_delay to result in underestimation of the
@@ -92,6 +94,7 @@ void RttStats::UpdateRtt(TimeDelta send_delta,
 
 void RttStats::OnConnectionMigration()
 {
+  latest_raw_rtt_ = TimeDelta::Zero();
   latest_rtt_ = TimeDelta::Zero();
   min_rtt_ = TimeDelta::Zero();
   smoothed_rtt_ = TimeDelta::Zero();

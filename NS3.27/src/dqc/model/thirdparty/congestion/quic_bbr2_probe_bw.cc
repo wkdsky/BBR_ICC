@@ -210,7 +210,8 @@ void Bbr2ProbeBwMode::UpdateProbeDown(
     return;
   }
 
-  if (IsTimeToProbeBandwidth(congestion_event)) {
+  if (IsTimeToProbeBandwidth(congestion_event) &&
+      !sender_->ShouldBlockNativeProbeUpForExperiment()) {
     EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
     return;
   }
@@ -512,6 +513,7 @@ void Bbr2ProbeBwMode::UpdateProbeCruise(
   }
 
   if (IsTimeToProbeBandwidth(congestion_event) &&
+      !sender_->ShouldBlockNativeProbeUpForExperiment() &&
       !sender_->ShouldDelayProbeBwCruiseExit(congestion_event.event_time)) {
     EnterProbeRefill(/*probe_up_rounds=*/0, congestion_event.event_time);
     return;
@@ -525,6 +527,10 @@ void Bbr2ProbeBwMode::UpdateProbeRefill(
   DCHECK(!cycle_.is_sample_from_probing);
 
   if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
+    if (sender_->ShouldBlockNativeProbeUpForExperiment()) {
+      EnterProbeCruise(congestion_event.event_time);
+      return;
+    }
     if (sender_->EnablePlusProbeBwPhases()) {
       EnterProbePreUp(congestion_event.event_time);
     } else {
@@ -552,7 +558,8 @@ void Bbr2ProbeBwMode::UpdateProbeGuard(
   DCHECK(!cycle_.is_sample_from_probing);
 
   if (cycle_.rounds_in_phase > 0 && congestion_event.end_of_round_trip) {
-    if (sender_->ShouldEnterProbeUpFromGuard()) {
+    if (!sender_->ShouldBlockNativeProbeUpForExperiment() &&
+        sender_->ShouldEnterProbeUpFromGuard()) {
       EnterProbeUp(congestion_event.event_time);
     } else {
       EnterProbeDownSlightly(congestion_event.event_time);
@@ -564,6 +571,15 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
     QuicByteCount prior_in_flight,
     const Bbr2CongestionEvent& congestion_event) {
   DCHECK_EQ(cycle_.phase, CyclePhase::PROBE_UP);
+  if (sender_->ExperimentalForcedProbeUpMustExit(
+          congestion_event.event_time)) {
+    // This is a hard upper bound only for the strict experiment.  It prevents
+    // a pathological queue-free UP from holding the shared token forever.
+    sender_->ExperimentalForcedProbeUpExitAllowed(congestion_event.event_time);
+    EnterProbeDown(/*probed_too_high=*/false, /*stopped_risky_probe=*/false,
+                   congestion_event.event_time);
+    return;
+  }
   if (MaybeAdaptUpperBounds(congestion_event) == ADAPTED_PROBED_TOO_HIGH) {
     if (!sender_->ExperimentalForcedProbeUpExitAllowed(
             congestion_event.event_time)) {
@@ -648,6 +664,10 @@ void Bbr2ProbeBwMode::UpdateProbeUp(
   if (cycle_.rounds_in_phase > 0 &&
       congestion_event.end_of_round_trip &&
       sender_->ShouldExitProbeUpAfterRound()) {
+    if (!sender_->ExperimentalForcedProbeUpExitAllowed(
+            congestion_event.event_time)) {
+      return;
+    }
     EnterProbeDown(/*probed_too_high=*/false,
                    /*stopped_risky_probe=*/false,
                    congestion_event.event_time);

@@ -150,8 +150,18 @@ class ProtoBbrSender : public SendAlgorithmInterface {
   virtual bool ShouldRefreshMinRttTimestamp(TimeDelta sample_min_rtt,
                                             TimeDelta current_min_rtt,
                                             bool min_rtt_expired) const;
+  // Receives the most recent raw RTT carried by a valid bandwidth sample after
+  // the BBR model has incorporated the ACK event.
+  virtual void OnUpdatedRttSample(TimeDelta sample_rtt);
   virtual TimeDelta GetGainCycleDuration() const;
   virtual bool RequireDrainTargetBeforeGainCycleAdvance() const;
+  // BBR-R's Linux reference evaluates both gain-cycle targets against the
+  // pre-ACK inflight amount and requires a strict probe target crossing.
+  virtual bool UsePriorInflightForGainCycleDrain() const;
+  virtual bool RequireProbeInflightStrictlyAboveTarget() const;
+  // Linux BBRv1 does not add QUIC's ACK-aggregation allowance to CWND.
+  virtual bool ShouldAddAckAggregationToCongestionWindow() const;
+  virtual float GetProbeBandwidthCongestionWindowGain() const;
 
  private:
   typedef WindowedFilter<QuicBandwidth,

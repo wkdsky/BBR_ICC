@@ -396,15 +396,10 @@ void DqcTrace::OnFBBRLoad(double window_start_s, double window_end_s,
         if(m_fbbrCruiseSummary.is_open()){
             m_fbbrCruiseSummary<<diagnostics<<"\n";
         }
-    }else if(label == "V3_FLOW_SUMMARY"){
-        OpenFBBRV3SummaryFile();
-        if(m_fbbrV3Summary.is_open()){
-            m_fbbrV3Summary<<diagnostics<<"\n";
-        }
-    }else if(label == "V4_FLOW_SUMMARY"){
-        OpenFBBRV4SummaryFile();
-        if(m_fbbrV4Summary.is_open()){
-            m_fbbrV4Summary<<diagnostics<<"\n";
+    }else if(label == "FBBR_FLOW_SUMMARY"){
+        OpenFBBRSummaryFile();
+        if(m_fbbrSummary.is_open()){
+            m_fbbrSummary<<diagnostics<<"\n";
         }
     }else{
         OpenFBBRLoadFile();
@@ -450,8 +445,7 @@ void DqcTrace::Close(){
     CloseFBBRGateFile();
     CloseFBBRWaveformSearchFile();
     CloseFBBRServiceFairnessFile();
-    CloseFBBRV3SummaryFile();
-    CloseFBBRV4SummaryFile();
+    CloseFBBRSummaryFile();
     CloseStatsFile();
 }
 void DqcTrace::CloseOwdFile(){
@@ -565,16 +559,10 @@ void DqcTrace::CloseFBBRServiceFairnessFile(){
         m_fbbrServiceFairness.close();
     }
 }
-void DqcTrace::CloseFBBRV3SummaryFile(){
-    if(m_fbbrV3Summary.is_open()){
-        m_fbbrV3Summary.flush();
-        m_fbbrV3Summary.close();
-    }
-}
-void DqcTrace::CloseFBBRV4SummaryFile(){
-    if(m_fbbrV4Summary.is_open()){
-        m_fbbrV4Summary.flush();
-        m_fbbrV4Summary.close();
+void DqcTrace::CloseFBBRSummaryFile(){
+    if(m_fbbrSummary.is_open()){
+        m_fbbrSummary.flush();
+        m_fbbrSummary.close();
     }
 }
 void DqcTrace::CloseStatsFile(){
@@ -692,24 +680,12 @@ void DqcTrace::OpenFBBRCruiseSummaryFile(){
 	                                <<",waveform_amplitude_reductions"
 	                                <<",waveform_underload_located"
 		                                <<",waveform_trusted_source"
-		                                <<",adaptive_bounds_inherited"
-		                                <<",adaptive_cruise_start_max_bw_bps"
-		                                <<",adaptive_baseline_low_valid"
-		                                <<",adaptive_baseline_low_bps"
-		                                <<",adaptive_baseline_up_valid"
-		                                <<",adaptive_baseline_up_bps"
-		                                <<",adaptive_srtt_low_valid"
-		                                <<",adaptive_srtt_low_ms"
-		                                <<",adaptive_srtt_up_valid"
-		                                <<",adaptive_srtt_up_ms"
-		                                <<",hybrid_baseline_low_valid"
-		                                <<",hybrid_baseline_low_bps"
-		                                <<",hybrid_max_bw_valid"
-		                                <<",hybrid_max_bw_bps"
-		                                <<",hybrid_srtt_low_rtprop_valid"
-		                                <<",hybrid_srtt_low_rtprop_ms"
-		                                <<",hybrid_max_srtt_valid"
-		                                <<",hybrid_max_srtt_ms"
+		                                <<",fbbr_max_bw_valid"
+		                                <<",fbbr_max_bw_bps"
+		                                <<",fbbr_srtt_low_rtprop_valid"
+		                                <<",fbbr_srtt_low_rtprop_ms"
+		                                <<",fbbr_max_srtt_valid"
+		                                <<",fbbr_max_srtt_ms"
 		                                <<std::endl;
     }
 }
@@ -742,11 +718,17 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",sender_sample_count,drate_sample_count,srtt_sample_count"
             <<",srtt_stat_sample_count,srtt_stats_valid"
             <<",srtt_window_mean_ms,srtt_window_min_ms,srtt_window_max_ms"
-            <<",latest_waveform_overload_srtt_mean_valid"
-            <<",latest_waveform_overload_srtt_mean_ms"
-            <<",latest_waveform_underload_srtt_mean_valid"
-            <<",latest_waveform_underload_srtt_mean_ms"
             <<",coverage_ratio,app_limited_ratio,sender_waveform_valid"
+            <<",goertzel_target_frequency_hz"
+            <<",sender_goertzel_input_valid,sender_goertzel_component_present"
+            <<",sender_goertzel_real,sender_goertzel_imag,sender_goertzel_phase_rad"
+            <<",sender_goertzel_power,sender_goertzel_amplitude"
+            <<",sender_goertzel_coherent_power_ratio,sender_goertzel_reason"
+            <<",drate_goertzel_input_valid,drate_goertzel_component_present"
+            <<",drate_goertzel_real,drate_goertzel_imag,drate_goertzel_phase_rad"
+            <<",drate_goertzel_power,drate_goertzel_amplitude"
+            <<",drate_goertzel_coherent_power_ratio,drate_goertzel_reason"
+            <<",goertzel_component_match"
             <<",best_lag_s"
             <<",srtt_input_valid,srtt_similar_frequency,srtt_similar"
             <<",srtt_similar_without_middle,srtt_effective_similar"
@@ -828,12 +810,6 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",boundary_lift_time_s"
             <<",boundary_delta_bps,amplitude_reduction"
             <<",clip_floor_confirmation"
-            <<",adaptive_bounds_inherited"
-            <<",adaptive_cruise_start_max_bw_bps"
-            <<",adaptive_baseline_low_valid,adaptive_baseline_low_bps"
-            <<",adaptive_baseline_up_valid,adaptive_baseline_up_bps"
-            <<",adaptive_srtt_low_valid,adaptive_srtt_low_ms"
-            <<",adaptive_srtt_up_valid,adaptive_srtt_up_ms"
             <<",algorithm_mode,regime_pipeline_owner,regime_actuator_owner"
             <<",regime_rule_id,unsuppressed_regime"
             <<",srtt_suspected_top_candidate,srtt_suspected_bottom_candidate"
@@ -878,21 +854,17 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",estimated_srate_period_s,srtt_estimated_period_s,drate_estimated_period_s"
             <<",srtt_srate_period_error_ratio,drate_srate_period_error_ratio"
             <<",srtt_edge_mask_ratio,drate_edge_mask_ratio"
-            <<",hybrid_inflight_bdp_valid,hybrid_inflight_bytes,hybrid_bdp_bytes"
+            <<",fbbr_inflight_bdp_valid,fbbr_inflight_bytes,fbbr_bdp_bytes"
             <<",max_srtt_valid,max_srtt_before_ms,max_srtt_after_ms"
-            <<",rtprop_drate_valid,rtprop_drate_before_bps,rtprop_drate_after_bps"
-            <<",hybrid_baseline_low_before_valid,hybrid_baseline_low_before_bps"
-            <<",hybrid_baseline_low_after_valid,hybrid_baseline_low_after_bps"
-            <<",hybrid_max_bw_before_valid,hybrid_max_bw_before_bps"
-            <<",hybrid_max_bw_after_valid,hybrid_max_bw_after_bps"
-            <<",hybrid_srtt_low_rtprop_valid,hybrid_srtt_low_rtprop_ms"
-            <<",hybrid_max_srtt_valid,hybrid_max_srtt_ms"
-            <<",hybrid_swing_bps,hybrid_reference_gap_bps"
-            <<",hybrid_regime_i_maxdrate_triggered"
-            <<",hybrid_regime_i_maxbw_midpoint_valid"
-            <<",hybrid_regime_i_maxbw_midpoint_bps"
-            <<",hybrid_regime_i_maxbw_midpoint_triggered"
-            <<",hybrid_regime_i_growth_triggered"
+            <<",fbbr_max_bw_before_valid,fbbr_max_bw_before_bps"
+            <<",fbbr_max_bw_after_valid,fbbr_max_bw_after_bps"
+            <<",fbbr_rtprop_valid,fbbr_rtprop_ms"
+            <<",fbbr_max_srtt_valid,fbbr_max_srtt_ms"
+            <<",fbbr_regime_i_maxdrate_triggered"
+            <<",fbbr_regime_i_maxbw_midpoint_valid"
+            <<",fbbr_regime_i_maxbw_midpoint_bps"
+            <<",fbbr_regime_i_maxbw_midpoint_triggered"
+            <<",fbbr_regime_i_growth_triggered"
             <<",window_first_cycle_id,window_second_cycle_id"
             <<",srtt_no_wave_streak,drate_no_wave_streak"
             <<",wave_fidelity_enhancement_active,wave_fidelity_just_entered"
@@ -902,20 +874,15 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",inconclusive_extension_count,inconclusive_amplification_count"
             <<",initial_probe_amplitude_bps,current_probe_amplitude_bps"
             <<",inconclusive_amplitude_cap_bps,rolling_retry_count"
-            <<",v3_reference_bw,v3_reference_source"
-            <<",v3_model_inflight,v3_inflight_cap,v3_native_cwnd"
-            <<",v3_actual_inflight,v3_raw_queue_debt"
-            <<",v3_enforced_excess,v3_cap_binding_fraction"
-            <<",v3_history_valid"
-            <<",v4_previous_trusted_bw,v4_previous_trusted_source"
-            <<",v4_plan_inflight,v4_service_inflight"
-            <<",v4_positive_probe_credit,v4_service_budget"
-            <<",v4_envelope,v4_extra_acked,v4_inflight_cap"
-            <<",v4_native_cwnd,v4_actual_inflight"
-            <<",v4_service_history_valid"
-            <<",v4_app_limited_contaminated"
-            <<",v4_projection_active,v4_service_restriction"
-            <<",v4_enforced_excess,v4_cap_binding_fraction\n";
+            <<",fbbr_previous_trusted_bw,fbbr_previous_trusted_source"
+            <<",fbbr_plan_inflight,fbbr_service_inflight"
+            <<",fbbr_positive_probe_credit,fbbr_service_budget"
+            <<",fbbr_envelope,fbbr_extra_acked,fbbr_inflight_cap"
+            <<",fbbr_native_cwnd,fbbr_actual_inflight"
+            <<",fbbr_service_history_valid"
+            <<",fbbr_app_limited_contaminated"
+            <<",fbbr_projection_active,fbbr_service_restriction"
+            <<",fbbr_enforced_excess,fbbr_cap_binding_fraction\n";
     }
 }
 void DqcTrace::OpenFBBRServiceFairnessFile(){
@@ -942,44 +909,21 @@ void DqcTrace::OpenFBBRServiceFairnessFile(){
             <<",final_regime_candidate\n";
     }
 }
-void DqcTrace::OpenFBBRV3SummaryFile(){
-    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrV3Summary.is_open()) return;
+void DqcTrace::OpenFBBRSummaryFile(){
+    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrSummary.is_open()) return;
     char buf[FILENAME_MAX];
     memset(buf,0,FILENAME_MAX);
     std::string path;
     if(0==kDqcTracePath.size()){
         path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
-            +std::to_string(m_id)+"_v3_projection_summary.csv";
+            +std::to_string(m_id)+"_fbbr_service_envelope_summary.csv";
     }else{
         path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
-            +"_v3_projection_summary.csv";
+            +"_fbbr_service_envelope_summary.csv";
     }
-    m_fbbrV3Summary.open(path.c_str(), std::fstream::out);
-    if(m_fbbrV3Summary.is_open()){
-        m_fbbrV3Summary
-            <<"algorithm,flow_id,reference_trusted_time_ratio"
-            <<",reference_guard_time_ratio,reference_last_valid_time_ratio"
-            <<",reference_invalid_time_ratio,projection_active_time_ratio"
-            <<",history_invalid_time_ratio,cap_binding_time_ratio"
-            <<",mean_model_inflight,mean_raw_queue_debt,p95_raw_queue_debt"
-            <<",mean_enforced_excess,p95_enforced_excess\n";
-    }
-}
-void DqcTrace::OpenFBBRV4SummaryFile(){
-    if(!(m_enable & E_DQC_FBBR_LOAD) || m_fbbrV4Summary.is_open()) return;
-    char buf[FILENAME_MAX];
-    memset(buf,0,FILENAME_MAX);
-    std::string path;
-    if(0==kDqcTracePath.size()){
-        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
-            +std::to_string(m_id)+"_v4_service_envelope_summary.csv";
-    }else{
-        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
-            +"_v4_service_envelope_summary.csv";
-    }
-    m_fbbrV4Summary.open(path.c_str(), std::fstream::out);
-    if(m_fbbrV4Summary.is_open()){
-        m_fbbrV4Summary
+    m_fbbrSummary.open(path.c_str(), std::fstream::out);
+    if(m_fbbrSummary.is_open()){
+        m_fbbrSummary
             <<"algorithm,flow_id,previous_trusted_time_ratio"
             <<",previous_trusted_guard_source_time_ratio"
             <<",previous_trusted_invalid_time_ratio"

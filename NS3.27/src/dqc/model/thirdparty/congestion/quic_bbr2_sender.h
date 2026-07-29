@@ -179,11 +179,28 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   // PROBE_UP entry at the first PROBE_BW ACK event on or after the target time.
   void SetExperimentalForcedProbeUp(QuicTime probe_up_time,
                                     TimeDelta min_probe_up_duration);
+  // Strict mode is an experiment-only scheduler.  It suppresses all native
+  // PROBE_UP entries for enrolled senders and grants the UP token to the
+  // configured order one flow at a time.
+  void SetExperimentalStrictProbeUp(uint32_t probe_order,
+                                    uint32_t total_probe_orders,
+                                    QuicTime probe_up_time,
+                                    TimeDelta min_probe_up_duration,
+                                    TimeDelta max_probe_up_duration);
   bool ShouldForceProbeUp(QuicTime now) const;
   void MarkExperimentalForcedProbeUpStarted(QuicTime now);
-  bool ExperimentalForcedProbeUpExitAllowed(QuicTime now) const;
+  bool ExperimentalForcedProbeUpExitAllowed(QuicTime now);
+  bool ExperimentalForcedProbeUpMustExit(QuicTime now) const;
+  bool ShouldBlockNativeProbeUpForExperiment() const;
   void SetExperimentalMaxCongestionWindowPackets(
       QuicPacketCount max_cwnd_in_packets);
+
+  using ExperimentProbePhaseTraceCallback = std::function<void(
+      Bbr2ProbeBwMode::CyclePhase phase, QuicTime now)>;
+  void SetExperimentProbePhaseTraceCallback(
+      ExperimentProbePhaseTraceCallback callback) {
+    experiment_probe_phase_trace_callback_ = std::move(callback);
+  }
 
   using QueueDelayTraceCallback =
       std::function<void(uint32_t queue_delay_ms,
@@ -298,6 +315,12 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
   QuicTime experimental_forced_probe_up_time_ = QuicTime::Zero();
   QuicTime experimental_forced_probe_up_start_time_ = QuicTime::Zero();
   TimeDelta experimental_forced_probe_up_min_duration_ = TimeDelta::Zero();
+  bool experimental_strict_probe_up_enabled_ = false;
+  bool experimental_strict_probe_up_finished_ = false;
+  uint32_t experimental_strict_probe_up_order_ = 0;
+  uint32_t experimental_strict_probe_up_total_orders_ = 0;
+  TimeDelta experimental_strict_probe_up_max_duration_ = TimeDelta::Zero();
+  ExperimentProbePhaseTraceCallback experiment_probe_phase_trace_callback_;
   
   QuicByteCount ecn_ce_count_{0};
   QuicByteCount alpha_last_delivered_{0};

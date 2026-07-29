@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <string>
 
 #include "proto_bbr_sender.h"
@@ -27,6 +26,11 @@ class BbrRSender : public ProtoBbrSender {
 
   CongestionControlType GetCongestionControlType() const override;
   std::string GetDebugState() const override;
+  void OnCongestionEvent(bool rtt_updated,
+                         QuicByteCount prior_in_flight,
+                         ProtoTime event_time,
+                         const AckedPacketVector& acked_packets,
+                         const LostPacketVector& lost_packets) override;
 
   bool IsRttAdjustmentActive() const { return adjusting_mode_is_on_; }
   double GetPacingBandwidthFactor() const { return pacing_bandwidth_factor_; }
@@ -38,17 +42,30 @@ class BbrRSender : public ProtoBbrSender {
   bool ShouldRefreshMinRttTimestamp(TimeDelta sample_min_rtt,
                                     TimeDelta current_min_rtt,
                                     bool min_rtt_expired) const override;
+  void OnUpdatedRttSample(TimeDelta sample_rtt) override;
   TimeDelta GetGainCycleDuration() const override;
   bool RequireDrainTargetBeforeGainCycleAdvance() const override;
+  bool UsePriorInflightForGainCycleDrain() const override;
+  bool RequireProbeInflightStrictlyAboveTarget() const override;
+  bool ShouldAddAckAggregationToCongestionWindow() const override;
+  float GetProbeBandwidthCongestionWindowGain() const override;
 
  private:
-  void ResetRttAdjustment(TimeDelta base_min_rtt);
+  struct RttMinSample {
+    uint64_t sample_index;
+    int64_t rtt_us;
+  };
 
-  const RttStats* rtt_stats_for_bbr_r_;
-  std::deque<int64_t> recent_inflated_rtt_us_;
+  void ResetRttAdjustment(TimeDelta base_min_rtt);
+  void ResetInflatedRttWindow(uint64_t sample_index, int64_t rtt_us);
+  int64_t UpdateInflatedRttMinimum(int64_t rtt_us);
+
+  RttMinSample inflated_rtt_window_[3];
   uint64_t required_rtt_count_;
   bool adjusting_mode_is_on_;
   TimeDelta min_rtt_for_adjusting_;
+  TimeDelta current_rtt_sample_;
+  bool has_current_rtt_sample_;
   double pacing_bandwidth_factor_;
 };
 

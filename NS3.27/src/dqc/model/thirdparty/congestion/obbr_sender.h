@@ -148,12 +148,6 @@ class ObbrSender : public SendAlgorithmInterface {
                          QuicRoundTripCount>
       MaxBandwidthFilter;
 
-  typedef WindowedFilter<QuicByteCount,
-                         MaxFilter<QuicByteCount>,
-                         QuicRoundTripCount,
-                         QuicRoundTripCount>
-      MaxAckHeightFilter;
-
   // Returns whether the connection has achieved full bandwidth required to exit
   // the slow start.
   bool IsAtFullBandwidth() const;
@@ -199,17 +193,10 @@ class ObbrSender : public SendAlgorithmInterface {
                            bool has_losses,
                            bool is_round_start);
 
-  // Updates the ack aggregation max filter in bytes.
-  // Returns the most recent addition to the filter, or |newly_acked_bytes| if
-  // nothing was fed in to the filter.
-  QuicByteCount UpdateAckAggregationBytes(ProtoTime ack_time,
-                                          QuicByteCount newly_acked_bytes);
-
   // Determines the appropriate pacing rate for the connection.
   void CalculatePacingRate();
   // Determines the appropriate congestion window for the connection.
-  void CalculateCongestionWindow(QuicByteCount bytes_acked,
-                                 QuicByteCount excess_acked);
+  void CalculateCongestionWindow(QuicByteCount bytes_acked);
   // Determines the appropriate window that constrains the in-flight during
   // recovery.
   void CalculateRecoveryWindow(QuicByteCount bytes_acked,
@@ -250,13 +237,6 @@ class ObbrSender : public SendAlgorithmInterface {
   // round-trips.
   MaxBandwidthFilter max_bandwidth_;
   QuicBandwidth bandwidth_latest_;
-
-  // Tracks the maximum number of bytes acked faster than the sending rate.
-  MaxAckHeightFilter max_ack_height_;
-
-  // The time this aggregation started and the number of bytes acked during it.
-  ProtoTime aggregation_epoch_start_time_;
-  QuicByteCount aggregation_epoch_bytes_;
 
   // Minimum RTT estimate.  Automatically expires within 10 seconds (and
   // triggers PROBE_RTT mode) if no new value is sampled during that period.
@@ -355,12 +335,6 @@ class ObbrSender : public SendAlgorithmInterface {
   // Sum of bytes lost in STARTUP.
   QuicByteCount startup_bytes_lost_;
 
-  // When true, add the most recent ack aggregation measurement during STARTUP.
-  bool enable_ack_aggregation_during_startup_;
-  // When true, expire the windowed ack aggregation values in STARTUP when
-  // bandwidth increases more than 25%.
-  bool expire_ack_aggregation_in_startup_;
-
   // If true, will not exit low gain mode until bytes_in_flight drops below BDP
   // or it's time for high gain mode.
   bool drain_to_target_;
@@ -382,6 +356,11 @@ class ObbrSender : public SendAlgorithmInterface {
   const bool always_get_bw_sample_when_acked_;
 
   // oBBR control state.
+  // nginx-quic stores the raw RTT from the latest ACK-frame RTT update and
+  // consumes it whenever a current delivery sample is available.
+  TimeDelta obbr_latest_raw_rtt_;
+  bool obbr_has_latest_raw_rtt_;
+  bool obbr_has_current_delivery_sample_;
   std::deque<QuicBandwidth> obbr_recent_probe_bw_samples_;
   size_t obbr_bw_down_count_;
   size_t obbr_up_rtt_count_;

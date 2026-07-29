@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <functional>
 #include "ns3/event-id.h"
 #include "ns3/callback.h"
 #include "ns3/application.h"
@@ -104,13 +105,13 @@ public:
 	                                          uint64_t gate_trace_sample_interval_us=1000);
     void SetFreqCCIntervalWindowMultiplier(double multiplier);
     void SetFreqCCMinProbeUpDurationRttMultiplier(double multiplier);
-    void SetFreqCCFairShareBandwidth(uint64_t fair_share_bps);
-    void SetFBBRCruiseBaselineCap(uint64_t cap_bps);
+    void SetFBBRFairShareBandwidth(uint64_t fair_share_bps);
     struct Bbr2ExperimentSnapshot {
         int32_t bbr_state{0};
         std::string probe_phase;
         double pacing_gain{0.0};
         uint64_t pacing_rate_bps{0};
+        uint64_t max_bw_bps{0};
         uint64_t delivery_rate_bps{0};
         uint64_t cwnd_bytes{0};
         uint64_t inflight_bytes{0};
@@ -127,6 +128,14 @@ public:
     bool GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) const;
     void SetBbr2ForcedProbeUp(double probe_up_time_s,
                               double min_probe_up_duration_s);
+    void SetBbr2StrictProbeUp(uint32_t probe_order,
+                              uint32_t total_probe_orders,
+                              double probe_up_time_s,
+                              double min_probe_up_duration_s,
+                              double max_probe_up_duration_s);
+    using Bbr2ExperimentPhaseTrace =
+        std::function<void(double, const std::string&)>;
+    void SetBbr2ExperimentPhaseTrace(Bbr2ExperimentPhaseTrace callback);
     void SetBbr2MaxCongestionWindowPackets(uint32_t packets);
     void SetStreamSendBufferBytes(uint32_t bytes);
     void SetPacketLimitBytes(uint64_t bytes);

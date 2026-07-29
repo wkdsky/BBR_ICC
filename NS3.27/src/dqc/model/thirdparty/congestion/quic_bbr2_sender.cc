@@ -27,6 +27,18 @@ const QuicByteCount kDefaultMinimumCongestionWindow = 4 * kMaxSegmentSize;
 const float kInitialPacingGain = 2.885f;
 
 const int kMaxModeChangesPerCongestionEvent = 4;
+
+struct ExperimentalStrictProbeUpScheduler {
+  bool enabled = false;
+  uint32_t total_orders = 0;
+  uint32_t next_order = 1;
+  uint32_t active_order = 0;
+};
+
+ExperimentalStrictProbeUpScheduler& StrictProbeUpScheduler() {
+  static ExperimentalStrictProbeUpScheduler scheduler;
+  return scheduler;
+}
 }  // namespace
 
 // Call |member_function_call| based on the current Bbr2Mode we are in. e.g.
@@ -416,25 +428,103 @@ void Bbr2Sender::SetExperimentalForcedProbeUp(
   experimental_forced_probe_up_min_duration_ = min_probe_up_duration;
 }
 
+void Bbr2Sender::SetExperimentalStrictProbeUp(
+    uint32_t probe_order,
+    uint32_t total_probe_orders,
+    QuicTime probe_up_time,
+    TimeDelta min_probe_up_duration,
+    TimeDelta max_probe_up_duration) {
+  SetExperimentalForcedProbeUp(probe_up_time, min_probe_up_duration);
+  experimental_strict_probe_up_enabled_ = probe_order > 0 &&
+      total_probe_orders > 0 && probe_order <= total_probe_orders;
+  experimental_strict_probe_up_finished_ = false;
+  experimental_strict_probe_up_order_ = probe_order;
+  experimental_strict_probe_up_total_orders_ = total_probe_orders;
+  experimental_strict_probe_up_max_duration_ =
+      max_probe_up_duration < min_probe_up_duration
+          ? min_probe_up_duration
+          : max_probe_up_duration;
+
+  if (!experimental_strict_probe_up_enabled_) {
+    return;
+  }
+
+  // The scenario configures order one first, before Simulator::Run().  Reset
+  // the process-local scheduler so repeated in-process experiments do not
+  // inherit a completed token sequence.
+  if (probe_order == 1) {
+    ExperimentalStrictProbeUpScheduler& scheduler = StrictProbeUpScheduler();
+    scheduler.enabled = true;
+    scheduler.total_orders = total_probe_orders;
+    scheduler.next_order = 1;
+    scheduler.active_order = 0;
+  }
+}
+
 bool Bbr2Sender::ShouldForceProbeUp(QuicTime now) const {
-  return experimental_forced_probe_up_enabled_ &&
-         !experimental_forced_probe_up_started_ &&
-         now >= experimental_forced_probe_up_time_;
+  if (!experimental_forced_probe_up_enabled_ ||
+      experimental_forced_probe_up_started_ ||
+      now < experimental_forced_probe_up_time_) {
+    return false;
+  }
+  if (!experimental_strict_probe_up_enabled_) {
+    return true;
+  }
+  const ExperimentalStrictProbeUpScheduler& scheduler =
+      StrictProbeUpScheduler();
+  return scheduler.enabled && scheduler.active_order == 0 &&
+         scheduler.next_order == experimental_strict_probe_up_order_ &&
+         scheduler.next_order <= scheduler.total_orders;
 }
 
 void Bbr2Sender::MarkExperimentalForcedProbeUpStarted(QuicTime now) {
   experimental_forced_probe_up_started_ = true;
   experimental_forced_probe_up_start_time_ = now;
+  if (experimental_strict_probe_up_enabled_) {
+    ExperimentalStrictProbeUpScheduler& scheduler = StrictProbeUpScheduler();
+    if (scheduler.enabled && scheduler.next_order ==
+                                 experimental_strict_probe_up_order_ &&
+        scheduler.active_order == 0) {
+      scheduler.active_order = experimental_strict_probe_up_order_;
+    }
+  }
 }
 
-bool Bbr2Sender::ExperimentalForcedProbeUpExitAllowed(QuicTime now) const {
+bool Bbr2Sender::ExperimentalForcedProbeUpExitAllowed(QuicTime now) {
   if (!experimental_forced_probe_up_enabled_ ||
       experimental_forced_probe_up_min_duration_.IsZero() ||
       experimental_forced_probe_up_start_time_ == QuicTime::Zero()) {
     return true;
   }
-  return now - experimental_forced_probe_up_start_time_ >=
-         experimental_forced_probe_up_min_duration_;
+  const bool exit_allowed = now - experimental_forced_probe_up_start_time_ >=
+      experimental_forced_probe_up_min_duration_;
+  if (exit_allowed && experimental_strict_probe_up_enabled_ &&
+      !experimental_strict_probe_up_finished_) {
+    ExperimentalStrictProbeUpScheduler& scheduler = StrictProbeUpScheduler();
+    if (scheduler.enabled && scheduler.active_order ==
+                                 experimental_strict_probe_up_order_) {
+      scheduler.active_order = 0;
+      scheduler.next_order = experimental_strict_probe_up_order_ + 1;
+    }
+    experimental_strict_probe_up_finished_ = true;
+  }
+  return exit_allowed;
+}
+
+bool Bbr2Sender::ExperimentalForcedProbeUpMustExit(QuicTime now) const {
+  return experimental_forced_probe_up_enabled_ &&
+         experimental_forced_probe_up_started_ &&
+         experimental_forced_probe_up_start_time_ != QuicTime::Zero() &&
+         !experimental_strict_probe_up_max_duration_.IsZero() &&
+         now - experimental_forced_probe_up_start_time_ >=
+             experimental_strict_probe_up_max_duration_;
+}
+
+bool Bbr2Sender::ShouldBlockNativeProbeUpForExperiment() const {
+  // Keep the gate closed after the controlled sequence too.  The scenario
+  // stops shortly afterwards, which makes every observed UP attributable to a
+  // single scheduled event.
+  return experimental_strict_probe_up_enabled_;
 }
 
 void Bbr2Sender::SetExperimentalMaxCongestionWindowPackets(
@@ -680,8 +770,12 @@ float Bbr2Sender::GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase /*phase*/,
   return cwnd_gain;
 }
 
-void Bbr2Sender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase /*phase*/,
-                                       QuicTime /*now*/) {}
+void Bbr2Sender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
+                                       QuicTime now) {
+  if (experiment_probe_phase_trace_callback_) {
+    experiment_probe_phase_trace_callback_(phase, now);
+  }
+}
 
 std::ostream& operator<<(std::ostream& os, const Bbr2Sender::DebugState& s) {
   os << "mode: " << s.mode << "\n";

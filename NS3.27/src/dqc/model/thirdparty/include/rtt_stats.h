@@ -42,6 +42,10 @@ class RttStats
     // May return Zero if no valid updates have occurred.
     TimeDelta latest_rtt() const { return latest_rtt_; }
 
+    // The most recent RTT before ACK-delay correction.  This is the QUIC
+    // ACK-frame RTT sample, and is intentionally separate from latest_rtt().
+    TimeDelta latest_raw_rtt() const { return latest_raw_rtt_; }
+
     // Returns the min_rtt for the entire connection.
     // May return Zero if no valid updates have occurred.
     TimeDelta min_rtt() const { return min_rtt_; }
@@ -62,6 +66,7 @@ class RttStats
         max_ack_delay_ = std::max(max_ack_delay_, initial_max_ack_delay);
     }
   private:
+    TimeDelta latest_raw_rtt_;
     TimeDelta latest_rtt_;
     TimeDelta min_rtt_;
     TimeDelta smoothed_rtt_;

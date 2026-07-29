@@ -96,7 +96,6 @@ struct ScenarioConfig
     bool enable_convergence_gate_control;
     std::string gate_trace_mode;
     uint64_t gate_trace_sample_interval_us;
-    double interval_window_rtt_mult;
     std::string trace_path;
     std::string trace_name;
     uint32_t seed;
@@ -119,7 +118,6 @@ struct FlowConfig
     double stop_time_s;
     uint64_t sender_rate_cap_bps;
     std::vector<RateStep> rate_cap_schedule;
-    uint64_t fbbr_cruise_baseline_cap_bps;
     std::string config_path;
     dqc::FBBRConfig fbbr_config;
 };
@@ -404,31 +402,6 @@ SetCommonFrequencyConfigValue(Config* config,
     SET_U32("stability.stable_rounds", stability_stable_rounds)
     SET_DOUBLE("stability.full_pipe_growth_threshold",
                stability_full_pipe_growth_threshold)
-    SET_DOUBLE("spectral.drate_integrity_threshold",
-               spectral_drate_integrity_threshold)
-    SET_DOUBLE("spectral.srtt_integrity_threshold",
-               spectral_srtt_integrity_threshold)
-    SET_DOUBLE("spectral.min_drate_snr", spectral_min_drate_snr)
-    SET_DOUBLE("spectral.min_srtt_snr", spectral_min_srtt_snr)
-    SET_DOUBLE("spectral.max_drate_width_ratio", spectral_max_drate_width_ratio)
-    SET_DOUBLE("spectral.max_srtt_width_ratio", spectral_max_srtt_width_ratio)
-    SET_DOUBLE("spectral.min_drate_phase_coherence",
-               spectral_min_drate_phase_coherence)
-    SET_DOUBLE("spectral.min_srtt_phase_coherence",
-               spectral_min_srtt_phase_coherence)
-    SET_DOUBLE("spectral.freq_sigma_ratio", spectral_freq_sigma_ratio)
-    SET_DOUBLE("spectral.snr_slope", spectral_snr_slope)
-    SET_DOUBLE("spectral.energy_threshold", spectral_energy_threshold)
-    SET_DOUBLE("spectral.energy_slope", spectral_energy_slope)
-    SET_DOUBLE("spectral.width_r0_drate", spectral_width_r0_drate)
-    SET_DOUBLE("spectral.width_r0_srtt", spectral_width_r0_srtt)
-    SET_DOUBLE("spectral.width_sigma", spectral_width_sigma)
-    SET_BOOL("merged_rescue.enable", merged_rescue_enable)
-    SET_DOUBLE("merged_rescue.window_multiplier", merged_rescue_window_multiplier)
-    SET_U32("merged_rescue.max_passes", merged_rescue_max_passes)
-    SET_DOUBLE("merged_rescue.max_trend_ratio", merged_rescue_max_trend_ratio)
-    SET_DOUBLE("merged_rescue.confidence_discount",
-               merged_rescue_confidence_discount)
     SET_BOOL("trusted_bw.clear_on_cruise_start",
              trusted_bw_clear_on_cruise_start)
     if (key == "trace.gate_trace_mode")
@@ -463,11 +436,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
     uint32_t u32 = 0;
     bool b = false;
 
-    if (key == "cruise_detector.mode")
-    {
-        config->cruise_detector_mode = value;
-        return true;
-    }
     if (key == "waveform.recv_signal_mode")
     {
         config->waveform_recv_signal_mode = value;
@@ -481,16 +449,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
             return false;
         }
         config->waveform_negative_half_first = b;
-        return true;
-    }
-    if (key == "waveform.queue_guard_enabled")
-    {
-        if (!ParseBoolValue(value, &b))
-        {
-            WarnConfigLine(path, line_no, "invalid bool for " + key);
-            return false;
-        }
-        config->waveform_queue_guard_enabled = b;
         return true;
     }
     if (key == "pacing.minimum_rate_mbps")
@@ -556,22 +514,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
                         waveform_min_cycle_coverage_ratio)
     SET_WAVEFORM_DOUBLE("waveform.masked_min_cycle_coverage_ratio",
                         waveform_masked_min_cycle_coverage_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.min_completeness_score",
-                        waveform_min_completeness_score)
-    SET_WAVEFORM_DOUBLE("waveform.min_rising_duration_ratio",
-                        waveform_min_rising_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.min_falling_duration_ratio",
-                        waveform_min_falling_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.min_shape_ncc", waveform_min_shape_ncc)
-    SET_WAVEFORM_DOUBLE("waveform.min_slope_direction_agreement",
-                        waveform_min_slope_direction_agreement)
-    SET_WAVEFORM_DOUBLE("waveform.min_drate_ncc", waveform_min_drate_ncc)
-    SET_WAVEFORM_DOUBLE("waveform.min_srtt_integral_ncc",
-                        waveform_min_srtt_integral_ncc)
-    SET_WAVEFORM_DOUBLE("waveform.min_srtt_derivative_ncc",
-                        waveform_min_srtt_derivative_ncc)
-    SET_WAVEFORM_DOUBLE("waveform.min_response_snr",
-                        waveform_min_response_snr)
     SET_WAVEFORM_DOUBLE("waveform.local_slope_window_period_ratio",
                         waveform_local_slope_window_period_ratio)
     SET_WAVEFORM_DOUBLE("waveform.min_local_slope_window_ms",
@@ -586,26 +528,6 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
                         waveform_delta_drate_amplitude_ratio)
     SET_WAVEFORM_DOUBLE("waveform.delta_fallback_baseline_ratio",
                         waveform_delta_fallback_baseline_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.adaptive_delta_fallback_baseline_ratio",
-                        waveform_adaptive_delta_fallback_baseline_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.delta_ewma_alpha",
-                        waveform_delta_ewma_alpha)
-    SET_WAVEFORM_DOUBLE("waveform.delta_min_baseline_ratio",
-                        waveform_delta_min_baseline_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.delta_max_baseline_ratio",
-                        waveform_delta_max_baseline_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.overload_max_delta_multiplier",
-                        waveform_overload_max_delta_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.underload_max_delta_multiplier",
-                        waveform_underload_max_delta_multiplier)
-    SET_WAVEFORM_U32("waveform.overload_confirmations",
-                     waveform_overload_confirmations)
-    SET_WAVEFORM_DOUBLE("waveform.queue_low_min_rtt_ratio",
-                        waveform_queue_low_min_rtt_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.queue_target_min_rtt_ratio",
-                        waveform_queue_target_min_rtt_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.queue_high_min_rtt_ratio",
-                        waveform_queue_high_min_rtt_ratio)
     SET_WAVEFORM_DOUBLE("waveform.plateau_min_duration_ratio",
                         waveform_plateau_min_duration_ratio)
     SET_WAVEFORM_DOUBLE("waveform.plateau_max_slope_ratio",
@@ -632,6 +554,8 @@ SetFBBRConfigValue(dqc::FBBRConfig* config,
                         waveform_max_app_limited_sample_ratio)
     SET_WAVEFORM_DOUBLE("waveform.max_interpolation_gap_period_ratio",
                         waveform_max_interpolation_gap_period_ratio)
+    SET_WAVEFORM_DOUBLE("goertzel.min_coherent_power_ratio",
+                        goertzel_min_coherent_power_ratio)
     SET_WAVEFORM_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
     SET_WAVEFORM_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
     SET_WAVEFORM_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
@@ -1107,10 +1031,6 @@ EmitRunMeta(const ScenarioConfig& scenario, const std::vector<FlowConfig>& flows
         }
         out << "]";
     }
-    out << "],\n  \"fbbr_cruise_baseline_caps_bps\": [";
-    for (size_t i = 0; i < flows.size(); ++i)
-        out << (i ? ", " : "")
-            << flows[i].fbbr_cruise_baseline_cap_bps;
     out << "],\n  \"background_schedule\": [";
     for (size_t i = 0; i < scenario.background_schedule.size(); ++i)
         out << (i ? "," : "") << "{\"time_s\":"
@@ -1174,7 +1094,7 @@ UpdateSenderFairShares(std::vector<Ptr<DqcSender>>* senders,
     for (size_t i = 0; i < senders->size(); ++i)
     {
         if ((*flows)[i].algo.is_fbbr)
-            (*senders)[i]->SetFreqCCFairShareBandwidth(fair);
+            (*senders)[i]->SetFBBRFairShareBandwidth(fair);
     }
 }
 
@@ -1207,18 +1127,6 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFBBR, "FBBR", false, true};
     }
-    if (key == "FBBR-adaptive")
-    {
-        return {dqc::kFBBRAdaptive, "FBBR-adaptive", false, true};
-    }
-    if (key == "FBBR-hybrid")
-    {
-        return {dqc::kFBBRHybrid, "FBBR-hybrid", false, true};
-    }
-    if (key == "FBBR-hybridv3")
-    {
-        return {dqc::kFBBRHybridV3, "FBBR-hybridv3", false, true};
-    }
     if (key == "FBBR-ServiceFair")
     {
         return {dqc::kFBBRServiceFair, "FBBR-ServiceFair", false, true};
@@ -1233,7 +1141,7 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
-                                              "FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-ServiceFair, "
+                                              "FBBR, FBBR-ServiceFair, "
                                               "FreqCCv3, BBRv2)");
 }
 
@@ -1442,11 +1350,7 @@ InstallDqcFlow(const FlowConfig& flow,
             scenario.enable_convergence_gate_control,
             scenario.gate_trace_mode,
             scenario.gate_trace_sample_interval_us);
-        send_app->SetFreqCCIntervalWindowMultiplier(
-            scenario.interval_window_rtt_mult);
-        send_app->SetFreqCCFairShareBandwidth(fair_share_bps);
-        send_app->SetFBBRCruiseBaselineCap(
-            flow.fbbr_cruise_baseline_cap_bps);
+        send_app->SetFBBRFairShareBandwidth(fair_share_bps);
     }
 
     AttachTraceCallbacks(send_app, recv_app, trace, stat, trace_enable);
@@ -1466,7 +1370,6 @@ BuildFlowConfigs(uint32_t n_flows,
                  const std::string& stop_times,
                  const std::string& initial_rates,
                  const std::string& rate_schedules,
-                 const std::string& fbbr_cruise_base_caps,
                  const std::string& config_paths,
                  const std::string& fbbr_config_path,
                  const std::string& obbr_config_path,
@@ -1484,9 +1387,6 @@ BuildFlowConfigs(uint32_t n_flows,
         ExpandRateList(initial_rates, n_flows, "0", "initialRates");
     const std::vector<std::vector<RateStep>> expanded_rate_schedules =
         ExpandRateScheduleList(rate_schedules, n_flows, rate_caps);
-    const std::vector<uint64_t> cruise_baseline_caps =
-        ExpandRateList(fbbr_cruise_base_caps, n_flows, "0",
-                       "fbbrCruiseBaseCaps");
     const std::vector<std::string> config_values =
         ExpandStringList(config_paths, n_flows, "", "configPaths");
 
@@ -1501,7 +1401,6 @@ BuildFlowConfigs(uint32_t n_flows,
         flow.stop_time_s = stop_values[i];
         flow.rate_cap_schedule = expanded_rate_schedules[i];
         flow.sender_rate_cap_bps = RateAt(flow.rate_cap_schedule, 0.0);
-        flow.fbbr_cruise_baseline_cap_bps = cruise_baseline_caps[i];
 
         if (!config_values[i].empty())
         {
@@ -1878,11 +1777,6 @@ PrintConfiguration(const ScenarioConfig& scenario,
                           << step.rate_bps;
             }
         }
-        if (flows[i].fbbr_cruise_baseline_cap_bps > 0)
-        {
-            std::cout << ", cruise_baseline_cap_bps="
-                      << flows[i].fbbr_cruise_baseline_cap_bps;
-        }
         if (!flows[i].config_path.empty())
         {
             std::cout << ", config=" << flows[i].config_path;
@@ -1904,7 +1798,6 @@ main(int argc, char* argv[])
     std::string stop_times = "";
     std::string initial_rates = "0";
     std::string rate_schedules = "";
-    std::string fbbr_cruise_base_caps = "0";
     std::string per_flow_app_rate_limits = "";
     std::string background_rate_schedule = "";
     std::string capacity_schedule = "";
@@ -1941,7 +1834,6 @@ main(int argc, char* argv[])
     bool enable_convergence_gate_control = false;
     std::string gate_trace_mode = "round_only";
     uint64_t gate_trace_sample_interval_us = 10000;
-    double interval_window_rtt_mult = 1.0;
 
     std::string fbbr_config = kDefaultFBBRConfig;
     std::string obbr_config = "";
@@ -1959,7 +1851,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-adaptive, FBBR-hybrid, FBBR-hybridv3, FBBR-ServiceFair, FreqCCv3, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-ServiceFair, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",
@@ -1981,9 +1873,6 @@ main(int argc, char* argv[])
                  "Per-flow time:rate steps; separate flows with @, e.g. "
                  "0:20Mbps,6:55Mbps@0:20Mbps,6:55Mbps",
                  rate_schedules);
-    cmd.AddValue("fbbrCruiseBaseCaps",
-                 "Per-flow FBBR CRUISE baseline caps; 0 disables",
-                 fbbr_cruise_base_caps);
     cmd.AddValue("backgroundRateSchedule",
                  "Comma list of time:rate steps for fixed UDP background",
                  background_rate_schedule);
@@ -2076,12 +1965,6 @@ main(int argc, char* argv[])
     cmd.AddValue("gateTraceSampleIntervalUs",
                  "Minimum interval for sampled FBBR gate trace rows",
                  gate_trace_sample_interval_us);
-    cmd.AddValue("intervalWinRttMult",
-                 "FBBR/FreqCCv3 interval STFT window multiplier on min_rtt",
-                 interval_window_rtt_mult);
-    cmd.AddValue("interval_win_rtt_mult",
-                 "Alias of intervalWinRttMult",
-                 interval_window_rtt_mult);
     cmd.AddValue("fbbrConfig", "Default FBBR config path", fbbr_config);
     cmd.AddValue("obbrConfig", "oBBR config path metadata", obbr_config);
     cmd.AddValue("bbrv2plusConfig",
@@ -2172,7 +2055,6 @@ main(int argc, char* argv[])
     scenario.enable_convergence_gate_control = enable_convergence_gate_control;
     scenario.gate_trace_mode = gate_trace_mode;
     scenario.gate_trace_sample_interval_us = gate_trace_sample_interval_us;
-    scenario.interval_window_rtt_mult = interval_window_rtt_mult;
     scenario.trace_path = trace_path;
     scenario.trace_name = trace_name;
     scenario.seed = seed;
@@ -2208,7 +2090,6 @@ main(int argc, char* argv[])
                          stop_times,
                          initial_rates,
                          rate_schedules,
-                         fbbr_cruise_base_caps,
                          config_paths,
                          fbbr_config,
                          obbr_config,
