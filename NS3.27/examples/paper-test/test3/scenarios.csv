@@ -1,0 +1,2 @@
+scenario_id,capacity_bps,capacity_mbps,initial_queue_bdp,bottleneck_delay_s,access_bps,simulation_time_s,sample_interval_s,settle_guard_s,propagation_rtt_profile,purpose
+DYN-RTT,100000000,100,2,0.010,1000000000,300,0.100,15,0:0.040|60:0.120|120:0.030|180:0.080|240:0.040,Fixed four-flow propagation-RTT step profile with fixed capacity queue and population

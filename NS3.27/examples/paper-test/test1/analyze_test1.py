@@ -750,7 +750,9 @@ def write_metric_catalog(
         [
             "## Comparison Scope",
             "",
-            "All eight algorithms appear in the stage-level comparison and the one-minute Fig. 1(b) time series.",
+            "All seven algorithms appear in the stage-level comparison and the one-minute Fig. 1(b) time series.",
+            "The seven dynamic stages are reported independently: N2_rise, N4_rise, N8_rise, N16_peak, N8_fall, N4_fall, and N2_fall. Equal flow counts on the rising and falling sides are not merged.",
+            "Each stage reports mean, p95, and p99 bottleneck queue delay over its own measurement window.",
             "Fig. 1(b) reports queue delay, aggregate goodput, mean active-flow goodput, and Jain fairness from receiver byte snapshots at every 60-second boundary.",
             "Fig. 1(a) is intentionally limited to BBRv2-ideal: the sequential",
             "ProbeBW-UP fluid recurrence is defined only for that experiment-specific",
@@ -762,19 +764,20 @@ def write_metric_catalog(
     output.write_text("\n".join(lines), encoding="utf-8")
 
 
-def format_peak_table(stages: pd.DataFrame) -> list[str]:
-    peak = stages[stages.stage_label == "N16_peak"].set_index("algorithm")
+def format_stage_table(stages: pd.DataFrame, stage_label: str) -> list[str]:
+    stage = stages[stages.stage_label == stage_label].set_index("algorithm")
     lines = [
-        "| Algorithm | Goodput (Mbit/s) | Utilization (%) | Jain | Mean excess (BDP) | Mean queue delay (ms) | p95 queue delay (ms) | Drops |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Algorithm | Goodput (Mbit/s) | Utilization (%) | Jain | Mean excess (BDP) | Mean queue delay (ms) | p95 queue delay (ms) | p99 queue delay (ms) | Drops |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for algorithm in ALGORITHMS:
-        if algorithm not in peak.index:
+        if algorithm not in stage.index:
             continue
-        row = peak.loc[algorithm]
+        row = stage.loc[algorithm]
         lines.append(
             "| {algorithm} | {goodput:.3f} | {utilization:.3f} | {jain:.5f} | "
-            "{excess:.4f} | {mean_delay:.4f} | {p95_delay:.4f} | {drops} |".format(
+            "{excess:.4f} | {mean_delay:.4f} | {p95_delay:.4f} | "
+            "{p99_delay:.4f} | {drops} |".format(
                 algorithm=algorithm,
                 goodput=float(row.aggregate_goodput_bps) / 1e6,
                 utilization=float(row.utilization_pct),
@@ -782,8 +785,32 @@ def format_peak_table(stages: pd.DataFrame) -> list[str]:
                 excess=float(row.mean_excess_inflight_bdp),
                 mean_delay=float(row.mean_queue_delay_ms),
                 p95_delay=float(row.p95_queue_delay_ms),
+                p99_delay=float(row.p99_queue_delay_ms),
                 drops=int(row.queue_drop_packets),
             )
+        )
+    return lines
+
+
+def format_stage_tables(stages: pd.DataFrame) -> list[str]:
+    lines: list[str] = []
+    for index, (stage_label, active_flows) in enumerate(
+        zip(STAGE_LABELS, STAGE_COUNTS), start=1
+    ):
+        stage = stages[stages.stage_label == stage_label]
+        if stage.empty:
+            continue
+        start_min = float(stage.stage_start_s.iloc[0]) / 60.0
+        end_min = float(stage.stage_end_s.iloc[0]) / 60.0
+        lines.extend(
+            [
+                f"### Stage {index}: `{stage_label}` ({active_flows} flows)",
+                "",
+                f"Nominal time: {start_min:.3f} to {end_min:.3f} min.",
+                "",
+                *format_stage_table(stages, stage_label),
+                "",
+            ]
         )
     return lines
 
@@ -829,9 +856,11 @@ def write_report(
         "",
         "The non-owner CRUISE field is diagnostic only. The enforced condition is the requested one: no other flow may be in ProbeBW-UP during an ideal UP.",
         "",
-        "## N=16 Peak Comparison",
+        "## Per-Stage Comparisons",
         "",
-        *format_peak_table(stages),
+        "Each population change is treated as a separate scenario. Queue delay is reported as mean, p95, and p99 within that stage's measurement window.",
+        "",
+        *format_stage_tables(stages),
         "",
         "## Outputs",
         "",

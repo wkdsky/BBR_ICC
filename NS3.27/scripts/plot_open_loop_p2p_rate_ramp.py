@@ -43,12 +43,18 @@ CROSS_COLOR = "#495057"
 SRTT_COLOR = "#5f3dc4"
 REGIME_PSD_DRATE_COLOR = "#b85d24"
 REGIME_PSD_SRTT_COLOR = "#3f2bb8"
-CALLOUT_COLOR = "#009e73"
-CALLOUT_FILL_COLOR = "#c3fae8"
+# Tol's colorblind-safe muted blue keeps callouts separate from data series.
+CALLOUT_COLOR = "#4477aa"
+CALLOUT_FILL_COLOR = "#dbe9f4"
+LOW_DELAY_CONTROL_COLOR = "#8ce99a"
+LOW_DELAY_CONTROL_EDGE_COLOR = "#2b8a3e"
+LOW_DELAY_CONTROL_TEXT_COLOR = "#14532d"
 OPTIMAL_AREA_START_S = 2.2
 OPTIMAL_AREA_END_S = 2.4
 OPTIMAL_AREA_LABEL_X_OFFSET_S = 0.16
 OPTIMAL_AREA_LABEL = "Kleinrock's optimal\noperating area"
+LOW_DELAY_CONTROL_DURATION_S = 1.0
+LOW_DELAY_CONTROL_LABEL = "Low-\nDelay\nControl\nRegion"
 
 EXPORT_DPI = 600
 IEEE_COLUMN_WIDTH_IN = 3.5
@@ -65,6 +71,7 @@ LABEL_FS = SOURCE_TEXT_FS
 TICK_FS = SOURCE_TEXT_FS
 LEGEND_FS = SOURCE_TEXT_FS
 SMALL_LEGEND_FS = SOURCE_TEXT_FS
+SPECTRUM_LEGEND_FS = SMALL_LEGEND_FS * 0.92
 
 DATA_LW = 1.45
 REGIME_PSD_DRATE_LW = DATA_LW
@@ -653,6 +660,59 @@ def add_optimal_operating_area(
         fontweight=TEXT_WEIGHT,
         color=OPTIMAL_AREA_TEXT_COLOR,
         zorder=45,
+    )
+
+
+def add_low_delay_control_region(
+    ax,
+    start_s: float,
+    end_s: float,
+) -> None:
+    """Highlight the early low-delay control window in the SRTT panel."""
+
+    if end_s <= start_s:
+        return
+
+    ax.add_patch(
+        Rectangle(
+            (start_s, 0.0),
+            end_s - start_s,
+            1.0,
+            transform=ax.get_xaxis_transform(),
+            facecolor=LOW_DELAY_CONTROL_COLOR,
+            edgecolor="none",
+            alpha=0.68,
+            zorder=0.6,
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (start_s, 0.0),
+            end_s - start_s,
+            1.0,
+            transform=ax.get_xaxis_transform(),
+            facecolor="none",
+            edgecolor=LOW_DELAY_CONTROL_EDGE_COLOR,
+            linewidth=0.85,
+            alpha=0.96,
+            zorder=1.1,
+        )
+    )
+    ax.text(
+        0.5 * (start_s + end_s),
+        0.75,
+        LOW_DELAY_CONTROL_LABEL,
+        transform=ax.get_xaxis_transform(),
+        ha="center",
+        va="center",
+        fontsize=SPECTRUM_LEGEND_FS,
+        fontweight=TEXT_WEIGHT,
+        linespacing=0.94,
+        color=LOW_DELAY_CONTROL_TEXT_COLOR,
+        path_effects=[
+            pe.withStroke(linewidth=1.15, foreground="#ffffff", alpha=0.88)
+        ],
+        zorder=12,
     )
 
 
@@ -1437,7 +1497,7 @@ def main() -> None:
 
     spectrum_legend_kwargs = {
         "frameon": False,
-        "prop": {"size": SMALL_LEGEND_FS * 0.92, "weight": TEXT_WEIGHT},
+        "prop": {"size": SPECTRUM_LEGEND_FS, "weight": TEXT_WEIGHT},
         "handlelength": 0.82,
         "handletextpad": 0.16,
         "borderpad": 0.0,
@@ -1651,6 +1711,15 @@ def main() -> None:
             (visible_wave_start_s, under_to_full),
             (full_to_overload, visible_wave_end_s),
         ],
+    )
+
+    add_low_delay_control_region(
+        axes[1],
+        start_s=under_to_full,
+        end_s=min(
+            full_to_overload,
+            under_to_full + LOW_DELAY_CONTROL_DURATION_S,
+        ),
     )
 
     add_load_boundaries(

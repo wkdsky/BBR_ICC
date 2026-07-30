@@ -3,3 +3,4 @@
 def build(bld):
     bld.recurse('test1')
     bld.recurse('test2')
+    bld.recurse('test3')

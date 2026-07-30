@@ -1,97 +1,315 @@
-# Test 1: Dynamic ProbeBW Comparison
+# Test 1：动态流数下的拥塞控制算法对比
 
-This directory contains the reusable ns-3.27 experiment source, runner, and
-analysis program for the dynamic congestion-control comparison.
+Test 1 在同一个 100 Mbit/s 哑铃瓶颈上，依次改变长流数量，观察各算法在增流和减流过程中的吞吐、排队、公平性与带宽估计。本文对应当前结果图：
 
-## Run
+![Test 1 四面板结果图](../../../results/test1/figures/fig1b_excess_inflight_and_queue_delay.png)
 
-From `NS3.27`, run the full experiment:
+## 1. 当前图的数据版本
 
-```bash
-examples/paper-test/test1/run_test1.sh
+> **FBBR 使用最新重跑的 `seed=1, run_id=7` 结果。** 当前图的数据选择以 [`results/test1/selection.json`](../../../results/test1/selection.json) 为准，而不是旧的 `raw/manifest.csv` 或旧汇总文件中的 FBBR 行。
+
+当前图的输入如下：
+
+| 曲线 | 数据来源 | seed / run_id |
+| --- | --- | --- |
+| BBR-R | `results/test1/raw/BBR_R_seed1_run1_*` | 1 / 1 |
+| oBBR | `results/test1/raw/oBBR_seed1_run2_*` | 1 / 2 |
+| BBRv2+ | `results/test1/raw/BBRv2__seed1_run3_*` | 1 / 3 |
+| CUBIC | `results/test1/raw/CUBIC_seed1_run4_*` | 1 / 4 |
+| BBRv2-formal | `results/test1/raw/BBRv2_formal_seed1_run5_*` | 1 / 5 |
+| BBRv2 | `results/test1/raw/BBRv2_seed1_run6_*` | 1 / 6 |
+| **FBBR** | `results/test1/fbbr_rerun_seed1_seed9_diag_20260730/raw/FBBR_seed1_run7_*` | **1 / 7** |
+
+最新 FBBR 运行启用了诊断 trace，但收敛门控的 `enable_control=false`，因此只增加采样输出，不改变控制路径。该次运行使用的 [`fbbr_default.conf`](../../CCconfig/fbbr_default.conf) SHA-256 为 `913b7b3b704f47d51e9f83bc8d4a0b18a707d4385e256e96af5d637af2560fe4`。
+
+FBBR 的 `seed=1` 与 `seed=9` 重跑结果中，二者平均 goodput 几乎相同且均无丢包；`seed=1` 的七阶段平均 Jain 指数更高（0.913583 对 0.902929）、16 流 Jain 指数更高（0.826864 对 0.722873），平均队列时延也更低（66.545 ms 对 73.866 ms），因此最终图选择 `seed=1`。这只是最终展示所选的单次确定性运行，不等价于多 seed 统计结论。
+
+## 2. 实验场景
+
+拓扑是 16 对发送端/接收端共享一个瓶颈的哑铃网络：
+
+```text
+16 senders -- 1 Gbit/s, 5 ms -- R0 -- 100 Mbit/s, 10 ms -- R1 -- 1 Gbit/s, 5 ms -- 16 receivers
 ```
 
-The runner builds the selected example, executes one deterministic 1800-second
-simulation for each requested controller, validates the data, and regenerates
-the markdown report and figures. All paths passed to the executable are
-relative to `NS3.27`; results are written under `results/test1`.
+单程传播时延为 `5 + 10 + 5 = 20 ms`，所以基础 RTT 为 40 ms。所有流走同一个 R0 到 R1 的 DropTail 瓶颈队列。
 
-Use a seven-stage 210-second smoke run to check the build, controller factories,
-CSV schema, and plotting path:
+| 参数 | 配置 |
+| --- | --- |
+| 仿真器与传输框架 | ns-3.27 + DQC |
+| 总仿真时间 | 1800 s（30 min） |
+| 瓶颈容量 | 100 Mbit/s |
+| 接入链路容量 | 1 Gbit/s |
+| 基础 RTT | 40 ms |
+| 基础 BDP | `100 Mbit/s * 40 ms / 8 = 500,000 B` |
+| 瓶颈队列 | DropTail，40 BDP = 20,000,000 B |
+| 队列可容纳的最大串行化时延 | 1600 ms |
+| 单流发送缓存 | 16 MiB |
+| 阶段指标采样周期 | 0.1 s |
+| 图 (a)～(c) 聚合窗口 | 60 s |
+| 活跃流数量 | `2 -> 4 -> 8 -> 16 -> 8 -> 4 -> 2` |
+
+七个阶段等长，每段约 257.143 s（4.286 min）：
+
+| 阶段 | 时间范围（min） | 活跃流数 | 事件 |
+| ---: | ---: | ---: | --- |
+| 1 | 0～4.286 | 2 | 初始两条长流 |
+| 2 | 4.286～8.571 | 4 | 加入 flow 3～4 |
+| 3 | 8.571～12.857 | 8 | 加入 flow 5～8 |
+| 4 | 12.857～17.143 | 16 | 加入 flow 9～16 |
+| 5 | 17.143～21.429 | 8 | flow 9～16 离开 |
+| 6 | 21.429～25.714 | 4 | flow 5～8 离开 |
+| 7 | 25.714～30 | 2 | flow 3～4 离开 |
+
+图中的竖虚线就是这些阶段边界。由于阶段长度不是整分钟，边界附近的 60 s 点会同时包含切换前后的样本，应视为过渡窗口，而不是纯稳态窗口。
+
+## 3. 对比算法
+
+| 图例名称 | 本实验中的含义 |
+| --- | --- |
+| BBR-R | 以 DQC BBRv1 为宿主的 BBR-R 移植版；根据 RTT 膨胀对 pacing 带宽进行自适应折减。 |
+| oBBR | 对齐 nginx-quic oBBR 的 DQC 实现，保留其 RTT、cwnd 和 gain-cycle 决策。 |
+| BBRv2+ | 在 BBRv2 上加入 RTT-aware ProbeTry、连续 probing、快速 BtlBW 过期和抖动补偿等机制。 |
+| CUBIC | DQC 的字节计数型、基于丢包的 CUBIC 基线。 |
+| BBRv2-formal | 实验专用的 BBRv2 形式化变体；代码入口名为 `BBRv2-ideal`。每阶段按 flow ID 顺序放行 ProbeBW-UP，并强制任意时刻最多一条流处于 UP。 |
+| BBRv2 | 原始 DQC BBRv2 控制路径，不附加实验调度。 |
+| FBBR | 基于 BBRv2，在 ProbeBW-CRUISE 注入 5 Hz 三角 pacing 波形，根据 delivery-rate/SRTT 响应形成 Beq，并用 Beq 与 inflight 包络约束后续控制。当前幅度模式为 `4sr`。 |
+
+除 `BBRv2-formal` 的 ProbeBW-UP 放行门外，其他算法均使用各自原生控制路径；实验没有统一关闭 ProbeRTT。`BBRv2-formal` 共请求并记录 44 次 UP，观测最大并发 UP 数为 1，顺序与互斥校验通过。
+
+## 4. 结果指标
+
+| 指标 | 定义与读法 |
+| --- | --- |
+| Aggregate goodput | 接收端在统计窗口内收到的应用负载字节率；除以 100 Mbit/s 即链路利用率。 |
+| Jain fairness | 活跃流 goodput 的 Jain 指数，`J=(sum xi)^2/(N*sum xi^2)`；越接近 1 越公平。 |
+| Queue delay mean/p95/p99 | 瓶颈队列字节数乘以 `8/C` 后，在每个场景内分别计算平均值、第 95 和第 99 百分位。它是队列串行化时延，不是端到端 RTT。 |
+| Excess inflight | `max(0, 所有活跃流 inflight 之和 - 1 个基础 BDP)`，再除以 500,000 B；越低表示额外驻留数据越少。 |
+| Queue drops | R0 到 R1 的 DropTail 瓶颈队列丢包数。 |
+| Native MaxBw | FBBR 内部继承的 BBRv2 最大带宽滤波估计。 |
+| Beq | FBBR 在完成 CRUISE 选择后发布的服务基线估计；它不是网络提供的公平份额，也不以公平份额为控制输入。 |
+
+## 5. 各算法总体结果
+
+下表是七个等长阶段的 stage-level 指标等权平均；FBBR 行来自上述最新 `seed=1` 重跑。
+
+| 算法 | Goodput（Mbit/s） | Jain | Excess inflight（BDP） | 平均队列（ms） | 平均 p95 队列（ms） | 平均 p99 队列（ms） | 总丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 96.942 | 0.9352 | **0.214** | **9.84** | **24.51** | **34.20** | 0 |
+| oBBR | 95.279 | **0.9914** | 1.097 | 46.24 | 55.69 | 59.46 | 0 |
+| BBRv2+ | 96.994 | 0.9745 | 22.519 | 905.03 | 1018.23 | 1018.31 | 241,139 |
+| CUBIC | 97.000 | 0.9572 | 24.804 | 1020.64 | 1075.22 | 1075.27 | 27,364 |
+| BBRv2-formal | 96.539 | 0.9344 | 13.834 | 565.98 | 581.13 | 596.82 | 51,642 |
+| BBRv2 | 96.966 | 0.9668 | 22.014 | 884.68 | 1020.48 | 1022.39 | 237,701 |
+| **FBBR（最新 seed1）** | **97.097** | 0.9136 | 1.590 | 66.54 | 70.52 | 72.08 | **0** |
+
+由于容量恰好是 100 Mbit/s，表中的 goodput 数值也可直接读成利用率百分数，例如 FBBR 为 97.097%。
+
+结果体现的是清晰的取舍，而不是单一算法在所有指标上最优：
+
+- FBBR 保持了本组最高的七阶段平均 goodput，同时全程无瓶颈丢包。相对原始 BBRv2，其七阶段平均队列下降约 92.5%，16 流平均队列下降约 87.9%。
+- BBR-R 的队列和 excess inflight 最低，但 16 流 Jain 只有 0.7607；低排队并没有自动带来多流公平。
+- oBBR 的公平性最好且队列受控，但平均 goodput 比 FBBR 低约 1.82 Mbit/s。
+- BBRv2+、CUBIC 和原始 BBRv2 的平均 goodput 都接近 97 Mbit/s，但在大流数阶段把 40 BDP 队列推到接近 1600 ms 上限，并产生大量丢包。
+- BBRv2-formal 的 UP 互斥规则验证成功，但互斥 UP 本身没有阻止 16 流阶段的队列饱和；它也不能单独保证公平性。
+- FBBR 的代价主要体现在公平性：七阶段平均 Jain 为 0.9136，低于其余六个算法；在 16 流阶段优于 BBR-R、CUBIC 和原始 BBRv2，但弱于 oBBR、BBRv2+ 与 BBRv2-formal。
+
+## 6. 每次流切换的独立场景指标
+
+这里不按相同流数合并：`8 flows（上升）` 与 `8 flows（下降）`、`4 flows（上升）` 与 `4 flows（下降）` 都是独立场景。每个场景从名义边界两侧各去掉 0.01 s，再在约 257.123 s 的测量窗口内独立计算 goodput、Jain、excess inflight、队列平均/p95/p99 和该阶段丢包数。
+
+### 场景 1：2 flows（初始）
+
+时间：0.000～4.286 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 96.713 | 96.713 | 0.9995 | 0.069 | 3.82 | 11.73 | 16.86 | 0 |
+| oBBR | 95.152 | 95.152 | 0.9998 | 1.037 | 43.77 | 51.03 | 56.14 | 0 |
+| BBRv2+ | 97.060 | 97.060 | 0.9986 | 0.992 | 41.93 | 42.18 | 42.39 | 0 |
+| CUBIC | 97.067 | 97.067 | 1.0000 | 10.312 | 425.79 | 441.16 | 441.18 | 0 |
+| BBRv2-formal | 97.025 | 97.025 | 0.9995 | 1.107 | 46.63 | 47.54 | 47.56 | 0 |
+| BBRv2 | 96.685 | 96.685 | 0.9998 | 1.040 | 43.88 | 58.02 | 71.00 | 0 |
+| **FBBR（最新 seed1）** | 97.022 | 97.022 | 0.9995 | 0.214 | 9.88 | 11.47 | 11.98 | 0 |
+
+### 场景 2：4 flows（上升）
+
+时间：4.286～8.571 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 97.039 | 97.039 | 0.9881 | 0.129 | 6.35 | 17.36 | 31.95 | 0 |
+| oBBR | 95.269 | 95.269 | 0.9835 | 1.061 | 44.74 | 53.89 | 57.41 | 0 |
+| BBRv2+ | 97.116 | 97.116 | 1.0000 | 20.223 | 833.99 | 922.39 | 922.41 | 0 |
+| CUBIC | 97.116 | 97.116 | 0.9910 | 20.988 | 865.49 | 922.39 | 922.41 | 0 |
+| BBRv2-formal | 97.116 | 97.116 | 0.9208 | 12.380 | 510.94 | 544.63 | 544.86 | 0 |
+| BBRv2 | 97.116 | 97.116 | 0.9975 | 19.131 | 789.01 | 922.39 | 922.39 | 0 |
+| **FBBR（最新 seed1）** | 97.116 | 97.116 | 0.9704 | 0.942 | 39.87 | 42.30 | 43.41 | 0 |
+
+### 场景 3：8 flows（上升）
+
+时间：8.571～12.857 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 97.101 | 97.101 | 0.9409 | 0.244 | 11.09 | 34.91 | 55.68 | 0 |
+| oBBR | 95.380 | 95.380 | 0.9992 | 1.129 | 47.53 | 58.07 | 63.27 | 0 |
+| BBRv2+ | 97.116 | 97.116 | 0.9953 | 36.852 | 1475.55 | 1599.84 | 1599.96 | 61,248 |
+| CUBIC | 97.116 | 97.116 | 0.9782 | 35.557 | 1459.86 | 1599.82 | 1599.93 | 8,038 |
+| BBRv2-formal | 97.116 | 97.116 | 0.9868 | 37.525 | 1543.78 | 1599.67 | 1599.81 | 4,005 |
+| BBRv2 | 97.116 | 97.116 | 0.9962 | 35.132 | 1405.57 | 1599.83 | 1599.96 | 60,559 |
+| **FBBR（最新 seed1）** | 97.116 | 97.116 | 0.8270 | 2.249 | 93.69 | 97.06 | 98.27 | 0 |
+
+### 场景 4：16 flows（峰值）
+
+时间：12.857～17.143 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 97.116 | 97.116 | 0.7607 | 0.770 | 32.79 | 64.99 | 76.51 | 0 |
+| oBBR | 95.462 | 95.462 | 0.9998 | 1.263 | 53.03 | 65.51 | 67.51 | 0 |
+| BBRv2+ | 97.116 | 97.116 | 0.8396 | 37.125 | 1438.13 | 1599.90 | 1599.97 | 130,850 |
+| CUBIC | 97.116 | 97.116 | 0.7664 | 37.550 | 1539.51 | 1599.82 | 1599.92 | 11,210 |
+| BBRv2-formal | 97.116 | 97.116 | 0.8823 | 39.611 | 1598.72 | 1599.80 | 1599.93 | 47,637 |
+| BBRv2 | 97.117 | 97.117 | 0.7852 | 36.060 | 1403.69 | 1599.88 | 1599.96 | 119,306 |
+| **FBBR（最新 seed1）** | 97.116 | 97.116 | 0.8269 | 4.092 | 169.58 | 179.38 | 183.39 | 0 |
+
+### 场景 5：8 flows（下降）
+
+时间：17.143～21.429 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 97.095 | 97.095 | 0.8592 | 0.135 | 6.62 | 17.24 | 26.09 | 0 |
+| oBBR | 95.355 | 95.355 | 0.9996 | 1.115 | 46.99 | 57.43 | 59.87 | 0 |
+| BBRv2+ | 96.885 | 96.885 | 0.9905 | 33.566 | 1350.80 | 1599.80 | 1599.92 | 49,041 |
+| CUBIC | 96.825 | 96.825 | 0.9653 | 36.628 | 1506.37 | 1599.82 | 1599.92 | 8,116 |
+| BBRv2-formal | 93.399 | 93.399 | 0.7529 | 3.698 | 156.12 | 167.87 | 276.46 | 0 |
+| BBRv2 | 96.935 | 96.935 | 0.9971 | 35.306 | 1416.09 | 1599.80 | 1599.94 | 57,836 |
+| **FBBR（最新 seed1）** | 97.092 | 97.092 | 0.8703 | 2.328 | 96.94 | 99.65 | 101.97 | 0 |
+
+### 场景 6：4 flows（下降）
+
+时间：21.429～25.714 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 96.881 | 96.881 | 0.9988 | 0.089 | 4.70 | 13.82 | 17.59 | 0 |
+| oBBR | 95.228 | 95.228 | 0.9677 | 1.052 | 44.38 | 53.05 | 56.06 | 0 |
+| BBRv2+ | 96.723 | 96.723 | 0.9975 | 18.588 | 769.10 | 922.39 | 922.41 | 0 |
+| CUBIC | 96.814 | 96.814 | 0.9994 | 21.912 | 905.67 | 922.39 | 922.41 | 0 |
+| BBRv2-formal | 97.066 | 97.066 | 0.9988 | 1.418 | 59.49 | 61.17 | 61.92 | 0 |
+| BBRv2 | 96.851 | 96.851 | 0.9921 | 17.521 | 724.56 | 922.39 | 922.41 | 0 |
+| **FBBR（最新 seed1）** | 97.104 | 97.104 | 0.9027 | 0.968 | 40.93 | 46.04 | 47.04 | 0 |
+
+### 场景 7：2 flows（下降）
+
+时间：25.714～30.000 min。
+
+| 算法 | Goodput（Mbit/s） | 利用率（%） | Jain | 平均 excess（BDP） | 队列平均（ms） | 队列 p95（ms） | 队列 p99（ms） | 丢包（pkt） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BBR-R | 96.650 | 96.650 | 0.9988 | 0.062 | 3.53 | 11.49 | 14.71 | 0 |
+| oBBR | 95.109 | 95.109 | 0.9905 | 1.024 | 43.23 | 50.83 | 55.96 | 0 |
+| BBRv2+ | 96.943 | 96.943 | 1.0000 | 10.288 | 425.70 | 441.08 | 441.10 | 0 |
+| CUBIC | 96.942 | 96.942 | 1.0000 | 10.679 | 441.79 | 441.14 | 441.16 | 0 |
+| BBRv2-formal | 96.933 | 96.933 | 1.0000 | 1.096 | 46.19 | 47.22 | 47.22 | 0 |
+| BBRv2 | 96.943 | 96.943 | 1.0000 | 9.905 | 409.92 | 441.08 | 441.10 | 0 |
+| **FBBR（最新 seed1）** | 97.109 | 97.109 | 0.9985 | 0.337 | 14.93 | 17.76 | 18.51 | 0 |
+
+## 7. 四个子图的数据解读
+
+图 (a)～(c) 的每个点对应一个 60 s 窗口，横坐标取窗口结束时间。为避免七种 marker 完全重叠，绘图脚本只把 marker 水平错开了 `-0.18`～`+0.18` min；连接线和 CSV 中的时间没有偏移，判断阶段与异常点时应以连接线/原始时间为准。图 (d) 使用更细的诊断 trace，统计口径在该小节单独说明。
+
+### (a) Queue dynamics
+
+该面板画的是每个 60 s 窗口的**平均瓶颈队列时延**。文件名虽然保留了 `excess_inflight`，当前 (a) 面板并没有画 excess inflight。纵轴在 220～240 ms 之间断开，以便同时展示低时延曲线和接近 1.6 s 的曲线。
+
+- BBR-R 始终处于最低一组，图中分钟均值范围约 3.43～38.62 ms；它在增流时只出现有限队列，并在减流后迅速排空。
+- oBBR 基本稳定在 41.83～52.76 ms，不随流数大幅膨胀。
+- 最新 FBBR 从 2 流约 9.9 ms，随流数增加到 8 流约 94 ms、16 流约 169～171 ms；流数下降后依次回落到约 97、41、15 ms。它没有把 40 BDP 缓冲区填满。
+- BBRv2+、CUBIC 和 BBRv2 随增流持续积累队列，在 8/16 流附近达到 1.3～1.55 s；减流后仍有明显排空滞后。
+- BBRv2-formal 在 16 流阶段约 1.599 s，几乎贴住 1600 ms 队列上限；16 流退出后才快速降到约 332 ms，再降到约 160 ms。
+
+因此，(a) 的核心结论是：FBBR 相比 BBRv2 系列高队列曲线显著压低了驻留队列，但它的时延仍高于 BBR-R 和 oBBR。
+
+### (b) Aggregate goodput
+
+该面板是每分钟接收端 aggregate goodput，纵轴在 83～94 Mbit/s 之间断开。
+
+- 除 oBBR 外，大多数稳定窗口都集中在约 96.5～97.12 Mbit/s，说明仅看总吞吐很难区分这些算法。
+- 最新 FBBR 的分钟 goodput 范围为 96.695～97.119 Mbit/s，增流、减流时没有明显利用率塌陷。
+- oBBR 主要位于 94.97～95.59 Mbit/s，表现出以约 1.5～2 Mbit/s 吞吐换取高公平和低队列的特征。
+- BBRv2-formal 在第 18 分钟出现 81.175 Mbit/s 的单窗口低点。这个窗口紧随 `16 -> 8` 切换，是真实数据点而不是断轴造成的视觉缺口；随后一分钟恢复到约 97.12 Mbit/s。
+- BBRv2+、CUBIC、BBRv2 等在减流边界附近也有约 95～96 Mbit/s 的短暂下降，但远小于 BBRv2-formal 的第 18 分钟低点。
+
+### (c) Flow fairness
+
+该面板用每分钟各活跃流 goodput 计算 Jain 指数。阶段边界处的低点同时包含“旧流已经形成的速率分配”和“新流加入/旧流退出后的重新收敛”。
+
+- oBBR 整体最接近 1，最低分钟值为 0.8768；16 流 stage-level Jain 为 0.9998。
+- BBR-R 在 16 流后半段下降到约 0.4468，并在 `16 -> 8` 后逐步恢复，说明其低队列是以明显的流间份额失衡为代价。
+- BBRv2+、CUBIC、BBRv2-formal 和 BBRv2 在第 13 分钟，也就是刚进入 16 流阶段的过渡窗口，最低值分别约为 0.5172、0.4907、0.5019 和 0.5144。之后部分算法恢复，但恢复过程与队列饱和同时存在。
+- 最新 FBBR 在 2 流时接近 1；8 流上升阶段约 0.79～0.83，16 流稳定分钟约 0.82～0.83。第 13 分钟过渡窗口最低为 0.6739，弱于 oBBR，但高于同一时刻的 BBRv2+/CUBIC/BBRv2-formal/BBRv2。
+- FBBR 在减流后的恢复不是瞬时的：8 流下降阶段稳定在约 0.87，4 流下降阶段约 0.90，回到 2 流后恢复到约 1。
+
+因此，FBBR 的优势主要是“高 goodput + 显著低于 BBRv2 的队列”，而不是最佳公平性。
+
+### (d) Bandwidth estimates
+
+该面板只分析 FBBR 的内部估计，单位是每流 Mbit/s：
+
+- 灰虚线 `Fair share` 是理想均分 `100/N`，七阶段依次为 50、25、12.5、6.25、12.5、25、50 Mbit/s，仅用于离线参照，FBBR 控制器不会读取它。
+- 黑虚线 `FBBR native MaxBw` 是每秒内所有活跃流的 BBRv2 MaxBw 均值。
+- 粉线 `FBBR mean Beq` 对每条流保持其最近一次有效 Beq，再对**已有 Beq 的活跃流**求均值；新加入但尚未发布 Beq 的流不进入该时刻的分母。曲线会保持旧值，直到该流发布新 Beq 或离开。
+
+按阶段取图中序列的中位数，可得到：
+
+| 阶段 | Fair share | FBBR mean Beq | Native MaxBw | 阶段末 Beq 覆盖 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 flows（上升） | 50.000 | 47.216 | 54.951 | 2/2（100%） |
+| 4 flows（上升） | 25.000 | 36.092 | 41.488 | 3/4（75.0%） |
+| 8 flows（上升） | 12.500 | 19.599 | 26.705 | 7/8（87.5%） |
+| 16 flows | 6.250 | 9.451 | 16.101 | 15/16（93.8%） |
+| 8 flows（下降） | 12.500 | 16.773 | 25.896 | 7/8（87.5%） |
+| 4 flows（下降） | 25.000 | 25.182 | 40.117 | 4/4（100%） |
+| 2 flows（下降） | 50.000 | 38.111 | 60.936 | 2/2（100%） |
+
+Native MaxBw 在所有阶段都高于公平份额，尤其在 16 流时约为公平份额的 2.58 倍。这符合最大值滤波器会保留 probing 峰值的特征，也解释了直接依赖 native MaxBw 容易形成过量 inflight。
+
+Beq 在前六个阶段比 native MaxBw 更接近公平份额，4 流下降阶段几乎重合；但它并非无偏估计：4、8、16 流上升阶段仍高估约 44%～57%，8 流下降阶段高估约 34%，最后 `4 -> 2` 后又低估约 24%。此外，上升阶段覆盖不完整，粉线不能解释为“所有活跃流均已得到公平份额估计”。
+
+还要注意，最新 `seed1` trace 中共有 23 次有效 CRUISE 发布，`beq_source` 全部是 `GUARD_FILTER`，没有直接的波形 Beq 发布；最后一次发布发生在 836.05 s（13.93 min）。因此，13.93 min 之后粉线在减流边界上的阶梯变化，主要是旧的逐流保持值随活跃流集合缩小而重新求均值，并非控制器产生了新的估计。(d) 能支持的结论是：这些 held GuardBw/Beq 值明显削弱了 native MaxBw 的峰值偏差；它不能证明 Beq 已覆盖所有流或能持续跟踪减流后的公平份额。
+
+## 8. 结论边界
+
+- 当前图每个算法只展示一个确定性运行，没有误差条或置信区间；FBBR 最终结果固定为最新 `seed=1`，不能据此声称跨 seed 显著性。
+- 虽然各算法的 `seed` 都是 1，但 `run_id` 不同，ns-3 与 DQC 的随机子流并不是严格的 common-random-number 配对。
+- 40 BDP 是非常深的 DropTail 队列。BBRv2 系列出现 1.4～1.6 s 排队，是该配置下的结果，不能直接外推到浅缓冲、AQM、ECN 或不同 RTT/容量环境。
+- 图 (a)～(c) 是 60 s 窗口，边界点包含阶段混合；上文的总体表和 16 流表来自 stage-level 0.1 s 采样，二者统计口径不同，不应逐点强行对应。
+- 图 (d) 是算法内部诊断，不是端到端性能指标；Beq 覆盖率和保持规则必须与估计值一起解读。
+
+## 9. 运行与重绘
+
+从 `NS3.27` 目录运行完整的标准实验：
+
+```bash
+examples/paper-test/test1/run_test1.sh --jobs=4
+```
+
+快速检查构建、控制器工厂和 CSV 输出：
 
 ```bash
 examples/paper-test/test1/run_test1.sh --smoke
 ```
 
-After a successful build, `--skip-build` reuses the existing binary.
-Independent controller runs can be executed in deterministic manifest order in
-parallel, for example `examples/paper-test/test1/run_test1.sh --jobs=4`.
-The default is one job.
+使用当前已选定的数据精确重绘本文四面板图：
 
-## Scenario
+```bash
+python3 examples/paper-test/test1/render_selected_fig1.py \
+  --baseline-raw results/test1/raw \
+  --fbbr-raw results/test1/fbbr_rerun_seed1_seed9_diag_20260730/raw \
+  --seed 1 \
+  --output-dir results/test1
+```
 
-- Dumbbell bottleneck: C=100 Mbit/s, base RTT=40 ms, DropTail buffer=40 BDP.
-- Up to 16 long-lived DQC flows.
-- Dynamic active-flow sequence: `2 -> 4 -> 8 -> 16 -> 8 -> 4 -> 2`.
-- The 1800-second simulation is divided evenly across the seven stages.
-- Controllers: `BBR-R`, `oBBR`, `BBRv2+`, `CUBIC`, `BBRv2-ideal`, `BBRv2`,
-  and `FBBR`.
-
-`BBRv2` has no scheduling suffix and is the original BBRv2 implementation.
-`BBRv2-ideal` is the only experiment-specific variant. It still constructs the
-same BBRv2 controller, but uses the BBRv2 ProbeBW-UP admission gate so active
-flows enter UP in flow-ID order. The gate gives each stage one sequence
-`1..N`, and holds later entries until the preceding UP exits. It enforces the
-requested invariant: no other flow is in ProbeBW-UP while one flow is probing.
-
-The other seven algorithms use their original factory type and control logic.
-No no-ProbeRTT aliases are selected by this experiment. ProbeRTT remains a
-recorded observation, rather than a cross-algorithm modification. The
-`pre_all_other_cruise` event field is retained as a diagnostic; it is not a
-stronger replacement for the requested no-overlapping-UP condition.
-
-For focused controller diagnostics, the executable also accepts
-`--flowPattern=steady1`, `steady8`, or `steady16`. These run one unchanged
-active-flow stage for the requested count and are useful for separating a
-single-flow waveform, steady contention, and a join/leave transition. They
-are diagnostic modes and are not consumed by the canonical seven-stage
-analysis script.
-
-## Outputs
-
-`results/test1/raw/manifest.csv` is the authoritative list of files for the
-latest runner invocation. It lists each run's summary, stage metrics, flow
-metrics, UP events, one-minute metrics, and metadata.
-
-`results/test1/summary/` contains:
-
-- `comparison_metrics.csv`: every controller at every dynamic stage.
-- `overall_comparison_metrics.csv`: equal-stage summary per controller.
-- `all_runs.csv`, `all_stage_metrics.csv`, `all_flow_metrics.csv`,
-  `all_ideal_up_events.csv`, `all_minute_metrics.csv`, and
-  `all_minute_flow_metrics.csv`: concatenated raw
-  measurements.
-- `METRICS.md`: complete field-level comparison metric catalog.
-- `fig1a_data.csv` and `fig1b_data.csv`: time-indexed data used by the plots.
-- `fig1b_stage_data.csv`, `fig1b_minute_data.csv`, and
-  `fig1b_minute_flow_data.csv`: retained stage, aggregate, and per-flow
-  one-minute inputs for Fig. 1(b).
-- `validation.csv`: lifecycle and ideal-UP ordering checks.
-
-`results/test1/RESULTS.md` is regenerated after every completed run. It records
-the configuration, validation result, and the N=16 comparison table.
-
-`results/test1/figures/` contains two figures:
-
-- `fig1a_maxbw_theory_vs_measured.png`: per-UP BBRv2-ideal theoretical and
-  measured MaxBw positioned at the actual simulation time of each event.
-- `fig1b_excess_inflight_and_queue_delay.png`: a four-panel one-minute
-  comparison for all eight algorithms: queue delay, aggregate goodput, mean
-  active-flow goodput, and Jain fairness.
-
-Both plots use simulation time on the horizontal axis: labels appear every two
-minutes (`2`, `4`, `6`, ...) and unlabeled minor ticks appear every minute.
-
-Fig. 1(a) is deliberately limited to `BBRv2-ideal`, because its sequential
-ProbeBW-UP fluid recurrence is the theory being evaluated. Fig. 1(b) and the
-comparison CSVs include every algorithm, including the two FBBR branches.
+重绘脚本会更新 `results/test1/selection.json`、`summary/fig1b_*` 中间数据，以及 PNG/PDF 图。完整字段定义见 [`results/test1/summary/METRICS.md`](../../../results/test1/summary/METRICS.md)，实验入口见 [`test1-probe-order.cc`](test1-probe-order.cc)，批量运行逻辑见 [`run_test1.sh`](run_test1.sh)。
