@@ -222,9 +222,12 @@ class DynamicRttExperiment {
   {
     profile_.open((output_prefix_ + "_rtt_profile.csv").c_str());
     timeseries_.open((output_prefix_ + "_rtt_timeseries.csv").c_str());
+    probe_phase_trace_.open(
+        (output_prefix_ + "_probe_phase_trace.csv").c_str());
     summary_.open((output_prefix_ + "_run_summary.csv").c_str());
     metadata_.open((output_prefix_ + "_metadata.json").c_str());
-    if (!profile_.is_open() || !timeseries_.is_open() || !summary_.is_open() ||
+    if (!profile_.is_open() || !timeseries_.is_open() ||
+        !probe_phase_trace_.is_open() || !summary_.is_open() ||
         !metadata_.is_open()) {
       std::cerr << "Failed to open Test 3 output files under "
                 << output_prefix_ << std::endl;
@@ -256,11 +259,14 @@ class DynamicRttExperiment {
                 << "expected_bdp_bytes,aggregate_inflight_bytes,"
                 << "excess_inflight_bytes,queue_bytes,queue_delay_ms,"
                 << "sum_pacing_bps,sum_max_bw_bps,snapshot_flow_count,"
-                << "mean_srtt_us,mean_min_rtt_us,mean_fbbr_rtprop_us";
+                << "mean_srtt_us,mean_min_rtt_us";
     for (uint32_t flow_id = 1; flow_id <= kFixedFlows; ++flow_id) {
       timeseries_ << ",flow" << flow_id << "_received_bytes";
     }
     timeseries_ << "\n";
+    probe_phase_trace_
+        << "algorithm,mode,seed,run_id,phase_event_id,flow_id,event_time_s,"
+        << "stage_index,probe_phase\n";
     summary_ << "algorithm,mode,seed,run_id,simulation_time_s,active_flows,"
              << "capacity_bps,queue_bytes,profile_stages,queue_drop_packets,"
              << "queue_drop_bytes,validation_pass\n";
@@ -282,6 +288,14 @@ class DynamicRttExperiment {
     if (packet != nullptr) {
       queue_drop_bytes_ += packet->GetSize();
     }
+  }
+
+  void OnProbePhase(uint32_t flow_index,
+                    double event_time_s,
+                    const std::string& phase)
+  {
+    Simulator::ScheduleNow(&DynamicRttExperiment::HandleProbePhase, this,
+                           flow_index, event_time_s, phase);
   }
 
   void Sample()
@@ -317,6 +331,8 @@ class DynamicRttExperiment {
               << "  \"bottleneck_delay_s\": " << bottleneck_delay_s_ << ",\n"
               << "  \"profile_stages\": " << rtt_stages_.size() << ",\n"
               << "  \"sample_count\": " << sample_count_ << ",\n"
+              << "  \"probe_phase_transition_count\": "
+              << probe_phase_event_count_ << ",\n"
               << "  \"validation_pass\": " << (valid ? "true" : "false")
               << "\n}\n";
     return valid;
@@ -326,6 +342,21 @@ class DynamicRttExperiment {
   std::string ModeName() const
   {
     return ideal_ ? "ideal" : "original";
+  }
+
+  void HandleProbePhase(uint32_t flow_index,
+                        double event_time_s,
+                        const std::string& phase)
+  {
+    if (flow_index >= flows_.size()) {
+      return;
+    }
+    probe_phase_trace_ << algorithm_ << "," << ModeName() << "," << seed_
+                       << "," << run_id_ << "," << ++probe_phase_event_count_
+                       << "," << flows_[flow_index].flow_id << "," << std::fixed
+                       << std::setprecision(9) << event_time_s << ","
+                       << StageIndexForTime(event_time_s) << "," << phase
+                       << "\n";
   }
 
   size_t StageIndexForTime(double time_s) const
@@ -354,7 +385,6 @@ class DynamicRttExperiment {
     uint64_t sum_max_bw = 0;
     uint64_t sum_srtt_us = 0;
     uint64_t sum_min_rtt_us = 0;
-    uint64_t sum_fbbr_rtprop_us = 0;
     uint32_t snapshot_flow_count = 0;
     for (const FlowRuntime& flow : flows_) {
       DqcSender::Bbr2ExperimentSnapshot snapshot;
@@ -367,7 +397,6 @@ class DynamicRttExperiment {
       sum_max_bw += snapshot.max_bw_bps;
       sum_srtt_us += snapshot.srtt_us;
       sum_min_rtt_us += snapshot.min_rtt_us;
-      sum_fbbr_rtprop_us += snapshot.fbbr_rtprop_us;
     }
     const uint64_t excess_inflight = aggregate_inflight > expected_bdp_bytes
         ? aggregate_inflight - expected_bdp_bytes
@@ -380,9 +409,6 @@ class DynamicRttExperiment {
     const double mean_min_rtt_us = snapshot_flow_count > 0
         ? static_cast<double>(sum_min_rtt_us) / snapshot_flow_count
         : 0.0;
-    const double mean_fbbr_rtprop_us = snapshot_flow_count > 0
-        ? static_cast<double>(sum_fbbr_rtprop_us) / snapshot_flow_count
-        : 0.0;
     timeseries_ << algorithm_ << "," << ModeName() << "," << seed_ << ","
                 << run_id_ << "," << std::fixed << std::setprecision(6)
                 << now_s << "," << stage_index << "," << stage.base_rtt_s
@@ -391,7 +417,7 @@ class DynamicRttExperiment {
                 << excess_inflight << "," << queue_bytes << ","
                 << queue_delay_ms << "," << sum_pacing << "," << sum_max_bw
                 << "," << snapshot_flow_count << "," << mean_srtt_us << ","
-                << mean_min_rtt_us << "," << mean_fbbr_rtprop_us;
+                << mean_min_rtt_us;
     for (const FlowRuntime& flow : flows_) {
       timeseries_ << "," << flow.receiver->GetReceivedBytes();
     }
@@ -417,8 +443,10 @@ class DynamicRttExperiment {
   uint64_t queue_drop_packets_ = 0;
   uint64_t queue_drop_bytes_ = 0;
   uint64_t sample_count_ = 0;
+  uint64_t probe_phase_event_count_ = 0;
   std::ofstream profile_;
   std::ofstream timeseries_;
+  std::ofstream probe_phase_trace_;
   std::ofstream summary_;
   std::ofstream metadata_;
 };
@@ -652,6 +680,12 @@ main(int argc, char* argv[])
       bottleneck_queue, output_prefix);
   experiment.SetFlows(flows);
   experiment.OpenOutputs();
+  for (uint32_t index = 0; index < kFixedFlows; ++index) {
+    flows[index].sender->SetBbr2ExperimentPhaseTrace(
+        [&experiment, index](double event_time_s, const std::string& phase) {
+          experiment.OnProbePhase(index, event_time_s, phase);
+        });
+  }
   if (bottleneck_queue != nullptr) {
     bottleneck_queue->TraceConnectWithoutContext(
         "Drop", MakeCallback(&DynamicRttExperiment::OnQueueDrop, &experiment));

@@ -37,6 +37,11 @@ outputs are under `results/test3/raw/DYN-RTT`, and the analyzer produces
 `results/test3/RESULTS.md`, per-stage and transition CSV summaries, and
 `results/test3/figures/dynamic_rtt_response.png`.
 
+Each raw run also writes `*_probe_phase_trace.csv`. It records exact
+BBRv2-style ProbeBW phase entries per flow, including the RTT-stage index, so
+the CRUISE/REFILL/UP/DOWN cycle can be inspected without relying on the
+100 ms aggregate time series.
+
 For each 60-second RTT stage, settled metrics exclude its first 15 seconds:
 aggregate goodput, utilization, per-flow goodput, Jain fairness, queue delay,
 inflight/expected-BDP, and BBR-style SRTT/MinRTT when available. The transition

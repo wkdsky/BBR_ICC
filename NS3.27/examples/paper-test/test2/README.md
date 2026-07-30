@@ -48,6 +48,9 @@ All experimental output is written only below `NS3.27/results/test2`:
 
 - `raw/manifest.csv`: authoritative list of all raw files for the invocation.
 - `raw/<scenario ID>/`: per-controller CSV and JSON measurements.
+- `raw/<scenario ID>/*_probe_phase_trace.csv`: exact BBRv2-style ProbeBW
+  phase-entry trace for each flow (`PROBE_DOWN`, `PROBE_CRUISE`,
+  `PROBE_REFILL`, `PROBE_UP`, and extension phases when applicable).
 - `logs/<scenario ID>/`: simulator stdout/stderr logs.
 - `summary/scenario_key_metrics.csv`: primary one-row-per-scenario-controller key-metrics table.
 - `summary/scenario_stage_metrics.csv`: fixed four-flow stage measurements.

@@ -247,6 +247,8 @@ class FixedFourExperiment {
   void OpenOutputs()
   {
     events_.open((output_prefix_ + "_events.csv").c_str());
+    probe_phase_trace_.open(
+        (output_prefix_ + "_probe_phase_trace.csv").c_str());
     stage_metrics_.open((output_prefix_ + "_stage_metrics.csv").c_str());
     flow_metrics_.open((output_prefix_ + "_flow_metrics.csv").c_str());
     minute_metrics_.open((output_prefix_ + "_minute_metrics.csv").c_str());
@@ -254,7 +256,8 @@ class FixedFourExperiment {
         (output_prefix_ + "_minute_flow_metrics.csv").c_str());
     run_summary_.open((output_prefix_ + "_run_summary.csv").c_str());
     metadata_.open((output_prefix_ + "_metadata.json").c_str());
-    if (!events_.is_open() || !stage_metrics_.is_open() ||
+    if (!events_.is_open() || !probe_phase_trace_.is_open() ||
+        !stage_metrics_.is_open() ||
         !flow_metrics_.is_open() || !minute_metrics_.is_open() ||
         !minute_flow_metrics_.is_open() || !run_summary_.is_open() ||
         !metadata_.is_open()) {
@@ -266,6 +269,9 @@ class FixedFourExperiment {
     events_ << "algorithm,mode,seed,run_id,event_id,flow_id,probe_order,"
             << "pre_other_up_count,max_concurrent_up,start_time_s,end_time_s,"
             << "duration_s\n";
+    probe_phase_trace_
+        << "algorithm,mode,seed,run_id,phase_event_id,flow_id,event_time_s,"
+        << "stage_index,probe_phase\n";
     stage_metrics_
         << "algorithm,mode,seed,run_id,stage_index,stage_label,active_flows,"
         << "stage_start_s,stage_end_s,measurement_start_s,measurement_end_s,"
@@ -450,7 +456,15 @@ class FixedFourExperiment {
                         double event_time_s,
                         const std::string& phase)
   {
-    if (!ideal_ || flow_index >= flows_.size()) {
+    if (flow_index >= flows_.size()) {
+      return;
+    }
+    probe_phase_trace_ << algorithm_ << "," << ModeName() << "," << seed_
+                       << "," << run_id_ << "," << ++probe_phase_event_count_
+                       << "," << flows_[flow_index].flow_id << "," << std::fixed
+                       << std::setprecision(9) << event_time_s << ",0,"
+                       << phase << "\n";
+    if (!ideal_) {
       return;
     }
     if (phase == "PROBE_UP") {
@@ -799,6 +813,8 @@ class FixedFourExperiment {
               << "  \"base_bdp_bytes\": " << bdp_bytes_ << ",\n"
               << "  \"queue_bdp\": " << queue_bdp_ << ",\n"
               << "  \"queue_bytes\": " << queue_bytes_ << ",\n"
+              << "  \"probe_phase_transition_count\": "
+              << probe_phase_event_count_ << ",\n"
               << "  \"ideal_sequence_validation\": "
               << (ideal_sequence_valid ? "true" : "false") << ",\n"
               << "  \"validation_pass\": "
@@ -849,8 +865,10 @@ class FixedFourExperiment {
   uint64_t queue_drop_packets_end_ = 0;
   uint64_t queue_drop_bytes_end_ = 0;
   uint32_t max_concurrent_up_ = 0;
+  uint64_t probe_phase_event_count_ = 0;
   bool probe_rtt_seen_ = false;
   std::ofstream events_;
+  std::ofstream probe_phase_trace_;
   std::ofstream stage_metrics_;
   std::ofstream flow_metrics_;
   std::ofstream minute_metrics_;
@@ -1079,13 +1097,13 @@ main(int argc, char* argv[])
     bottleneck_queue->TraceConnectWithoutContext(
         "Drop", MakeCallback(&FixedFourExperiment::OnQueueDrop, &experiment));
   }
+  for (uint32_t i = 0; i < kFixedFlows; ++i) {
+    flows[i].sender->SetBbr2ExperimentPhaseTrace(
+        [&experiment, i](double event_time_s, const std::string& phase) {
+          experiment.OnProbePhase(i, event_time_s, phase);
+        });
+  }
   if (ideal) {
-    for (uint32_t i = 0; i < kFixedFlows; ++i) {
-      flows[i].sender->SetBbr2ExperimentPhaseTrace(
-          [&experiment, i](double event_time_s, const std::string& phase) {
-            experiment.OnProbePhase(i, event_time_s, phase);
-          });
-    }
     experiment.ConfigureFormalProbeUps();
   }
 

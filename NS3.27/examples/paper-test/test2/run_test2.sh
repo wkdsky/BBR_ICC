@@ -85,7 +85,7 @@ fi
 
 export LD_LIBRARY_PATH="${NS3_DIR}/build${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 printf '%s\n' \
-  'scenario_id,capacity_bps,capacity_mbps,base_rtt_s,base_rtt_ms,buffer_bdp,bottleneck_delay_s,access_bps,purpose,algorithm,mode,seed,run_id,run_summary_path,stage_metrics_path,flow_metrics_path,events_path,minute_metrics_path,minute_flow_metrics_path,metadata_path' \
+  'scenario_id,capacity_bps,capacity_mbps,base_rtt_s,base_rtt_ms,buffer_bdp,bottleneck_delay_s,access_bps,purpose,algorithm,mode,seed,run_id,run_summary_path,stage_metrics_path,flow_metrics_path,events_path,probe_phase_trace_path,minute_metrics_path,minute_flow_metrics_path,metadata_path' \
   > "${MANIFEST_REL}"
 
 run_case() {
@@ -138,7 +138,7 @@ run_case() {
     tail -n 160 "${log_path}" >&2
     exit 1
   fi
-  for suffix in run_summary stage_metrics flow_metrics events minute_metrics minute_flow_metrics; do
+  for suffix in run_summary stage_metrics flow_metrics events probe_phase_trace minute_metrics minute_flow_metrics; do
     if [[ ! -s "${prefix}_${suffix}.csv" ]]; then
       echo "Missing expected result file for ${prefix}: ${suffix}" >&2
       exit 1
@@ -148,13 +148,14 @@ run_case() {
     echo "Missing expected metadata for ${prefix}" >&2
     exit 1
   fi
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${scenario_id}" "${capacity_bps}" "${capacity_mbps}" \
     "${base_rtt_s}" "${base_rtt_ms}" "${buffer_bdp}" \
     "${bottleneck_delay_s}" "${access_bps}" "${purpose}" \
     "${algorithm}" "${mode}" "${seed}" "${run_id}" \
     "${prefix}_run_summary.csv" "${prefix}_stage_metrics.csv" \
     "${prefix}_flow_metrics.csv" "${prefix}_events.csv" \
+    "${prefix}_probe_phase_trace.csv" \
     "${prefix}_minute_metrics.csv" "${prefix}_minute_flow_metrics.csv" \
     "${prefix}_metadata.json" > "${manifest_entry}"
 }
