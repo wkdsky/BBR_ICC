@@ -1,0 +1,7 @@
+scenario_id,capacity_bps,capacity_mbps,base_rtt_s,base_rtt_ms,buffer_bdp,bottleneck_delay_s,access_bps,purpose
+BASE,100000000,100,0.040,40,2,0.010,1000000000,Baseline
+BUF-S,100000000,100,0.040,40,0.5,0.010,1000000000,Shallow buffer pressure
+BW-L,10000000,10,0.040,40,2,0.010,100000000,Low bandwidth
+BW-H,1000000000,1000,0.040,40,2,0.010,10000000000,High bandwidth
+RTT-S,100000000,100,0.010,10,2,0.0025,1000000000,Short propagation RTT
+RTT-L,100000000,100,0.200,200,2,0.050,1000000000,Long propagation RTT

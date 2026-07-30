@@ -49,14 +49,13 @@ IsBbr2StyleAlgorithm(CongestionControlType type)
            type == kBBRv2NoProbeRtt ||
            type == kBBRv2Plus || type == kBBRv2PlusEcn ||
            type == kFreqCC || type == kFreqCCv2 ||
-           type == kFreqCCv3 || type == kFBBR ||
-           type == kFBBRServiceFair;
+           type == kFreqCCv3 || type == kFBBR;
 }
 
 bool
 IsFBBRAlgorithm(CongestionControlType type)
 {
-    return type == kFBBR || type == kFBBRServiceFair;
+    return type == kFBBR;
 }
 
 std::string
@@ -196,7 +195,7 @@ void DqcSender::SetEquivalenceAuditTracePrefix(const std::string& prefix){
         m_equivalencePacing<<"time_s,native_pacing_bps,final_pacing_rate_bps"
                            <<",current_native_bw_bps,pacing_base_bw_bps"
                            <<",pacing_base_source,phase_pacing_gain"
-                           <<",should_oscillate,trusted_bw_valid\n";
+                           <<",should_oscillate,beq_valid\n";
     }
     m_equivalenceSentBytes=0;
     m_equivalenceAckedBytes=0;
@@ -519,9 +518,7 @@ void DqcSender::FinalizeCongestionControlTrace(){
     SendPacketManager* sent_manager = m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo =
         sent_manager ? sent_manager->GetSendAlgorithm() : nullptr;
-    if (algo &&
-        (algo->GetCongestionControlType() == kFBBR ||
-         algo->GetCongestionControlType() == kFBBRServiceFair)) {
+    if (algo && algo->GetCongestionControlType() == kFBBR) {
         static_cast<FBBRSender*>(algo)->FinalizeFbbrTrace();
     }
 }
@@ -996,7 +993,7 @@ void DqcSender::ConfigureFBBR(const dqc::FBBRConfig& config,
     }
 
     ConfigureFreqCC(freq_hz, config.default_amplitude_mode, fixed_mbps,
-                    "after_drain", config.waveform_recv_signal_mode);
+                    "after_drain", "delivery_rate_latest");
 
     SendPacketManager *sent_manager=m_connection.GetSentPacketManager();
     SendAlgorithmInterface* algo = sent_manager->GetSendAlgorithm();
@@ -1198,8 +1195,11 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
 
         FBBRAmplitudeMode amp_mode = FBBRAmplitudeMode::kFixed;
         uint64_t fixed_bps = static_cast<uint64_t>(fixed_mbps * 1000000);
+        uint32_t sr_denominator = 1;
 
-        if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
+        if(ParseFBBRSendingRateDenominator(amplitude_mode, &sr_denominator)){
+            amp_mode = FBBRAmplitudeMode::kSRFraction;
+        } else if(amplitude_mode == "2miu" || amplitude_mode == "miu2"){
             amp_mode = FBBRAmplitudeMode::kMiu2;
         } else if(amplitude_mode == "3miu" || amplitude_mode == "miu3"){
             amp_mode = FBBRAmplitudeMode::kMiu3;
@@ -1207,18 +1207,6 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
             amp_mode = FBBRAmplitudeMode::kMiu4;
         } else if(amplitude_mode == "8miu" || amplitude_mode == "miu8"){
             amp_mode = FBBRAmplitudeMode::kMiu8;
-        } else if(amplitude_mode == "2sr" || amplitude_mode == "sr2"){
-            amp_mode = FBBRAmplitudeMode::kSR2;
-        } else if(amplitude_mode == "3sr" || amplitude_mode == "sr3"){
-            amp_mode = FBBRAmplitudeMode::kSR3;
-        } else if(amplitude_mode == "4sr" || amplitude_mode == "sr4"){
-            amp_mode = FBBRAmplitudeMode::kSR4;
-        } else if(amplitude_mode == "8sr" || amplitude_mode == "sr8"){
-            amp_mode = FBBRAmplitudeMode::kSR8;
-        } else if(amplitude_mode == "12sr" || amplitude_mode == "sr12"){
-            amp_mode = FBBRAmplitudeMode::kSR12;
-        } else if(amplitude_mode == "16sr" || amplitude_mode == "sr16"){
-            amp_mode = FBBRAmplitudeMode::kSR16;
         } else {
             amp_mode = FBBRAmplitudeMode::kFixed;
             if(amplitude_mode != "0" && !amplitude_mode.empty()) {
@@ -1231,7 +1219,7 @@ void DqcSender::ConfigureFreqCC(double freq_hz, const std::string& amplitude_mod
                 }
             }
         }
-        fbbr->SetOscillationAmplitude(amp_mode, fixed_bps);
+        fbbr->SetOscillationAmplitude(amp_mode, fixed_bps, sr_denominator);
         bool use_delivery_rate_latest =
             recv_signal_mode == "delivery_rate_latest" ||
             recv_signal_mode == "delivery_latest" ||

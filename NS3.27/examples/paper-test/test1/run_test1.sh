@@ -10,6 +10,7 @@ MANIFEST_REL="${RAW_REL}/manifest.csv"
 MANIFEST_ENTRIES_REL="${RAW_REL}/manifest_entries"
 TARGET="test1-probe-order"
 BINARY_REL="build/examples/paper-test/test1/ns3.27-test1-probe-order-optimized"
+FBBR_CONFIG_REL="examples/CCconfig/fbbr_default.conf"
 
 SMOKE=0
 SKIP_BUILD=0
@@ -34,6 +35,10 @@ fi
 cd "${NS3_DIR}"
 mkdir -p "${RAW_REL}" "${LOGS_REL}" "${RESULTS_REL}/summary" \
   "${RESULTS_REL}/figures" "${MANIFEST_ENTRIES_REL}"
+if [[ ! -r "${FBBR_CONFIG_REL}" ]]; then
+  echo "Missing FBBR configuration: ${NS3_DIR}/${FBBR_CONFIG_REL}" >&2
+  exit 1
+fi
 
 # Waf exports public DQC headers as read-only copies. Keep them aligned with
 # the experiment's source tree before compiling the selected example target.
@@ -52,6 +57,7 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   sync_exported_header src/dqc/model/dqc_sender.h
   sync_exported_header src/dqc/model/dqc_receiver.h
   sync_exported_header src/dqc/model/thirdparty/congestion/quic_bbr2_sender.h
+  sync_exported_header src/dqc/model/thirdparty/congestion/fbbr_config_loader.h
   sync_exported_header src/dqc/model/thirdparty/congestion/fbbr_sender.h
   sync_exported_header src/dqc/model/thirdparty/include/proto_types.h
   ./waf build --targets="${TARGET}"
@@ -92,6 +98,9 @@ run_case() {
     "--outputDir=${RAW_REL}"
     --queueBdp=40
   )
+  if [[ "${algorithm}" == "FBBR" ]]; then
+    command_args+=("--fbbrConfig=${FBBR_CONFIG_REL}")
+  fi
   if [[ "${SMOKE}" -eq 1 ]]; then
     command_args+=(
       --simulationTime=210
@@ -134,7 +143,6 @@ algorithms=(
   BBRv2-ideal
   BBRv2
   FBBR
-  FBBR-ServiceFair
 )
 
 active_pids=()

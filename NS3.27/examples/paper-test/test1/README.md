@@ -35,7 +35,7 @@ The default is one job.
 - Dynamic active-flow sequence: `2 -> 4 -> 8 -> 16 -> 8 -> 4 -> 2`.
 - The 1800-second simulation is divided evenly across the seven stages.
 - Controllers: `BBR-R`, `oBBR`, `BBRv2+`, `CUBIC`, `BBRv2-ideal`, `BBRv2`,
-  `FBBR`, and `FBBR-ServiceFair`.
+  and `FBBR`.
 
 `BBRv2` has no scheduling suffix and is the original BBRv2 implementation.
 `BBRv2-ideal` is the only experiment-specific variant. It still constructs the

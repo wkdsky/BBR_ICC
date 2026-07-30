@@ -11,6 +11,7 @@
 #include "ns3/applications-module.h"
 #include "ns3/core-module.h"
 #include "ns3/dqc-module.h"
+#include "ns3/fbbr_config_loader.h"
 #include "ns3/internet-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
 #include "ns3/network-module.h"
@@ -38,6 +39,8 @@ namespace {
 
 const uint32_t kMaximumFlows = 16;
 const double kMinuteWindowS = 60.0;
+const char kDefaultFBBRConfig[] =
+    "/home/wkd/FreqBBR/NS3.27/examples/CCconfig/fbbr_default.conf";
 
 struct StageConfig {
   uint32_t index = 0;
@@ -373,9 +376,6 @@ ResolveAlgorithm(const std::string& algorithm)
   if (algorithm == "FBBR") {
     return dqc::kFBBR;
   }
-  if (algorithm == "FBBR-ServiceFair") {
-    return dqc::kFBBRServiceFair;
-  }
   return dqc::kBBRv2;
 }
 
@@ -385,31 +385,33 @@ IsKnownAlgorithm(const std::string& algorithm)
   return algorithm == "BBR-R" || algorithm == "oBBR" ||
       algorithm == "BBRv2+" || algorithm == "CUBIC" ||
       algorithm == "BBRv2-ideal" || algorithm == "BBRv2" ||
-      algorithm == "FBBR" || algorithm == "FBBR-ServiceFair";
+      algorithm == "FBBR";
 }
 
 bool
 IsFBBRAlgorithm(const std::string& algorithm)
 {
-  return algorithm == "FBBR" || algorithm == "FBBR-ServiceFair";
+  return algorithm == "FBBR";
 }
 
-dqc::FBBRConfig
-BuildFBBRConfig(bool diagnostic_trace)
+bool
+LoadExperimentFBBRConfig(const std::string& path,
+                         bool diagnostic_trace,
+                         dqc::FBBRConfig* config)
 {
-  dqc::FBBRConfig config;
-  config.pacing_minimum_rate_mbps = 0.2;
-  if (diagnostic_trace) {
-    config.trace_gate_trace_mode = "sampled_pacing";
-    config.trace_gate_trace_sample_interval_us = 20000;
-    config.trace_enable_cruise_window_trace = true;
-    config.trace_enable_trusted_bw_selection_trace = true;
-  } else {
-    config.trace_gate_trace_mode = "off";
-    config.trace_enable_cruise_window_trace = false;
-    config.trace_enable_trusted_bw_selection_trace = false;
+  std::string error;
+  if (!dqc::LoadFBBRConfigFile(path, config, &error)) {
+    std::cerr << "[fbbr-config error] " << error << std::endl;
+    return false;
   }
-  return config;
+  if (diagnostic_trace) {
+    config->trace_gate_trace_mode = "sampled_pacing";
+    config->trace_gate_trace_sample_interval_us = 20000;
+    config->trace_enable_cruise_window_trace = true;
+    config->trace_enable_beq_selection_trace = true;
+  }
+  std::cout << "[fbbr-config] loaded " << path << std::endl;
+  return true;
 }
 
 class Experiment {
@@ -988,7 +990,7 @@ class Experiment {
       return;
     }
     uint32_t flow_id = 0;
-    if (label == "FREQ_GATE_TRACE" || label == "SERVICE_FAIRNESS") {
+    if (label == "FREQ_GATE_TRACE") {
       std::istringstream fields(diagnostics);
       double trace_time_s = 0.0;
       char separator = '\0';
@@ -1429,7 +1431,7 @@ InstallFlow(dqc::CongestionControlType cc_type,
   send_app->ConfigurePeer(recv_app->GetLocalAddress().GetIpv4(), port);
   send_app->SetStreamSendBufferBytes(send_buffer_bytes);
   if (IsFBBRAlgorithm(algorithm)) {
-    send_app->ConfigureFBBR(fbbr_config, flow_index + 1);
+    send_app->ConfigureFBBR(fbbr_config, flow_index);
   }
   send_app->SetStartTime(Seconds(app_start_s));
   send_app->SetStopTime(Seconds(app_stop_s));
@@ -1466,10 +1468,11 @@ main(int argc, char* argv[])
   double strict_min_up_s = 0.040;
   double strict_max_up_s = 0.080;
   bool diagnostic_trace = false;
+  std::string fbbr_config_path = kDefaultFBBRConfig;
 
   CommandLine cmd;
   cmd.AddValue("algorithm",
-               "BBR-R, oBBR, BBRv2+, CUBIC, BBRv2-ideal, BBRv2, FBBR, or FBBR-ServiceFair",
+               "BBR-R, oBBR, BBRv2+, CUBIC, BBRv2-ideal, BBRv2, or FBBR",
                algorithm);
   cmd.AddValue("outputDir", "Relative output directory", output_dir);
   cmd.AddValue("flowPattern",
@@ -1501,6 +1504,8 @@ main(int argc, char* argv[])
   cmd.AddValue("diagnosticTrace",
                "Write 20 ms queue, flow, and FBBR decision traces",
                diagnostic_trace);
+  cmd.AddValue("fbbrConfig", "FBBR key=value configuration path",
+               fbbr_config_path);
   cmd.Parse(argc, argv);
 
   if (!IsKnownAlgorithm(algorithm) || !IsSupportedFlowPattern(flow_pattern) ||
@@ -1616,7 +1621,12 @@ main(int argc, char* argv[])
   Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
   const dqc::CongestionControlType cc_type = ResolveAlgorithm(algorithm);
-  const dqc::FBBRConfig fbbr_config = BuildFBBRConfig(diagnostic_trace);
+  dqc::FBBRConfig fbbr_config;
+  if (IsFBBRAlgorithm(algorithm) &&
+      !LoadExperimentFBBRConfig(fbbr_config_path, diagnostic_trace,
+                                &fbbr_config)) {
+    return 1;
+  }
   std::vector<FlowRuntime> flows;
   flows.reserve(kMaximumFlows);
   for (uint32_t i = 0; i < kMaximumFlows; ++i) {

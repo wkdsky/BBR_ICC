@@ -713,7 +713,7 @@ LteUePhy::CreateDlCqiFeedbackMessage (const SpectrumValue& sinr)
 
   // CREATE DlCqiLteControlMessage
   Ptr<DlCqiLteControlMessage> msg = Create<DlCqiLteControlMessage> ();
-  CqiListElement_s dlcqi;
+  CqiListElement_s dlcqi = {};
   std::vector<int> cqi;
   if (Simulator::Now () > m_p10CqiLast + m_p10CqiPeriodicity)
     {

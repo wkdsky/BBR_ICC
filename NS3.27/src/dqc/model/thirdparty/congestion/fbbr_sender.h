@@ -41,7 +41,18 @@ enum class FBBRAmplitudeMode {
   kSR8,
   kSR12,
   kSR16,
+  // A configurable 1/N fraction of the current sending rate.
+  kSRFraction,
 };
+
+// Parses the canonical Nsr form (and the legacy srN alias). N is restricted
+// to the inclusive range [1, 20], so 20sr means current_sending_rate / 20.
+bool ParseFBBRSendingRateDenominator(const std::string& value,
+                                     uint32_t* denominator);
+
+// Valid values are fixed_mbps, a positive Mbps literal, legacy Miu modes, or
+// an Nsr sending-rate fraction accepted by ParseFBBRSendingRateDenominator().
+bool IsValidFBBRAmplitudeMode(const std::string& value);
 
 enum class FBBRGateTraceMode {
   kOff,
@@ -52,7 +63,8 @@ enum class FBBRGateTraceMode {
 
 enum class FBBRPacingBaseSource {
   kNativeBbr,
-  kTrustedBw,
+  kBeq,
+  kMaxBwFlatTrial,
   kWaveformCruiseBaseline,
 };
 
@@ -63,7 +75,7 @@ enum class WaveformCruiseState {
   kExtendCycle,
   kAnalyzeCycle,
   kWaitPostAdjustmentSettle,
-  kTrustedLocked,
+  kBeqLocked,
   kFallbackLocked,
 };
 
@@ -93,12 +105,8 @@ struct FBBRConfig {
   uint32_t stability_stable_rounds = 3;
   double stability_full_pipe_growth_threshold = 1.25;
 
-  bool trusted_bw_clear_on_cruise_start = true;
+  bool beq_clear_on_cruise_start = true;
 
-  std::string waveform_recv_signal_mode = "delivery_rate_latest";
-  double waveform_initial_settle_rtt_mult = 1.0;
-  double waveform_post_adjust_settle_rtt_mult = 1.0;
-  bool waveform_negative_half_first = true;
   double waveform_initial_window_periods = 2.0;
   double waveform_extended_window_periods = 3.0;
   double waveform_max_window_periods = 3.0;
@@ -113,31 +121,22 @@ struct FBBRConfig {
   double waveform_clip_max_slope_ratio = 0.10;
   double waveform_delta_drate_amplitude_ratio = 0.50;
   double waveform_delta_fallback_baseline_ratio = 0.25;
-  double waveform_plateau_min_duration_ratio = 0.10;
-  double waveform_plateau_max_slope_ratio = 0.20;
   double waveform_plateau_max_level_span_ratio = 0.15;
   // Active obvious-clipping guards in the time-waveform control path.
   double waveform_plateau_extreme_distance_ratio = 0.15;
-  double waveform_baseline_step_ratio = 0.25;
-  double waveform_amplitude_floor_ratio = 0.125;
-  uint32_t waveform_clip_floor_confirmations = 2;
   uint32_t waveform_max_baseline_adjustments = 8;
-  uint32_t waveform_max_inconclusive_extensions = 1;
   double waveform_inconclusive_signal_amplification_factor = 1.25;
   double waveform_inconclusive_signal_amplification_max_ratio = 2.0;
   double waveform_max_app_limited_sample_ratio = 0.25;
   double waveform_max_interpolation_gap_period_ratio = 0.10;
 
-  // FBBR and FBBR-ServiceFair use generalized Goertzel at the injected
+  // FBBR uses generalized Goertzel at the injected
   // frequency.  This is |X(f0)|^2 / (N * sum((x - mean(x))^2)).
   double goertzel_min_coherent_power_ratio = 0.10;
 
-  // FBBR and FBBR-ServiceFair quantified regime classifier and actuator.
+  // FBBR quantified regime classifier and actuator.
   double fbbr_regime_long_top_horizontal_duration_ratio = 0.20;
   double fbbr_regime_long_bottom_horizontal_duration_ratio = 0.30;
-  uint32_t fbbr_wave_fidelity_no_wave_trigger_windows = 2;
-  bool fbbr_wave_fidelity_stop_on_either_wave = true;
-  uint32_t fbbr_wave_fidelity_retry_window_advance_periods = 1;
 
   double waveform_activity_amplitude_noise_multiplier = 6.0;
   double waveform_activity_min_level_ratio = 0.02;
@@ -169,7 +168,6 @@ struct FBBRConfig {
   uint32_t waveform_repeated_clip_min_contact_samples_per_cycle = 2;
   uint32_t waveform_repeated_clip_min_total_contact_samples = 4;
   double waveform_repeated_clip_min_contact_sample_ratio = 0.05;
-  double waveform_repeated_clip_min_contact_span_ratio_of_window = 0.50;
   double waveform_repeated_clip_min_pooled_flat_fraction = 0.90;
   double waveform_repeated_clip_min_verified_boundary_fraction = 0.75;
   double waveform_repeated_clip_min_outside_excursion_ratio = 0.10;
@@ -197,12 +195,11 @@ struct FBBRConfig {
 
   double fbbr_regime_period_tolerance_ratio = 0.20;
   double fbbr_regime_min_periodicity_correlation = 0.50;
-  bool fbbr_regime_periodic_upper_clip_is_hard_veto = true;
 
   std::string trace_gate_trace_mode = "round_only";
   uint64_t trace_gate_trace_sample_interval_us = 10000;
   bool trace_enable_cruise_window_trace = true;
-  bool trace_enable_trusted_bw_selection_trace = true;
+  bool trace_enable_beq_selection_trace = true;
 };
 
 class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
@@ -221,7 +218,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   void SetOscillationFrequency(double freq_hz);
   void SetOscillationAmplitude(FBBRAmplitudeMode mode,
-                               uint64_t fixed_bps = 0);
+                               uint64_t fixed_bps = 0,
+                               uint32_t sr_denominator = 1);
   void SetRecvSignalMode(bool use_delivery_rate_latest);
   void SetFairShareBandwidthBps(uint64_t fair_share_bps);
   void SetConvergenceGateTraceEnabled(bool enabled);
@@ -246,7 +244,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                          QuicTime event_time,
                          const AckedPacketVector& acked_packets,
                          const LostPacketVector& lost_packets) override;
-  void OnConnectionMigration() override;
+
+  void OnApplicationLimited(QuicByteCount bytes_in_flight) override;
+  void OnUpdateEcnBytes(uint64_t ecn_ce_count) override;
 
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
   QuicByteCount GetCongestionWindow() const override;
@@ -274,7 +274,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                              const std::string& pacing_base_source,
                              double phase_pacing_gain,
                              bool should_oscillate,
-                             bool trusted_bw_valid)> PacingAuditTraceCallback;
+                             bool beq_valid)> PacingAuditTraceCallback;
   void SetPacingAuditTraceCallback(PacingAuditTraceCallback cb) {
     pacing_audit_trace_cb_ = cb;
   }
@@ -286,12 +286,12 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool has_loss;
   };
 
-  struct TrustedBwSelectionResult {
+  struct BeqSelectionResult {
     QuicBandwidth native_bw;
-    QuicBandwidth trusted_bw;
-    bool trusted_bw_valid;
-    double trusted_bw_conf;
-    const char* trusted_bw_source;
+    QuicBandwidth beq;
+    bool beq_valid;
+    double beq_conf;
+    const char* beq_source;
   };
 
 
@@ -308,24 +308,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool app_limited = false;
   };
 
-  enum class FbbrPreviousTrustedSource {
-    kTrusted,
+  enum class FbbrPreviousBeqSource {
+    kBeq,
     kGuard,
     kInvalid,
   };
 
-  enum class FbbrServiceFairAction {
-    kNotRun,
-    kAdditiveIncrease,
-    kMultiplicativeDecrease,
-    kHold,
-    kSkipAppLimited,
-    kSkipInvalidHistory,
-  };
-
   struct FbbrEnvelopeSnapshot {
-    bool previous_trusted_bw_valid = false;
-    bool previous_trusted_bw_from_guard = false;
+    bool previous_beq_valid = false;
+    bool previous_beq_from_guard = false;
     QuicBandwidth pacing_target = QuicBandwidth::Zero();
     QuicBandwidth pacing_base_target = QuicBandwidth::Zero();
     QuicByteCount plan_inflight = 0;
@@ -625,8 +616,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool valid = false;
     bool update_baseline = false;
     double next_baseline_bps = 0.0;
-    bool update_trusted_bw = false;
-    double trusted_bw_bps = 0.0;
+    bool update_beq = false;
+    double beq_bps = 0.0;
     bool regime_iii_mindrate_triggered = false;
     bool regime_iii_minbw_midpoint_triggered = false;
     double regime_iii_minbw_midpoint_bps = 0.0;
@@ -679,8 +670,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double delivery_rate_min_bps = 0.0;
     double delivery_rate_max_bps = 0.0;
     double delivery_rate_mean_bps = 0.0;
-    double latest_trusted_bw_bps = 0.0;
-    double smoothed_trusted_bw_bps = 0.0;
+    double latest_beq_bps = 0.0;
+    double smoothed_beq_bps = 0.0;
     double coverage_ratio = 0.0;
     double app_limited_ratio = 0.0;
     bool sender_waveform_valid = false;
@@ -782,11 +773,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool HasCustomProbeDownLogic() const override;
   bool ShouldExitCustomProbeDown(QuicByteCount bytes_in_flight,
                                  QuicByteCount bdp) const override;
+  bool ShouldDelayProbeBwCruiseExit(QuicTime now) const override;
   float GetProbeBwPacingGain(Bbr2ProbeBwMode::CyclePhase phase,
                              float pacing_gain) const override;
   float GetProbeBwCwndGain(Bbr2ProbeBwMode::CyclePhase phase,
                            float cwnd_gain) const override;
-  bool ShouldExitProbeUpAfterRound() const override;
   void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event) override;
   void InitializeFbbrRtpropFromModel();
@@ -795,6 +786,17 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                          bool from_probe_rtt);
 
   Bbr2ProbeBwMode::CyclePhase GetCurrentProbeBwPhase() const;
+  bool ShouldStartMaxBwFlatTrial() const;
+  void StartMaxBwFlatTrial(QuicTime now);
+  void UpdateMaxBwFlatTrial(const Bbr2CongestionEvent& congestion_event);
+  void FinishMaxBwFlatTrial(QuicTime now,
+                             bool accepted,
+                             const char* reason);
+  void ResetMaxBwFlatTrialState();
+  bool IsMaxBwFlatTrialPacingActive() const;
+  bool HasActiveWaveformCycle(QuicTime now) const;
+  bool IsWaveformCycleBoundary(QuicTime now) const;
+  QuicTime NextWaveformCycleBoundary(QuicTime now) const;
   bool BaseShouldOscillate() const;
   bool ShouldOscillate() const;
   uint64_t GetCurrentAmplitudeBps() const;
@@ -815,9 +817,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void ResetWaveformCruiseState(QuicTime now);
   void RunWaveformCruiseStateMachine(QuicTime now);
   bool IsFbbr() const;
-  bool IsFbbrServiceFair() const;
-  bool UsesFbbrServiceEnvelope() const;
-  bool HasUsableFbbrPreviousTrustedBw() const;
+  bool HasUsableFbbrPreviousBeq() const;
   TimeDelta CurrentFbbrRtprop() const;
 
   void RecordFbbrRateTargets(
@@ -844,24 +844,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       TimeDelta rtprop,
       bool current_app_limited,
       bool* app_limited_contaminated) const;
-  void ResetFbbrServiceFairState();
-  void UpdateFbbrServiceFairSignals(QuicTime now);
-  void RunFbbrServiceFairCycleUpdate(QuicTime now);
-  static double ComputeFbbrServiceFairAlphaBps(TimeDelta rtprop);
-  static double ApplyFbbrServiceFairRegimeIIIControlLimit(
-      double raw_candidate_bps,
-      double current_baseline_bps,
-      double service_rate_bps,
-      bool service_history_valid);
-  void ApplyFbbrServiceFairTrustedBwCorrection(
-      TrustedBwSelectionResult* selection,
-      bool regime_ii_candidate_selected);
-  static const char* FbbrServiceFairActionName(
-      FbbrServiceFairAction action);
-  void EmitFbbrServiceFairTrace(
-      QuicTime now,
-      const char* event,
-      WaveformClassification classification) const;
   QuicByteCount ComputeFbbrPlannedInflightBytes(
       QuicTime now,
       TimeDelta rtprop) const;
@@ -946,15 +928,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                                const std::string& action,
                                double baseline_before_bps,
                                double amplitude_before_bps) const;
-  void PublishWaveformTrustedBw();
-  void PublishFbbrCruiseTrustedBw();
-  void PublishTrustedBwSelection(const TrustedBwSelectionResult& selection);
+  void PublishWaveformBeq();
+  void PublishFbbrCruiseBeq();
+  void PublishBeqSelection(const BeqSelectionResult& selection);
   void UpdateGuardEstimatorFromCongestionEvent(
       const Bbr2CongestionEvent& congestion_event);
   void StartGuardMeasurementWindow(
       const Bbr2CongestionEvent& congestion_event);
   void UpdateGuardFilter(QuicBandwidth raw_sample);
-  void AnchorGuardFilter(QuicBandwidth trusted_bw);
+  void AnchorGuardFilter(QuicBandwidth beq);
   TimeDelta CurrentGuardRttSample(
       const Bbr2CongestionEvent& congestion_event) const;
   TimeDelta CurrentGuardMinRtt(TimeDelta fallback_rtt) const;
@@ -971,9 +953,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void UpdateReconvergenceEvidence(QuicBandwidth completed_d_round,
                                    bool completed_d_valid);
   void UpdateFreqWeightAndToolState();
-  void ClearTrustedBw(const char* reason);
-  void ClearTrustedBwApplication(const char* reason) const;
-  bool IsTrustedBwApplicationPhase(Bbr2ProbeBwMode::CyclePhase phase) const;
+  void ClearBeq(const char* reason);
+  void ClearBeqApplication(const char* reason) const;
+  bool IsBeqApplicationPhase(Bbr2ProbeBwMode::CyclePhase phase) const;
   bool IsCruisePhase(Bbr2ProbeBwMode::CyclePhase phase) const;
   static const char* PhaseApplicationName(Bbr2ProbeBwMode::CyclePhase phase);
   static const char* PacingBaseSourceName(FBBRPacingBaseSource source);
@@ -1252,9 +1234,33 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double configured_modulation_freq_hz_;
   FBBRAmplitudeMode amplitude_mode_;
   uint64_t fixed_amplitude_bps_;
+  uint32_t sr_amplitude_denominator_;
   uint64_t minimum_pacing_rate_bps_;
   bool drain_completed_;
   bool in_cruise_;
+  bool maxbw_flat_trial_active_;
+  uint32_t maxbw_flat_good_rounds_;
+  QuicBandwidth maxbw_flat_trial_rate_;
+  QuicBandwidth maxbw_flat_fallback_baseline_;
+  TimeDelta maxbw_flat_entry_srtt_;
+  TimeDelta maxbw_flat_round_max_srtt_;
+  QuicByteCount maxbw_flat_round_start_delivered_;
+  QuicTime maxbw_flat_round_start_time_;
+  bool maxbw_flat_round_started_;
+  bool maxbw_flat_failure_pending_;
+  bool maxbw_flat_ecn_failure_pending_;
+  QuicTime maxbw_flat_trial_start_time_;
+  TimeDelta maxbw_flat_trial_elapsed_;
+  bool maxbw_flat_trial_finished_;
+  mutable bool maxbw_flat_native_exit_requested_;
+  mutable QuicTime maxbw_flat_native_exit_request_time_;
+  mutable bool maxbw_flat_cruise_exit_delay_active_;
+  mutable QuicTime maxbw_flat_cruise_exit_not_before_;
+  bool maxbw_flat_waveform_epoch_pending_;
+  uint64_t maxbw_flat_last_ecn_ce_count_;
+  bool cruise_exit_force_immediate_;
+  mutable bool cruise_exit_pending_;
+  mutable QuicTime cruise_exit_cycle_end_;
   bool current_cruise_rtprop_updated_;
   bool previous_cruise_rtprop_updated_;
   bool rtprop_probe_down_active_;
@@ -1295,7 +1301,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double waveform_window_periods_;
   bool waveform_window_extended_;
   bool underload_located_;
-  bool trusted_baseline_locked_;
+  bool beq_baseline_locked_;
   bool has_last_similar_drate_amplitude_;
   double last_similar_drate_amplitude_bps_;
   bool waveform_delta_reference_valid_;
@@ -1320,22 +1326,20 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   uint64_t fbbr_last_counted_window_second_cycle_id_;
   uint32_t fbbr_rolling_retry_count_;
   bool fbbr_regime_ii_seen_this_cruise_;
-  QuicBandwidth fbbr_cruise_trusted_bw_;
+  QuicBandwidth fbbr_cruise_beq_;
   uint32_t floor_clip_confirmation_count_;
   int waveform_last_clip_direction_;
   uint32_t waveform_decision_count_;
   uint32_t waveform_amplitude_reduction_count_;
-  uint32_t trusted_bw_candidate_update_count_;
-  QuicBandwidth trusted_bw_candidate_;
-  const char* trusted_bw_candidate_source_;
-  QuicBandwidth fbbr_latest_trusted_bw_;
-  QuicBandwidth fbbr_smoothed_trusted_bw_;
-  bool fbbr_smoothed_trusted_bw_valid_;
+  uint32_t beq_candidate_update_count_;
+  QuicBandwidth beq_candidate_;
+  const char* beq_candidate_source_;
+  QuicBandwidth fbbr_latest_beq_;
+  QuicBandwidth fbbr_smoothed_beq_;
+  bool fbbr_smoothed_beq_valid_;
   std::string waveform_last_action_;
   std::string waveform_last_invalid_reason_;
 
-  double waveform_initial_settle_rtt_mult_;
-  double waveform_post_adjust_settle_rtt_mult_;
   bool waveform_negative_half_first_;
   double waveform_initial_window_periods_;
   double waveform_extended_window_periods_;
@@ -1351,13 +1355,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double waveform_clip_max_slope_ratio_;
   double waveform_delta_drate_amplitude_ratio_;
   double waveform_delta_fallback_baseline_ratio_;
-  double waveform_plateau_min_duration_ratio_;
-  double waveform_plateau_max_slope_ratio_;
   double waveform_plateau_max_level_span_ratio_;
   double waveform_plateau_extreme_distance_ratio_;
-  double waveform_baseline_step_ratio_;
-  double waveform_amplitude_floor_ratio_;
-  uint32_t waveform_clip_floor_confirmations_;
   uint32_t waveform_max_baseline_adjustments_;
   uint32_t waveform_max_inconclusive_extensions_;
   double waveform_inconclusive_signal_amplification_factor_;
@@ -1369,7 +1368,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double fbbr_regime_long_top_horizontal_duration_ratio_;
   double fbbr_regime_long_bottom_horizontal_duration_ratio_;
   uint32_t fbbr_wave_fidelity_no_wave_trigger_windows_;
-  bool fbbr_wave_fidelity_stop_on_either_wave_;
   uint32_t fbbr_wave_fidelity_retry_window_advance_periods_;
   double waveform_activity_amplitude_noise_multiplier_;
   double waveform_activity_min_level_ratio_;
@@ -1459,17 +1457,17 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   double prev_v_round_;
   bool freq_tool_needed_;
   mutable bool freq_tool_on_;
-  QuicBandwidth trusted_bw_;
-  bool trusted_bw_valid_;
-  double trusted_bw_conf_;
-  const char* trusted_bw_source_;
-  uint64_t trusted_bw_cruise_id_;
-  mutable bool trusted_bw_fresh_;
-  mutable bool trusted_bw_application_valid_;
-  mutable bool trusted_bw_ready_for_post_cruise_;
-  mutable const char* trusted_bw_application_phase_;
-  mutable bool trusted_bw_cleared_on_cruise_start_;
-  mutable std::string trusted_bw_invalid_reason_;
+  QuicBandwidth beq_;
+  bool beq_valid_;
+  double beq_conf_;
+  const char* beq_source_;
+  uint64_t beq_cruise_id_;
+  mutable bool beq_fresh_;
+  mutable bool beq_application_valid_;
+  mutable bool beq_ready_for_post_cruise_;
+  mutable const char* beq_application_phase_;
+  mutable bool beq_cleared_on_cruise_start_;
+  mutable std::string beq_invalid_reason_;
   uint64_t unstable_episode_id_;
   bool unstable_episode_active_;
   mutable QuicBandwidth selection_native_bw_;
@@ -1482,13 +1480,13 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable const char* limiting_spectral_signal_;
   mutable bool merged_rescue_attempted_;
   mutable bool merged_rescue_success_;
-  mutable uint64_t trusted_bw_selection_compute_us_;
+  mutable uint64_t beq_selection_compute_us_;
   mutable size_t normal_window_count_;
   mutable size_t merged_window_count_;
   mutable size_t spectral_invalid_count_;
   bool enable_convergence_gate_trace_;
   bool enable_convergence_gate_control_;
-  bool trusted_bw_clear_on_cruise_start_;
+  bool beq_clear_on_cruise_start_;
   double stable_single_round_exit_threshold_;
   double stable_consecutive_exit_threshold_;
   uint32_t stable_rounds_;
@@ -1499,8 +1497,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable QuicTime last_pacing_gate_trace_time_;
 
 
-  // FBBR and FBBR-ServiceFair share the service-envelope target/base history
-  // and the bandwidth sampler's cumulative delivered history.
+  // FBBR's service envelope uses target/base history and the bandwidth
+  // sampler's cumulative delivered history.
   mutable std::deque<FbbrRateSegment> fbbr_rate_history_;
   mutable TimeDelta fbbr_max_rtprop_seen_;
   mutable bool fbbr_rate_history_integrity_valid_;
@@ -1510,32 +1508,11 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool fbbr_delivered_history_integrity_valid_;
   QuicTime fbbr_last_counter_reset_time_;
   bool fbbr_regime_i_or_iii_seen_this_cruise_;
-  bool service_fair_last_valid_regime_seen_this_cruise_;
-  WaveformClassification service_fair_last_valid_regime_this_cruise_;
-
-  // ServiceFair modifies only the current Cruise baseline. The published
-  // TrustedBw is its sole cross-Cruise bandwidth state.
-  QuicBandwidth service_fair_service_rate_;
-  QuicBandwidth service_fair_previous_service_rate_;
-  TimeDelta service_fair_qdelay_ewma_;
-  TimeDelta service_fair_previous_qdelay_ewma_;
-  uint64_t service_fair_cycle_count_;
-  bool service_fair_qdelay_valid_;
-  bool service_fair_previous_qdelay_valid_;
-  bool service_fair_service_history_valid_;
-  QuicTime service_fair_signal_reset_time_;
-  int64_t service_fair_last_update_cruise_id_;
-  FbbrServiceFairAction service_fair_action_;
-  TimeDelta service_fair_qdelay_trend_;
-  double service_fair_service_rate_change_;
-  double service_fair_alpha_bps_;
-  double service_fair_raw_regime_candidate_bps_;
-  double service_fair_final_regime_candidate_bps_;
 
   QuicTime fbbr_telemetry_last_time_;
   bool fbbr_telemetry_initialized_;
-  FbbrPreviousTrustedSource
-      fbbr_telemetry_previous_trusted_source_;
+  FbbrPreviousBeqSource
+      fbbr_telemetry_previous_beq_source_;
   bool fbbr_telemetry_projection_active_;
   bool fbbr_telemetry_service_history_valid_;
   bool fbbr_telemetry_app_limited_fallback_;
@@ -1549,9 +1526,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   QuicByteCount fbbr_telemetry_service_restriction_;
   QuicByteCount fbbr_telemetry_enforced_excess_;
   uint64_t fbbr_telemetry_total_us_;
-  uint64_t fbbr_previous_trusted_us_;
-  uint64_t fbbr_previous_trusted_guard_source_us_;
-  uint64_t fbbr_previous_trusted_invalid_us_;
+  uint64_t fbbr_previous_beq_us_;
+  uint64_t fbbr_previous_beq_guard_source_us_;
+  uint64_t fbbr_previous_beq_invalid_us_;
   uint64_t fbbr_projection_active_us_;
   uint64_t fbbr_service_history_valid_us_;
   uint64_t fbbr_app_limited_fallback_us_;
@@ -1578,8 +1555,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   static constexpr uint32_t kStableRounds = 3;
   static constexpr double kDefaultOscillationFreqHz = 1.0;
   static constexpr double kSampleStepSec = 0.001;
-  static constexpr double kFbbrServiceFairBeta = 0.995;
-  static constexpr uint64_t kFbbrServiceFairMinimumBps = 1000000;
 };
 
 }  // namespace dqc

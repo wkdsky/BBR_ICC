@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -15,19 +16,19 @@ namespace dqc {
 
 namespace {
 
-constexpr const char* kTrustedBwSourceNone = "NONE";
-constexpr const char* kTrustedBwSourceNormal = "NORMAL_SPECTRAL";
-constexpr const char* kTrustedBwSourceMerged = "MERGED_SPECTRAL";
-constexpr const char* kTrustedBwSourceTimeWaveformBaseline =
+constexpr const char* kBeqSourceNone = "NONE";
+constexpr const char* kBeqSourceNormal = "NORMAL_SPECTRAL";
+constexpr const char* kBeqSourceMerged = "MERGED_SPECTRAL";
+constexpr const char* kBeqSourceTimeWaveformBaseline =
     "TIME_WAVEFORM_SRTT_SEARCH";
-constexpr const char* kTrustedBwSourceFbbrWindowMean =
+constexpr const char* kBeqSourceFbbrWindowMean =
     "FBBR_WINDOW_MEAN";
-constexpr const char* kTrustedBwSourceFbbrWindowDeliveredRate =
+constexpr const char* kBeqSourceFbbrWindowDeliveredRate =
     "FBBR_WINDOW_DELIVERED_RATE";
-constexpr const char* kTrustedBwSourceGuardFilter = "GUARD_FILTER";
-constexpr const char* kTrustedBwSourcePreviousTrusted =
-    "PREVIOUS_TRUSTED";
-constexpr const char* kTrustedBwSourceNativeFallback =
+constexpr const char* kBeqSourceGuardFilter = "GUARD_FILTER";
+constexpr const char* kBeqSourcePreviousBeq =
+    "PREVIOUS_BEQ";
+constexpr const char* kBeqSourceNativeFallback =
     "NATIVE_FALLBACK";
 constexpr const char* kWaveformDeltaSourceNone = "NONE";
 constexpr const char* kWaveformDeltaSourceRecentDrate =
@@ -38,8 +39,8 @@ constexpr const char* kWaveformDeltaSourceFbbrWindowMinimum =
     "FBBR_WINDOW_MINIMUM";
 constexpr const char* kWaveformDeltaSourceFbbrWindowMaximum =
     "FBBR_WINDOW_MAXIMUM";
-constexpr const char* kWaveformDeltaSourceFbbrTrustedBw =
-    "FBBR_TRUSTED_BW";
+constexpr const char* kWaveformDeltaSourceFbbrBeq =
+    "FBBR_BEQ";
 constexpr const char* kWaveformDeltaSourceFbbrRegimeIMaxDrate =
     "FBBR_REGIME_I_MAX_DRATE";
 constexpr const char* kWaveformDeltaSourceFbbrRegimeIMaxBwMidpoint =
@@ -535,14 +536,97 @@ QuicBandwidth BandwidthFromBytesAndTimeDeltaSafe(QuicByteCount bytes,
   return QuicBandwidth::FromBitsPerSecond(static_cast<int64_t>(capped));
 }
 
+std::string NormalizeFBBRAmplitudeMode(const std::string& value) {
+  size_t begin = 0;
+  while (begin < value.size() &&
+         std::isspace(static_cast<unsigned char>(value[begin]))) {
+    ++begin;
+  }
+  size_t end = value.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+    --end;
+  }
+
+  std::string normalized;
+  normalized.reserve(end - begin);
+  for (size_t i = begin; i < end; ++i) {
+    normalized.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(value[i]))));
+  }
+  return normalized;
+}
+
+bool ParseFBBRNaturalDenominator(const std::string& digits,
+                                 uint32_t* denominator) {
+  if (digits.empty() || denominator == nullptr) {
+    return false;
+  }
+  for (char character : digits) {
+    if (!std::isdigit(static_cast<unsigned char>(character))) {
+      return false;
+    }
+  }
+  try {
+    size_t used = 0;
+    const unsigned long value = std::stoul(digits, &used);
+    if (used != digits.size() || value == 0 || value > 20) {
+      return false;
+    }
+    *denominator = static_cast<uint32_t>(value);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool IsPositiveMbpsLiteral(const std::string& value) {
+  try {
+    size_t used = 0;
+    const double parsed = std::stod(value, &used);
+    return used == value.size() && std::isfinite(parsed) && parsed > 0.0;
+  } catch (...) {
+    return false;
+  }
+}
+
 }  // namespace
+
+bool ParseFBBRSendingRateDenominator(const std::string& value,
+                                     uint32_t* denominator) {
+  const std::string normalized = NormalizeFBBRAmplitudeMode(value);
+  if (normalized.size() > 2 &&
+      normalized.compare(normalized.size() - 2, 2, "sr") == 0) {
+    return ParseFBBRNaturalDenominator(
+        normalized.substr(0, normalized.size() - 2), denominator);
+  }
+  if (normalized.size() > 2 && normalized.compare(0, 2, "sr") == 0) {
+    return ParseFBBRNaturalDenominator(normalized.substr(2), denominator);
+  }
+  return false;
+}
+
+bool IsValidFBBRAmplitudeMode(const std::string& value) {
+  uint32_t denominator = 0;
+  if (ParseFBBRSendingRateDenominator(value, &denominator)) {
+    return true;
+  }
+
+  const std::string normalized = NormalizeFBBRAmplitudeMode(value);
+  if (normalized == "fixed_mbps" || normalized == "fixed" ||
+      normalized == "0" || IsPositiveMbpsLiteral(normalized)) {
+    return true;
+  }
+  return normalized == "2miu" || normalized == "miu2" ||
+         normalized == "3miu" || normalized == "miu3" ||
+         normalized == "4miu" || normalized == "miu4" ||
+         normalized == "8miu" || normalized == "miu8";
+}
 
 constexpr size_t FBBRSender::kMaxHistorySamples;
 constexpr uint32_t FBBRSender::kStableRounds;
 constexpr double FBBRSender::kDefaultOscillationFreqHz;
 constexpr double FBBRSender::kSampleStepSec;
-constexpr double FBBRSender::kFbbrServiceFairBeta;
-constexpr uint64_t FBBRSender::kFbbrServiceFairMinimumBps;
 
 FBBRSender::FBBRSender(
     QuicTime now,
@@ -569,9 +653,33 @@ FBBRSender::FBBRSender(
       configured_modulation_freq_hz_(5.0),
       amplitude_mode_(FBBRAmplitudeMode::kFixed),
       fixed_amplitude_bps_(0),
+      sr_amplitude_denominator_(1),
       minimum_pacing_rate_bps_(kDefaultMinimumPacingRateBps),
       drain_completed_(false),
       in_cruise_(false),
+      maxbw_flat_trial_active_(false),
+      maxbw_flat_good_rounds_(0),
+      maxbw_flat_trial_rate_(QuicBandwidth::Zero()),
+      maxbw_flat_fallback_baseline_(QuicBandwidth::Zero()),
+      maxbw_flat_entry_srtt_(TimeDelta::Zero()),
+      maxbw_flat_round_max_srtt_(TimeDelta::Zero()),
+      maxbw_flat_round_start_delivered_(0),
+      maxbw_flat_round_start_time_(QuicTime::Zero()),
+      maxbw_flat_round_started_(false),
+      maxbw_flat_failure_pending_(false),
+      maxbw_flat_ecn_failure_pending_(false),
+      maxbw_flat_trial_start_time_(QuicTime::Zero()),
+      maxbw_flat_trial_elapsed_(TimeDelta::Zero()),
+      maxbw_flat_trial_finished_(false),
+      maxbw_flat_native_exit_requested_(false),
+      maxbw_flat_native_exit_request_time_(QuicTime::Zero()),
+      maxbw_flat_cruise_exit_delay_active_(false),
+      maxbw_flat_cruise_exit_not_before_(QuicTime::Zero()),
+      maxbw_flat_waveform_epoch_pending_(false),
+      maxbw_flat_last_ecn_ce_count_(0),
+      cruise_exit_force_immediate_(false),
+      cruise_exit_pending_(false),
+      cruise_exit_cycle_end_(QuicTime::Zero()),
       current_cruise_rtprop_updated_(false),
       previous_cruise_rtprop_updated_(false),
       rtprop_probe_down_active_(false),
@@ -610,7 +718,7 @@ FBBRSender::FBBRSender(
       waveform_window_periods_(0.0),
       waveform_window_extended_(false),
       underload_located_(false),
-      trusted_baseline_locked_(false),
+      beq_baseline_locked_(false),
       has_last_similar_drate_amplitude_(false),
       last_similar_drate_amplitude_bps_(0.0),
       waveform_delta_reference_valid_(false),
@@ -635,21 +743,19 @@ FBBRSender::FBBRSender(
       fbbr_last_counted_window_second_cycle_id_(0),
       fbbr_rolling_retry_count_(0),
       fbbr_regime_ii_seen_this_cruise_(false),
-      fbbr_cruise_trusted_bw_(QuicBandwidth::Zero()),
+      fbbr_cruise_beq_(QuicBandwidth::Zero()),
       floor_clip_confirmation_count_(0),
       waveform_last_clip_direction_(0),
       waveform_decision_count_(0),
       waveform_amplitude_reduction_count_(0),
-      trusted_bw_candidate_update_count_(0),
-      trusted_bw_candidate_(QuicBandwidth::Zero()),
-      trusted_bw_candidate_source_(kTrustedBwSourceNone),
-      fbbr_latest_trusted_bw_(QuicBandwidth::Zero()),
-      fbbr_smoothed_trusted_bw_(QuicBandwidth::Zero()),
-      fbbr_smoothed_trusted_bw_valid_(false),
+      beq_candidate_update_count_(0),
+      beq_candidate_(QuicBandwidth::Zero()),
+      beq_candidate_source_(kBeqSourceNone),
+      fbbr_latest_beq_(QuicBandwidth::Zero()),
+      fbbr_smoothed_beq_(QuicBandwidth::Zero()),
+      fbbr_smoothed_beq_valid_(false),
       waveform_last_action_("none"),
       waveform_last_invalid_reason_("none"),
-      waveform_initial_settle_rtt_mult_(1.0),
-      waveform_post_adjust_settle_rtt_mult_(1.0),
       waveform_negative_half_first_(true),
       waveform_initial_window_periods_(2.0),
       waveform_extended_window_periods_(3.0),
@@ -665,13 +771,8 @@ FBBRSender::FBBRSender(
       waveform_clip_max_slope_ratio_(0.10),
       waveform_delta_drate_amplitude_ratio_(0.50),
       waveform_delta_fallback_baseline_ratio_(0.25),
-      waveform_plateau_min_duration_ratio_(0.10),
-      waveform_plateau_max_slope_ratio_(0.20),
       waveform_plateau_max_level_span_ratio_(0.15),
       waveform_plateau_extreme_distance_ratio_(0.15),
-      waveform_baseline_step_ratio_(0.25),
-      waveform_amplitude_floor_ratio_(0.125),
-      waveform_clip_floor_confirmations_(2),
       waveform_max_baseline_adjustments_(8),
       waveform_max_inconclusive_extensions_(1),
       waveform_inconclusive_signal_amplification_factor_(1.25),
@@ -682,7 +783,6 @@ FBBRSender::FBBRSender(
       fbbr_regime_long_top_horizontal_duration_ratio_(0.20),
       fbbr_regime_long_bottom_horizontal_duration_ratio_(0.30),
       fbbr_wave_fidelity_no_wave_trigger_windows_(2),
-      fbbr_wave_fidelity_stop_on_either_wave_(true),
       fbbr_wave_fidelity_retry_window_advance_periods_(1),
       waveform_activity_amplitude_noise_multiplier_(6.0),
       waveform_activity_min_level_ratio_(0.02),
@@ -760,17 +860,17 @@ FBBRSender::FBBRSender(
 	      prev_v_round_(0.0),
 	      freq_tool_needed_(false),
 	      freq_tool_on_(false),
-	      trusted_bw_(QuicBandwidth::Zero()),
-	      trusted_bw_valid_(false),
-	      trusted_bw_conf_(0.0),
-	      trusted_bw_source_(kTrustedBwSourceNone),
-	      trusted_bw_cruise_id_(0),
-	      trusted_bw_fresh_(false),
-	      trusted_bw_application_valid_(false),
-	      trusted_bw_ready_for_post_cruise_(false),
-	      trusted_bw_application_phase_("NONE"),
-	      trusted_bw_cleared_on_cruise_start_(false),
-	      trusted_bw_invalid_reason_("none"),
+	      beq_(QuicBandwidth::Zero()),
+	      beq_valid_(false),
+	      beq_conf_(0.0),
+	      beq_source_(kBeqSourceNone),
+	      beq_cruise_id_(0),
+	      beq_fresh_(false),
+	      beq_application_valid_(false),
+	      beq_ready_for_post_cruise_(false),
+	      beq_application_phase_("NONE"),
+	      beq_cleared_on_cruise_start_(false),
+	      beq_invalid_reason_("none"),
       unstable_episode_id_(0),
       unstable_episode_active_(false),
 	      selection_native_bw_(QuicBandwidth::Zero()),
@@ -783,13 +883,13 @@ FBBRSender::FBBRSender(
 	      limiting_spectral_signal_(kLimitingSpectralSignalEqual),
 	      merged_rescue_attempted_(false),
 	      merged_rescue_success_(false),
-	      trusted_bw_selection_compute_us_(0),
+	      beq_selection_compute_us_(0),
 	      normal_window_count_(0),
 	      merged_window_count_(0),
 	      spectral_invalid_count_(0),
 	      enable_convergence_gate_trace_(true),
 	      enable_convergence_gate_control_(false),
-	      trusted_bw_clear_on_cruise_start_(true),
+	      beq_clear_on_cruise_start_(true),
 	      stable_single_round_exit_threshold_(0.25),
 	      stable_consecutive_exit_threshold_(0.15),
 	      stable_rounds_(kStableRounds),
@@ -806,29 +906,10 @@ FBBRSender::FBBRSender(
       fbbr_delivered_history_integrity_valid_(true),
       fbbr_last_counter_reset_time_(QuicTime::Zero()),
       fbbr_regime_i_or_iii_seen_this_cruise_(false),
-      service_fair_last_valid_regime_seen_this_cruise_(false),
-      service_fair_last_valid_regime_this_cruise_(
-          WaveformClassification::kInconclusive),
-      service_fair_service_rate_(QuicBandwidth::Zero()),
-      service_fair_previous_service_rate_(QuicBandwidth::Zero()),
-      service_fair_qdelay_ewma_(TimeDelta::Zero()),
-      service_fair_previous_qdelay_ewma_(TimeDelta::Zero()),
-      service_fair_cycle_count_(0),
-      service_fair_qdelay_valid_(false),
-      service_fair_previous_qdelay_valid_(false),
-      service_fair_service_history_valid_(false),
-      service_fair_signal_reset_time_(QuicTime::Zero()),
-      service_fair_last_update_cruise_id_(-1),
-      service_fair_action_(FbbrServiceFairAction::kNotRun),
-      service_fair_qdelay_trend_(TimeDelta::Zero()),
-      service_fair_service_rate_change_(0.0),
-      service_fair_alpha_bps_(0.0),
-      service_fair_raw_regime_candidate_bps_(0.0),
-      service_fair_final_regime_candidate_bps_(0.0),
       fbbr_telemetry_last_time_(QuicTime::Zero()),
       fbbr_telemetry_initialized_(false),
-      fbbr_telemetry_previous_trusted_source_(
-          FbbrPreviousTrustedSource::kInvalid),
+      fbbr_telemetry_previous_beq_source_(
+          FbbrPreviousBeqSource::kInvalid),
       fbbr_telemetry_projection_active_(false),
       fbbr_telemetry_service_history_valid_(false),
       fbbr_telemetry_app_limited_fallback_(false),
@@ -842,9 +923,9 @@ FBBRSender::FBBRSender(
       fbbr_telemetry_service_restriction_(0),
       fbbr_telemetry_enforced_excess_(0),
       fbbr_telemetry_total_us_(0),
-      fbbr_previous_trusted_us_(0),
-      fbbr_previous_trusted_guard_source_us_(0),
-      fbbr_previous_trusted_invalid_us_(0),
+      fbbr_previous_beq_us_(0),
+      fbbr_previous_beq_guard_source_us_(0),
+      fbbr_previous_beq_invalid_us_(0),
       fbbr_projection_active_us_(0),
       fbbr_service_history_valid_us_(0),
       fbbr_app_limited_fallback_us_(0),
@@ -869,9 +950,11 @@ void FBBRSender::SetOscillationFrequency(double freq_hz) {
 }
 
 void FBBRSender::SetOscillationAmplitude(FBBRAmplitudeMode mode,
-                                             uint64_t fixed_bps) {
+                                         uint64_t fixed_bps,
+                                         uint32_t sr_denominator) {
   amplitude_mode_ = mode;
   fixed_amplitude_bps_ = fixed_bps;
+  sr_amplitude_denominator_ = std::max<uint32_t>(1, sr_denominator);
 }
 
 void FBBRSender::SetRecvSignalMode(bool use_delivery_rate_latest) {
@@ -935,43 +1018,9 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   minimum_pacing_rate_bps_ = std::max<uint64_t>(
       1, static_cast<uint64_t>(std::llround(minimum_rate_mbps * 1000000.0)));
 
-  trusted_bw_clear_on_cruise_start_ = config.trusted_bw_clear_on_cruise_start;
-  const bool waveform_recv_mode_valid =
-      config.waveform_recv_signal_mode == "delivery_rate_latest" ||
-      config.waveform_recv_signal_mode == "bandwidth_latest";
-  if (!waveform_recv_mode_valid) {
-    std::cerr
-        << "[FBBR config warning] invalid waveform.recv_signal_mode='"
-        << config.waveform_recv_signal_mode
-        << "'; using delivery_rate_latest" << std::endl;
-  }
-  if (config.waveform_recv_signal_mode == "bandwidth_latest") {
-    std::cerr << "[FBBR config warning] waveform.recv_signal_mode="
-                 "bandwidth_latest is ignored; FBBR uses delivery_rate_latest"
-              << std::endl;
-  }
+  beq_clear_on_cruise_start_ = config.beq_clear_on_cruise_start;
   use_delivery_rate_latest_for_signal_history_ = true;
-  waveform_initial_settle_rtt_mult_ = range_or(
-      config.waveform_initial_settle_rtt_mult, 0.0, 20.0, 1.0,
-      "waveform.initial_settle_rtt_mult");
-  waveform_post_adjust_settle_rtt_mult_ = range_or(
-      config.waveform_post_adjust_settle_rtt_mult, 0.0, 20.0, 1.0,
-      "waveform.post_adjust_settle_rtt_mult");
-  if (std::abs(waveform_initial_settle_rtt_mult_ - 1.0) > 1e-12 ||
-      std::abs(waveform_post_adjust_settle_rtt_mult_ - 1.0) > 1e-12) {
-    std::cerr << "[FBBR config warning] time_waveform locks initial and "
-                 "post-adjust response delay to exactly 1 RTT"
-              << std::endl;
-    waveform_initial_settle_rtt_mult_ = 1.0;
-    waveform_post_adjust_settle_rtt_mult_ = 1.0;
-  }
   waveform_negative_half_first_ = true;
-  if (!config.waveform_negative_half_first) {
-    std::cerr << "[FBBR config warning] waveform.negative_half_first=false "
-                 "is inactive; time_waveform always starts with the negative "
-                 "half-cycle"
-              << std::endl;
-  }
   waveform_initial_window_periods_ = range_or(
       config.waveform_initial_window_periods, 1.5, 2.0, 2.0,
       "waveform.initial_window_periods");
@@ -1020,33 +1069,12 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   waveform_delta_fallback_baseline_ratio_ = range_or(
       config.waveform_delta_fallback_baseline_ratio, 0.0, 0.95, 0.25,
       "waveform.delta_fallback_baseline_ratio");
-  waveform_plateau_min_duration_ratio_ = range_or(
-      config.waveform_plateau_min_duration_ratio, 0.01, 0.5, 0.10,
-      "waveform.plateau_min_duration_ratio");
-  waveform_plateau_max_slope_ratio_ = range_or(
-      config.waveform_plateau_max_slope_ratio, 0.0, 1.0, 0.20,
-      "waveform.plateau_max_slope_ratio");
   waveform_plateau_max_level_span_ratio_ = range_or(
       config.waveform_plateau_max_level_span_ratio, 0.0, 1.0, 0.15,
       "waveform.plateau_max_level_span_ratio");
   waveform_plateau_extreme_distance_ratio_ = range_or(
       config.waveform_plateau_extreme_distance_ratio, 0.0, 1.0, 0.15,
       "waveform.plateau_extreme_distance_ratio");
-  waveform_baseline_step_ratio_ = range_or(
-      config.waveform_baseline_step_ratio, 0.0, 0.95, 0.25,
-      "waveform.baseline_step_ratio");
-  waveform_amplitude_floor_ratio_ = range_or(
-      config.waveform_amplitude_floor_ratio, 0.0, 1.0, 0.125,
-      "waveform.amplitude_floor_ratio");
-  if (config.waveform_clip_floor_confirmations == 0) {
-    std::cerr << "[FBBR config warning] "
-                 "waveform.clip_floor_confirmations must be >= 1; using 2"
-              << std::endl;
-    waveform_clip_floor_confirmations_ = 2;
-  } else {
-    waveform_clip_floor_confirmations_ =
-        config.waveform_clip_floor_confirmations;
-  }
   if (config.waveform_max_baseline_adjustments == 0) {
     std::cerr << "[FBBR config warning] "
                  "waveform.max_baseline_adjustments must be >= 1; using 8"
@@ -1057,12 +1085,6 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
         config.waveform_max_baseline_adjustments;
   }
   waveform_max_inconclusive_extensions_ = 1;
-  if (config.waveform_max_inconclusive_extensions != 1) {
-    std::cerr << "[FBBR config warning] FBBR time_waveform "
-                 "observes exactly one extra period after an inconclusive "
-                 "decision"
-              << std::endl;
-  }
   waveform_inconclusive_signal_amplification_factor_ = range_or(
       config.waveform_inconclusive_signal_amplification_factor,
       1.0, 4.0, 1.25,
@@ -1091,7 +1113,6 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
       "fbbr.regime.long_bottom_horizontal_duration_ratio");
   // These are PDF semantics rather than tuning knobs.
   fbbr_wave_fidelity_no_wave_trigger_windows_ = 2;
-  fbbr_wave_fidelity_stop_on_either_wave_ = true;
   fbbr_wave_fidelity_retry_window_advance_periods_ = 1;
 
   waveform_activity_amplitude_noise_multiplier_ = range_or(
@@ -1234,9 +1255,9 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
       -1.0, 1.0, 0.50,
       "fbbr.regime.min_periodicity_correlation");
   fbbr_regime_periodic_upper_clip_is_hard_veto_ = true;
-  fbbr_latest_trusted_bw_ = QuicBandwidth::Zero();
-  fbbr_smoothed_trusted_bw_ = QuicBandwidth::Zero();
-  fbbr_smoothed_trusted_bw_valid_ = false;
+  fbbr_latest_beq_ = QuicBandwidth::Zero();
+  fbbr_smoothed_beq_ = QuicBandwidth::Zero();
+  fbbr_smoothed_beq_valid_ = false;
   fbbr_max_srtt_valid_ = false;
   fbbr_max_srtt_ms_ = 0.0;
   fbbr_max_srtt_source_cruise_id_ = 0;
@@ -1267,7 +1288,7 @@ void FBBRSender::ConfigureFBBR(const FBBRConfig& config) {
   model_.SetMinBandwidthSampleCollection(false);
   model_.SetMinBandwidthSampleCorrection(1.0);
   fbbr_regime_i_or_iii_seen_this_cruise_ = false;
-  ClearTrustedBw("configuration_changed");
+  ClearBeq("configuration_changed");
 }
 
 void FBBRSender::SetTraceFlowId(uint32_t flow_id) {
@@ -1288,6 +1309,374 @@ Bbr2ProbeBwMode::CyclePhase FBBRSender::GetCurrentProbeBwPhase() const {
     return state.probe_bw.phase;
   }
   return Bbr2ProbeBwMode::CyclePhase::PROBE_NOT_STARTED;
+}
+
+void FBBRSender::ResetMaxBwFlatTrialState() {
+  maxbw_flat_trial_active_ = false;
+  maxbw_flat_good_rounds_ = 0;
+  maxbw_flat_trial_rate_ = QuicBandwidth::Zero();
+  maxbw_flat_fallback_baseline_ = QuicBandwidth::Zero();
+  maxbw_flat_entry_srtt_ = TimeDelta::Zero();
+  maxbw_flat_round_max_srtt_ = TimeDelta::Zero();
+  maxbw_flat_round_start_delivered_ = 0;
+  maxbw_flat_round_start_time_ = QuicTime::Zero();
+  maxbw_flat_round_started_ = false;
+  maxbw_flat_failure_pending_ = false;
+  maxbw_flat_ecn_failure_pending_ = false;
+  maxbw_flat_trial_start_time_ = QuicTime::Zero();
+  maxbw_flat_trial_elapsed_ = TimeDelta::Zero();
+  maxbw_flat_trial_finished_ = false;
+  maxbw_flat_native_exit_requested_ = false;
+  maxbw_flat_native_exit_request_time_ = QuicTime::Zero();
+  maxbw_flat_cruise_exit_delay_active_ = false;
+  maxbw_flat_cruise_exit_not_before_ = QuicTime::Zero();
+  maxbw_flat_waveform_epoch_pending_ = false;
+  cruise_exit_force_immediate_ = false;
+  cruise_exit_pending_ = false;
+  cruise_exit_cycle_end_ = QuicTime::Zero();
+}
+
+bool FBBRSender::ShouldStartMaxBwFlatTrial() const {
+  if (!IsFbbr() || !in_cruise_ ||
+      !IsCruisePhase(GetCurrentProbeBwPhase()) || InRecovery()) {
+    return false;
+  }
+
+  const QuicBandwidth max_bw = model_.MaxBandwidth();
+  const QuicBandwidth fallback = current_injection_baseline_bw_;
+  const TimeDelta rtprop = CurrentFbbrRtprop();
+  const TimeDelta srtt = rtt_stats_ == nullptr
+      ? TimeDelta::Zero() : rtt_stats_->smoothed_rtt();
+  const auto valid_rtt = [](TimeDelta value) {
+    return !value.IsZero() && !value.IsInfinite() &&
+           value.ToMicroseconds() > 0;
+  };
+  if (!IsFinitePositiveBandwidth(max_bw) ||
+      !IsFinitePositiveBandwidth(fallback) || max_bw <= fallback ||
+      !valid_rtt(rtprop) || !valid_rtt(srtt)) {
+    return false;
+  }
+  if (model_.is_app_limited() ||
+      ExportDebugState().last_sample_is_app_limited) {
+    return false;
+  }
+
+  return static_cast<long double>(srtt.ToMicroseconds()) <=
+      1.02L * static_cast<long double>(rtprop.ToMicroseconds());
+}
+
+void FBBRSender::StartMaxBwFlatTrial(QuicTime now) {
+  DCHECK(ShouldStartMaxBwFlatTrial());
+  maxbw_flat_trial_active_ = true;
+  maxbw_flat_good_rounds_ = 0;
+  maxbw_flat_trial_rate_ = model_.MaxBandwidth();
+  maxbw_flat_fallback_baseline_ = current_injection_baseline_bw_;
+  maxbw_flat_entry_srtt_ = rtt_stats_ == nullptr
+      ? TimeDelta::Zero() : rtt_stats_->smoothed_rtt();
+  maxbw_flat_round_max_srtt_ = TimeDelta::Zero();
+  maxbw_flat_round_start_delivered_ = 0;
+  maxbw_flat_round_start_time_ = QuicTime::Zero();
+  maxbw_flat_round_started_ = false;
+  maxbw_flat_failure_pending_ = false;
+  maxbw_flat_ecn_failure_pending_ = false;
+  maxbw_flat_trial_start_time_ = now;
+  maxbw_flat_trial_elapsed_ = TimeDelta::Zero();
+  maxbw_flat_trial_finished_ = false;
+  maxbw_flat_native_exit_requested_ = false;
+  maxbw_flat_native_exit_request_time_ = QuicTime::Zero();
+  maxbw_flat_cruise_exit_delay_active_ = false;
+  maxbw_flat_cruise_exit_not_before_ = QuicTime::Zero();
+  maxbw_flat_waveform_epoch_pending_ = false;
+
+  // Keep FBBR's envelope on the pre-trial service plan.  Flat pacing is
+  // deliberately not recorded as a target segment or a positive probe.
+  current_injection_baseline_bw_ = maxbw_flat_trial_rate_;
+  waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+  probe_epoch_start_time_ = QuicTime::Zero();
+  probe_epoch_rtt_ = TimeDelta::Zero();
+  waveform_settle_start_ = QuicTime::Zero();
+  waveform_settle_end_ = QuicTime::Zero();
+  waveform_window_start_ = QuicTime::Zero();
+  waveform_window_end_ = QuicTime::Zero();
+  pending_fbbr_max_srtt_observations_.clear();
+  fbbr_max_srtt_valid_ = false;
+  fbbr_max_srtt_ms_ = 0.0;
+  fbbr_max_srtt_source_cruise_id_ = 0;
+  freq_tool_on_ = false;
+  cruise_freq_tool_active_ = false;
+
+  QUIC_DVLOG(2) << "FBBR: starting Cruise MaxBw flat trial @ " << now
+                << ", trial_rate_bps="
+                << maxbw_flat_trial_rate_.ToBitsPerSecond()
+                << ", fallback_baseline_bps="
+                << maxbw_flat_fallback_baseline_.ToBitsPerSecond();
+}
+
+bool FBBRSender::IsMaxBwFlatTrialPacingActive() const {
+  return IsFbbr() && maxbw_flat_trial_active_ && in_cruise_ &&
+         IsCruisePhase(GetCurrentProbeBwPhase()) &&
+         IsFinitePositiveBandwidth(maxbw_flat_trial_rate_);
+}
+
+bool FBBRSender::HasActiveWaveformCycle(QuicTime now) const {
+  if (!IsFbbr() || !in_cruise_ || maxbw_flat_trial_active_ ||
+      !IsCruisePhase(GetCurrentProbeBwPhase()) ||
+      waveform_cruise_state_ == WaveformCruiseState::kDisabled ||
+      current_probe_amplitude_bps_ == 0 ||
+      effective_probe_amplitude_bps_ == 0 ||
+      cruise_modulation_freq_hz_ <= 0.0 ||
+      !std::isfinite(cruise_modulation_freq_hz_) ||
+      probe_epoch_start_time_ == QuicTime::Zero() || now < probe_epoch_start_time_) {
+    return false;
+  }
+  return true;
+}
+
+bool FBBRSender::IsWaveformCycleBoundary(QuicTime now) const {
+  if (!HasActiveWaveformCycle(now)) {
+    return true;
+  }
+  const int64_t period_us = static_cast<int64_t>(std::llround(
+      1000000.0 / cruise_modulation_freq_hz_));
+  if (period_us <= 0) {
+    return true;
+  }
+  const int64_t elapsed_us =
+      (now - probe_epoch_start_time_).ToMicroseconds();
+  if (elapsed_us <= 0) {
+    return true;
+  }
+  const int64_t remainder_us = elapsed_us % period_us;
+  return remainder_us <= 1 || period_us - remainder_us <= 1;
+}
+
+QuicTime FBBRSender::NextWaveformCycleBoundary(QuicTime now) const {
+  if (!HasActiveWaveformCycle(now) || IsWaveformCycleBoundary(now)) {
+    return now;
+  }
+  const int64_t period_us = static_cast<int64_t>(std::llround(
+      1000000.0 / cruise_modulation_freq_hz_));
+  const int64_t elapsed_us =
+      (now - probe_epoch_start_time_).ToMicroseconds();
+  if (period_us <= 0 || elapsed_us < 0) {
+    return now;
+  }
+  const int64_t remainder_us = elapsed_us % period_us;
+  return now + TimeDelta::FromMicroseconds(period_us - remainder_us);
+}
+
+bool FBBRSender::ShouldDelayProbeBwCruiseExit(QuicTime now) const {
+  if (!IsFbbr() || !in_cruise_ ||
+      !IsCruisePhase(GetCurrentProbeBwPhase()) ||
+      cruise_exit_force_immediate_) {
+    return false;
+  }
+
+  if (maxbw_flat_trial_active_) {
+    if (!maxbw_flat_native_exit_requested_) {
+      maxbw_flat_native_exit_requested_ = true;
+      maxbw_flat_native_exit_request_time_ = now;
+    }
+    return true;
+  }
+
+  if (maxbw_flat_trial_finished_ &&
+      maxbw_flat_trial_elapsed_.ToMicroseconds() > 0) {
+    if (!maxbw_flat_cruise_exit_delay_active_) {
+      maxbw_flat_cruise_exit_delay_active_ = true;
+      maxbw_flat_cruise_exit_not_before_ =
+          now + maxbw_flat_trial_elapsed_;
+      return true;
+    }
+    if (now < maxbw_flat_cruise_exit_not_before_) {
+      return true;
+    }
+  }
+
+  if (!HasActiveWaveformCycle(now) || IsWaveformCycleBoundary(now)) {
+    return false;
+  }
+
+  if (!cruise_exit_pending_) {
+    cruise_exit_pending_ = true;
+    cruise_exit_cycle_end_ = NextWaveformCycleBoundary(now);
+  }
+  return cruise_exit_cycle_end_ != QuicTime::Zero() &&
+         now < cruise_exit_cycle_end_;
+}
+
+void FBBRSender::FinishMaxBwFlatTrial(QuicTime now,
+                                       bool accepted,
+                                       const char* reason) {
+  if (!maxbw_flat_trial_active_) {
+    return;
+  }
+
+  if (now >= maxbw_flat_trial_start_time_) {
+    maxbw_flat_trial_elapsed_ = now - maxbw_flat_trial_start_time_;
+  }
+  maxbw_flat_trial_active_ = false;
+  maxbw_flat_trial_finished_ = true;
+  maxbw_flat_failure_pending_ = false;
+  maxbw_flat_ecn_failure_pending_ = false;
+  maxbw_flat_round_started_ = false;
+
+  if (accepted) {
+    initial_cruise_baseline_bw_ = maxbw_flat_trial_rate_;
+    current_injection_baseline_bw_ = maxbw_flat_trial_rate_;
+  } else {
+    initial_cruise_baseline_bw_ = maxbw_flat_fallback_baseline_;
+    current_injection_baseline_bw_ = maxbw_flat_fallback_baseline_;
+  }
+
+  if (maxbw_flat_native_exit_requested_) {
+    maxbw_flat_cruise_exit_delay_active_ = true;
+    maxbw_flat_cruise_exit_not_before_ =
+        maxbw_flat_native_exit_request_time_ + maxbw_flat_trial_elapsed_;
+  }
+
+  // A fresh epoch keeps the flat samples outside the receiver-side collection
+  // window.  The first waveform point is the 0 -> -1 half-cycle after one RTT.
+  ResetMaxBwAttenuationEstimator();
+  const TimeDelta restart_srtt = CurrentSmoothedRtt();
+  if (restart_srtt.IsZero() || restart_srtt.IsInfinite()) {
+    waveform_cruise_state_ = WaveformCruiseState::kDisabled;
+    waveform_last_invalid_reason_ = "invalid_flat_trial_restart_rtt";
+    waveform_last_action_ = "NATIVE_BBR_FALLBACK";
+    maxbw_flat_waveform_epoch_pending_ = false;
+  } else {
+    ResetWaveformCruiseState(now);
+    if (waveform_cruise_state_ != WaveformCruiseState::kDisabled &&
+        !probe_epoch_rtt_.IsZero() && !probe_epoch_rtt_.IsInfinite() &&
+        waveform_settle_end_ != QuicTime::Zero() &&
+        cruise_modulation_freq_hz_ > 0.0 &&
+        std::isfinite(cruise_modulation_freq_hz_)) {
+      probe_epoch_start_time_ = waveform_settle_end_;
+      waveform_window_start_ = probe_epoch_start_time_ + probe_epoch_rtt_;
+      const double duration_s = waveform_window_periods_ /
+                                cruise_modulation_freq_hz_;
+      waveform_window_end_ = waveform_window_start_ +
+          TimeDelta::FromMicroseconds(static_cast<int64_t>(std::llround(
+              duration_s * 1000000.0)));
+      maxbw_flat_waveform_epoch_pending_ = true;
+    } else {
+      maxbw_flat_waveform_epoch_pending_ = false;
+    }
+  }
+  freq_tool_on_ = ShouldOscillate();
+  cruise_freq_tool_active_ = freq_tool_on_;
+
+  QUIC_DVLOG(2) << "FBBR: "
+                << (accepted ? "accepted" : "rejected")
+                << " Cruise MaxBw flat trial @ " << now
+                << ", reason=" << (reason == nullptr ? "unknown" : reason)
+                << ", good_rounds=" << maxbw_flat_good_rounds_
+                << ", baseline_bps="
+                << current_injection_baseline_bw_.ToBitsPerSecond()
+                << ", elapsed_us="
+                << maxbw_flat_trial_elapsed_.ToMicroseconds();
+}
+
+void FBBRSender::UpdateMaxBwFlatTrial(
+    const Bbr2CongestionEvent& congestion_event) {
+  if (!maxbw_flat_trial_active_) {
+    return;
+  }
+
+  const auto valid_rtt = [](TimeDelta value) {
+    return !value.IsZero() && !value.IsInfinite() &&
+           value.ToMicroseconds() > 0;
+  };
+  const TimeDelta rtprop = CurrentFbbrRtprop();
+  const TimeDelta srtt = rtt_stats_ == nullptr
+      ? TimeDelta::Zero() : rtt_stats_->smoothed_rtt();
+  const QuicBandwidth max_bw = model_.MaxBandwidth();
+  const bool app_limited =
+      model_.is_app_limited() || congestion_event.sample_is_app_limited ||
+      congestion_event.last_sample_is_app_limited ||
+      congestion_event.last_packet_send_state.is_app_limited;
+  if (maxbw_flat_failure_pending_ || maxbw_flat_ecn_failure_pending_ ||
+      congestion_event.bytes_lost > 0 || InRecovery() || app_limited ||
+      !valid_rtt(rtprop) || !valid_rtt(srtt) ||
+      !IsFinitePositiveBandwidth(max_bw)) {
+    FinishMaxBwFlatTrial(
+        congestion_event.event_time, false,
+        maxbw_flat_ecn_failure_pending_ ? "ecn" : "unsafe_or_invalid");
+    return;
+  }
+
+  const long double rtprop_us =
+      static_cast<long double>(rtprop.ToMicroseconds());
+  const long double srtt_us =
+      static_cast<long double>(srtt.ToMicroseconds());
+  const long double entry_srtt_us =
+      static_cast<long double>(maxbw_flat_entry_srtt_.ToMicroseconds());
+  if (srtt_us > 1.05L * rtprop_us ||
+      srtt_us > entry_srtt_us + 0.02L * rtprop_us) {
+    FinishMaxBwFlatTrial(congestion_event.event_time, false,
+                          "srtt_abort_threshold");
+    return;
+  }
+
+  if (!maxbw_flat_round_started_) {
+    if (!congestion_event.end_of_round_trip) {
+      return;
+    }
+    maxbw_flat_round_started_ = true;
+    maxbw_flat_round_start_delivered_ = model_.total_bytes_acked();
+    maxbw_flat_round_start_time_ = congestion_event.event_time;
+    maxbw_flat_round_max_srtt_ = srtt;
+    return;
+  }
+
+  if (srtt > maxbw_flat_round_max_srtt_) {
+    maxbw_flat_round_max_srtt_ = srtt;
+  }
+  if (!congestion_event.end_of_round_trip) {
+    return;
+  }
+
+  const QuicByteCount delivered_now = model_.total_bytes_acked();
+  const QuicByteCount delivered =
+      delivered_now >= maxbw_flat_round_start_delivered_
+          ? delivered_now - maxbw_flat_round_start_delivered_ : 0;
+  const TimeDelta elapsed =
+      congestion_event.event_time - maxbw_flat_round_start_time_;
+  const QuicBandwidth round_delivery_rate =
+      BandwidthFromBytesAndTimeDeltaSafe(delivered, elapsed);
+  const bool round_pass =
+      IsFinitePositiveBandwidth(round_delivery_rate) &&
+      static_cast<long double>(round_delivery_rate.ToBitsPerSecond()) >=
+          0.97L * static_cast<long double>(
+                       maxbw_flat_trial_rate_.ToBitsPerSecond()) &&
+      static_cast<long double>(
+          maxbw_flat_round_max_srtt_.ToMicroseconds()) <=
+          1.03L * rtprop_us &&
+      static_cast<long double>(
+          maxbw_flat_round_max_srtt_.ToMicroseconds()) <=
+          entry_srtt_us + 0.01L * rtprop_us;
+  if (!round_pass) {
+    FinishMaxBwFlatTrial(congestion_event.event_time, false,
+                          "round_quality");
+    return;
+  }
+
+  ++maxbw_flat_good_rounds_;
+  QUIC_DVLOG(2) << "FBBR: Cruise MaxBw flat trial round "
+                << maxbw_flat_good_rounds_
+                << " passed, delivery_rate_bps="
+                << round_delivery_rate.ToBitsPerSecond()
+                << ", max_srtt_us="
+                << maxbw_flat_round_max_srtt_.ToMicroseconds();
+  if (maxbw_flat_good_rounds_ >= 3) {
+    FinishMaxBwFlatTrial(congestion_event.event_time, true,
+                          "three_good_rounds");
+    return;
+  }
+
+  maxbw_flat_round_start_delivered_ = delivered_now;
+  maxbw_flat_round_start_time_ = congestion_event.event_time;
+  maxbw_flat_round_max_srtt_ = srtt;
 }
 
 bool FBBRSender::ShouldEnableRtpropProbeDown(
@@ -1334,16 +1723,19 @@ float FBBRSender::GetProbeBwCwndGain(
   return FBBRCwndGainForPhase(phase, cwnd_gain);
 }
 
-bool FBBRSender::ShouldExitProbeUpAfterRound() const {
-  // ServiceFair can deliberately pace below native MaxBw and cap inflight
-  // below the native queue-building threshold. In that case native ProbeBW_UP has
-  // no reachable queue exit.  Preserve one complete packet-timed probing
-  // round, then allow the cycle to continue so MaxBw and fairness feedback
-  // keep receiving fresh ProbeBW cycles.
-  return IsFbbrServiceFair() && HasUsableFbbrPreviousTrustedBw();
-}
-
 bool FBBRSender::BaseShouldOscillate() const {
+  if (maxbw_flat_trial_active_) {
+    return false;
+  }
+  if (maxbw_flat_waveform_epoch_pending_ &&
+      (probe_epoch_start_time_ == QuicTime::Zero() ||
+       current_time_ < probe_epoch_start_time_)) {
+    return false;
+  }
+  if (cruise_exit_pending_ && cruise_exit_cycle_end_ != QuicTime::Zero() &&
+      current_time_ >= cruise_exit_cycle_end_) {
+    return false;
+  }
   if (in_cruise_ &&
       (current_injection_baseline_bw_.IsZero() ||
        probe_epoch_start_time_ == QuicTime::Zero() ||
@@ -1399,6 +1791,8 @@ uint64_t FBBRSender::GetCurrentAmplitudeBps() const {
       return base_rate.ToBitsPerSecond() / 12;
     case FBBRAmplitudeMode::kSR16:
       return base_rate.ToBitsPerSecond() / 16;
+    case FBBRAmplitudeMode::kSRFraction:
+      return base_rate.ToBitsPerSecond() / sr_amplitude_denominator_;
     default:
       return 0;
   }
@@ -1660,7 +2054,7 @@ bool FBBRSender::ComputeFbbrMaxSrttAround(
 void FBBRSender::RecordFbbrMaxBwUpdateForMaxSrtt(
     QuicTime event_time,
     QuicBandwidth max_bw) {
-  if (!UsesFbbrServiceEnvelope() || !IsFinitePositiveBandwidth(max_bw) ||
+  if (!IsFbbr() || !IsFinitePositiveBandwidth(max_bw) ||
       event_time == QuicTime::Zero()) {
     return;
   }
@@ -1673,7 +2067,7 @@ void FBBRSender::RecordFbbrMaxBwUpdateForMaxSrtt(
 }
 
 void FBBRSender::FinalizePendingFbbrMaxSrttObservations(QuicTime now) {
-  if (!UsesFbbrServiceEnvelope()) {
+  if (!IsFbbr()) {
     return;
   }
   while (!pending_fbbr_max_srtt_observations_.empty()) {
@@ -1727,7 +2121,7 @@ void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
                                            QuicTime now) {
   Bbr2Sender::OnProbeBwPhaseEntered(phase, now);
   model_.SetMinBandwidthSampleCollection(
-      UsesFbbrServiceEnvelope() &&
+      IsFbbr() &&
       phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE);
   if (phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
     rtprop_probe_down_active_ = false;
@@ -1756,20 +2150,16 @@ void FBBRSender::OnProbeBwPhaseEntered(Bbr2ProbeBwMode::CyclePhase phase,
 
 void FBBRSender::EnterCruise(QuicTime now) {
   in_cruise_ = true;
+  ResetMaxBwFlatTrialState();
   fbbr_regime_i_or_iii_seen_this_cruise_ = false;
-  if (IsFbbrServiceFair()) {
-    service_fair_last_valid_regime_seen_this_cruise_ = false;
-    service_fair_last_valid_regime_this_cruise_ =
-        WaveformClassification::kInconclusive;
-  }
   current_cruise_rtprop_updated_ = false;
   previous_cruise_rtprop_updated_ = false;
   // Replace the constructor's initial-RTT placeholder once, using the first
   // path sample learned before Cruise.  After this bootstrap, only explicit
-  // trusted Cruise/ProbeRTT publications version srtt_low.
+  // beq Cruise/ProbeRTT publications version srtt_low.
   InitializeFbbrRtpropFromModel();
   cruise_rtprop_at_entry_ =
-      UsesFbbrServiceEnvelope() && fbbr_rtprop_valid_
+      IsFbbr() && fbbr_rtprop_valid_
           ? fbbr_rtprop_
           : model_.MinRtt();
   ++cruise_id_;
@@ -1780,14 +2170,14 @@ void FBBRSender::EnterCruise(QuicTime now) {
   guard_window_ack_start_ = QuicTime::Zero();
   guard_window_send_start_ = QuicTime::Zero();
   guard_window_app_limited_ = false;
-  trusted_bw_cleared_on_cruise_start_ = false;
-  if (!trusted_bw_clear_on_cruise_start_) {
-    QUIC_DVLOG(1) << "FBBR: trusted_bw.clear_on_cruise_start=false "
+  beq_cleared_on_cruise_start_ = false;
+  if (!beq_clear_on_cruise_start_) {
+    QUIC_DVLOG(1) << "FBBR: beq.clear_on_cruise_start=false "
                      "is overridden to preserve fresh-only application";
   }
-  ClearTrustedBwApplication("cruise_start");
+  ClearBeqApplication("cruise_start");
   cruise_modulation_freq_hz_ = configured_modulation_freq_hz_;
-  QuicBandwidth current_native_max_bw = UsesFbbrServiceEnvelope()
+  QuicBandwidth current_native_max_bw = IsFbbr()
       ? model_.MaxBandwidth() : BandwidthEstimate();
   if (current_native_max_bw.IsZero() ||
       current_native_max_bw.IsInfinite()) {
@@ -1795,12 +2185,9 @@ void FBBRSender::EnterCruise(QuicTime now) {
   }
   initial_cruise_baseline_bw_ = current_native_max_bw;
   current_injection_baseline_bw_ = initial_cruise_baseline_bw_;
-  if (UsesFbbrServiceEnvelope() && HasUsableFbbrPreviousTrustedBw()) {
-    initial_cruise_baseline_bw_ = trusted_bw_;
-    current_injection_baseline_bw_ = trusted_bw_;
-  }
-  if (IsFbbrServiceFair()) {
-    RunFbbrServiceFairCycleUpdate(now);
+  if (IsFbbr() && HasUsableFbbrPreviousBeq()) {
+    initial_cruise_baseline_bw_ = beq_;
+    current_injection_baseline_bw_ = beq_;
   }
   current_probe_amplitude_bps_ = GetCurrentAmplitudeBps();
   waveform_initial_probe_amplitude_bps_ = current_probe_amplitude_bps_;
@@ -1814,11 +2201,15 @@ void FBBRSender::EnterCruise(QuicTime now) {
   fbbr_last_counted_window_second_cycle_id_ = 0;
   fbbr_rolling_retry_count_ = 0;
   fbbr_regime_ii_seen_this_cruise_ = false;
-  fbbr_cruise_trusted_bw_ = QuicBandwidth::Zero();
+  fbbr_cruise_beq_ = QuicBandwidth::Zero();
   current_probe_bw_phase_gain_ = 1.0;
-  ResetWaveformCruiseState(now);
-  freq_tool_on_ = ShouldOscillate();
-  cruise_freq_tool_active_ = freq_tool_on_;
+  if (ShouldStartMaxBwFlatTrial()) {
+    StartMaxBwFlatTrial(now);
+  } else {
+    ResetWaveformCruiseState(now);
+    freq_tool_on_ = ShouldOscillate();
+    cruise_freq_tool_active_ = freq_tool_on_;
+  }
   QUIC_DVLOG(2) << "FBBR: Entering PROBE_CRUISE @ " << now
                 << ", cruise_id=" << cruise_id_
                 << ", fixed_freq=" << cruise_modulation_freq_hz_
@@ -1844,6 +2235,11 @@ void FBBRSender::LeaveCruise(QuicTime now) {
   waveform_cruise_state_ = WaveformCruiseState::kDisabled;
   waveform_window_start_ = QuicTime::Zero();
   waveform_window_end_ = QuicTime::Zero();
+  maxbw_flat_trial_active_ = false;
+  maxbw_flat_waveform_epoch_pending_ = false;
+  cruise_exit_pending_ = false;
+  cruise_exit_cycle_end_ = QuicTime::Zero();
+  cruise_exit_force_immediate_ = false;
 }
 
 void FBBRSender::InitializeFbbrRtpropFromModel() {
@@ -1957,12 +2353,12 @@ void FBBRSender::UpdateGuardFilter(QuicBandwidth raw_sample) {
   guard_updated_this_cruise_ = true;
 }
 
-void FBBRSender::AnchorGuardFilter(QuicBandwidth trusted_bw) {
-  if (!IsFinitePositiveBandwidth(trusted_bw)) {
+void FBBRSender::AnchorGuardFilter(QuicBandwidth beq) {
+  if (!IsFinitePositiveBandwidth(beq)) {
     return;
   }
-  guard_filter_stage1_ = trusted_bw;
-  guard_filter_stage2_ = trusted_bw;
+  guard_filter_stage1_ = beq;
+  guard_filter_stage2_ = beq;
   guard_filter_valid_ = true;
 }
 
@@ -1985,7 +2381,7 @@ void FBBRSender::StartGuardMeasurementWindow(
 
 void FBBRSender::UpdateGuardEstimatorFromCongestionEvent(
     const Bbr2CongestionEvent& congestion_event) {
-  if (!UsesFbbrServiceEnvelope() || !in_cruise_ ||
+  if (!IsFbbr() || !in_cruise_ ||
       mode_ != Bbr2Mode::PROBE_BW ||
       GetCurrentProbeBwPhase() !=
           Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE ||
@@ -2063,12 +2459,23 @@ void FBBRSender::OnCongestionEventStarted(
   latest_congestion_event_prior_inflight_valid_ = true;
   latest_congestion_event_inflight_ = congestion_event.bytes_in_flight;
   latest_congestion_event_inflight_valid_ = true;
-  if (!UsesFbbrServiceEnvelope() && in_cruise_ &&
+  if (IsFbbr() && in_cruise_ &&
+      (congestion_event.bytes_lost > 0 || InRecovery())) {
+    // A safety-driven native transition must never wait for a waveform edge.
+    cruise_exit_force_immediate_ = true;
+  }
+  if (!IsFbbr() && in_cruise_ &&
       mode_ == Bbr2Mode::PROBE_BW &&
       GetCurrentProbeBwPhase() ==
           Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
       model_.MinRtt() != cruise_rtprop_at_entry_) {
     current_cruise_rtprop_updated_ = true;
+  }
+  if (IsFbbr() && maxbw_flat_trial_active_) {
+    // Trial ACKs are intentionally excluded from GuardBw, convergence rounds,
+    // waveform classification, and regime updates.
+    UpdateMaxBwFlatTrial(congestion_event);
+    return;
   }
   UpdateRoundDeliveryRateSample(congestion_event);
   UpdateGuardEstimatorFromCongestionEvent(congestion_event);
@@ -2199,7 +2606,7 @@ void FBBRSender::UpdateReconvergenceEvidence(
     bbr_stable_ = true;
     freq_tool_needed_ = false;
     unstable_episode_active_ = false;
-    ClearTrustedBw("stable_closure");
+    ClearBeq("stable_closure");
     freq_tool_on_ = false;
     prev_v_round_ = 0.0;
   }
@@ -2210,7 +2617,7 @@ void FBBRSender::UpdateFreqWeightAndToolState() {
     freq_tool_needed_ = false;
     unstable_episode_active_ = false;
     if (enable_convergence_gate_control_) {
-      ClearTrustedBw("stable_closure");
+      ClearBeq("stable_closure");
       freq_tool_on_ = false;
     } else {
       freq_tool_on_ = ShouldOscillate();
@@ -2226,7 +2633,7 @@ void FBBRSender::UpdateFreqWeightAndToolState() {
     bbr_stable_ = true;
     freq_tool_needed_ = false;
     unstable_episode_active_ = false;
-    ClearTrustedBw("stable_closure");
+    ClearBeq("stable_closure");
     freq_tool_on_ = false;
     return;
   }
@@ -2237,48 +2644,39 @@ void FBBRSender::UpdateFreqWeightAndToolState() {
   }
 }
 
-void FBBRSender::ClearTrustedBw(const char* reason) {
+void FBBRSender::ClearBeq(const char* reason) {
   const std::string clear_reason = reason == nullptr ? "unknown" : reason;
   const bool preserve_fbbr_probe_rtt =
       IsFbbr() && mode_ == Bbr2Mode::PROBE_RTT &&
       (clear_reason == "non_probe_bw" ||
        clear_reason == "stable_closure");
-  const bool preserve_service_fair_control =
-      IsFbbrServiceFair() && trusted_bw_valid_ &&
-      IsFinitePositiveBandwidth(trusted_bw_) &&
-      (clear_reason == "stable_closure" ||
-       (mode_ == Bbr2Mode::PROBE_RTT &&
-        clear_reason == "non_probe_bw"));
-  if (preserve_fbbr_probe_rtt || preserve_service_fair_control) {
-    trusted_bw_invalid_reason_ =
-        preserve_fbbr_probe_rtt || mode_ == Bbr2Mode::PROBE_RTT
-            ? "probe_rtt_preserved"
-            : "stable_control_preserved";
-    ClearTrustedBwApplication(reason);
+  if (preserve_fbbr_probe_rtt) {
+    beq_invalid_reason_ = "probe_rtt_preserved";
+    ClearBeqApplication(reason);
     return;
   }
-  trusted_bw_ = QuicBandwidth::Zero();
-  trusted_bw_valid_ = false;
+  beq_ = QuicBandwidth::Zero();
+  beq_valid_ = false;
   model_.ClearBdpBandwidthOverride();
-  trusted_bw_conf_ = 0.0;
-  trusted_bw_source_ = kTrustedBwSourceNone;
-  trusted_bw_cruise_id_ = 0;
-  trusted_bw_invalid_reason_ = clear_reason;
-  ClearTrustedBwApplication(reason);
+  beq_conf_ = 0.0;
+  beq_source_ = kBeqSourceNone;
+  beq_cruise_id_ = 0;
+  beq_invalid_reason_ = clear_reason;
+  ClearBeqApplication(reason);
 }
 
-void FBBRSender::ClearTrustedBwApplication(const char* reason) const {
-  trusted_bw_fresh_ = false;
-  trusted_bw_application_valid_ = false;
-  trusted_bw_ready_for_post_cruise_ = false;
-  trusted_bw_application_phase_ = "NONE";
+void FBBRSender::ClearBeqApplication(const char* reason) const {
+  beq_fresh_ = false;
+  beq_application_valid_ = false;
+  beq_ready_for_post_cruise_ = false;
+  beq_application_phase_ = "NONE";
   if (reason != nullptr && std::string(reason) == "cruise_start") {
-    trusted_bw_cleared_on_cruise_start_ = true;
+    beq_cleared_on_cruise_start_ = true;
   }
 }
 
-void FBBRSender::PublishTrustedBwSelection(
-    const TrustedBwSelectionResult& selection) {
+void FBBRSender::PublishBeqSelection(
+    const BeqSelectionResult& selection) {
   selection_native_bw_ = selection.native_bw;
   // Preserve the established CSV columns while FBBR no longer runs the
   // legacy spectral selector that produced them.
@@ -2291,33 +2689,33 @@ void FBBRSender::PublishTrustedBwSelection(
   limiting_spectral_signal_ = "NOT_APPLICABLE";
   merged_rescue_attempted_ = false;
   merged_rescue_success_ = false;
-  trusted_bw_selection_compute_us_ = 0;
+  beq_selection_compute_us_ = 0;
   normal_window_count_ = 0;
   merged_window_count_ = 0;
   spectral_invalid_count_ = 0;
 
-  const bool valid_selection = selection.trusted_bw_valid &&
-      IsFinitePositiveBandwidth(selection.trusted_bw);
+  const bool valid_selection = selection.beq_valid &&
+      IsFinitePositiveBandwidth(selection.beq);
   if (!valid_selection) {
-    ClearTrustedBw("invalid_waveform_trusted_bw");
+    ClearBeq("invalid_waveform_beq");
     return;
   }
 
-  trusted_bw_ = selection.trusted_bw;
-  trusted_bw_valid_ = true;
-  // FBBR and ServiceFair keep BBRv2's native cwnd/BDP model and enforce
-  // their envelope only at the final send-allowance interface.
-  trusted_bw_conf_ = selection.trusted_bw_conf;
-  trusted_bw_source_ = selection.trusted_bw_source;
-  trusted_bw_cruise_id_ =
+  beq_ = selection.beq;
+  beq_valid_ = true;
+  // FBBR keeps BBRv2's native cwnd/BDP model and enforces its envelope only
+  // at the final send-allowance interface.
+  beq_conf_ = selection.beq_conf;
+  beq_source_ = selection.beq_source;
+  beq_cruise_id_ =
       static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
-  trusted_bw_fresh_ = true;
-  trusted_bw_application_valid_ = true;
-  trusted_bw_ready_for_post_cruise_ = true;
-  trusted_bw_application_phase_ = "POST_CRUISE_READY";
-  trusted_bw_invalid_reason_ = "none";
-  if (HasUsableFbbrPreviousTrustedBw()) {
-    current_injection_baseline_bw_ = trusted_bw_;
+  beq_fresh_ = true;
+  beq_application_valid_ = true;
+  beq_ready_for_post_cruise_ = true;
+  beq_application_phase_ = "POST_CRUISE_READY";
+  beq_invalid_reason_ = "none";
+  if (HasUsableFbbrPreviousBeq()) {
+    current_injection_baseline_bw_ = beq_;
   }
 }
 
@@ -2341,8 +2739,10 @@ const char* FBBRSender::PhaseApplicationName(
 const char* FBBRSender::PacingBaseSourceName(
     FBBRPacingBaseSource source) {
   switch (source) {
-    case FBBRPacingBaseSource::kTrustedBw:
-      return "TRUSTED_BW";
+    case FBBRPacingBaseSource::kBeq:
+      return "BEQ";
+    case FBBRPacingBaseSource::kMaxBwFlatTrial:
+      return "MAXBW_FLAT_TRIAL";
     case FBBRPacingBaseSource::kWaveformCruiseBaseline:
       return "WAVEFORM_CRUISE_BASELINE";
     default:
@@ -2356,7 +2756,7 @@ bool FBBRSender::IsCruisePhase(
          phase == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE;
 }
 
-bool FBBRSender::IsTrustedBwApplicationPhase(
+bool FBBRSender::IsBeqApplicationPhase(
     Bbr2ProbeBwMode::CyclePhase phase) const {
   if (mode_ != Bbr2Mode::PROBE_BW) {
     return false;
@@ -2392,12 +2792,12 @@ void FBBRSender::EmitConvergenceGateTrace(
       << " stable_cnt=" << stable_cnt_
       << " bbr_stable=" << bbr_stable_
       << " freq_tool_on=" << freq_tool_on_
-      << " trusted_bw_bps="
-      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0)
-      << " trusted_bw_valid=" << trusted_bw_valid_
-      << " trusted_bw_fresh=" << trusted_bw_fresh_
-      << " trusted_bw_application_valid="
-      << trusted_bw_application_valid_
+      << " beq_bps="
+      << (beq_valid_ ? beq_.ToBitsPerSecond() : 0)
+      << " beq_valid=" << beq_valid_
+      << " beq_fresh=" << beq_fresh_
+      << " beq_application_valid="
+      << beq_application_valid_
       << " dual_signal_spectral_gate_pass="
       << dual_signal_spectral_gate_pass_;
 
@@ -2453,11 +2853,11 @@ void FBBRSender::EmitPacingTrace(
       << " phase_pacing_gain=" << phase_pacing_gain
       << " native_pacing_bps=" << native_pacing.ToBitsPerSecond()
       << " final_pacing_rate_bps=" << final_pacing.ToBitsPerSecond()
-      << " trusted_bw_bps="
-      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0)
-      << " trusted_bw_fresh=" << trusted_bw_fresh_
-      << " trusted_bw_application_valid="
-      << trusted_bw_application_valid_
+      << " beq_bps="
+      << (beq_valid_ ? beq_.ToBitsPerSecond() : 0)
+      << " beq_fresh=" << beq_fresh_
+      << " beq_application_valid="
+      << beq_application_valid_
       << " triangle_wave=" << triangle_wave
       << " actual_modulation_on=" << actual_modulation_on;
 
@@ -2529,7 +2929,7 @@ void FBBRSender::EmitFreqGateCsvRow(
   const Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
   const double trace_freq_weight = bbr_stable_
       ? 0.0
-      : (UsesFbbrServiceEnvelope()
+      : (IsFbbr()
              ? 1.0
              : Clamp01(1.0 - static_cast<double>(stable_cnt_) /
                                   static_cast<double>(stable_rounds_)));
@@ -2558,16 +2958,16 @@ void FBBRSender::EmitFreqGateCsvRow(
       << (unstable_episode_active_ ? "true" : "false") << ","
       << selection_native_bw_.ToBitsPerSecond() << ","
       << b_native.ToBitsPerSecond() << ","
-      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
-      << (trusted_bw_valid_ ? "true" : "false") << ","
-      << trusted_bw_conf_ << ","
-      << trusted_bw_source_ << ","
-      << trusted_bw_cruise_id_ << ","
-      << (trusted_bw_fresh_ ? "true" : "false") << ","
-      << (trusted_bw_application_valid_ ? "true" : "false") << ","
-      << (trusted_bw_ready_for_post_cruise_ ? "true" : "false") << ","
-      << trusted_bw_application_phase_ << ","
-      << trusted_bw_invalid_reason_ << ","
+      << (beq_valid_ ? beq_.ToBitsPerSecond() : 0) << ","
+      << (beq_valid_ ? "true" : "false") << ","
+      << beq_conf_ << ","
+      << beq_source_ << ","
+      << beq_cruise_id_ << ","
+      << (beq_fresh_ ? "true" : "false") << ","
+      << (beq_application_valid_ ? "true" : "false") << ","
+      << (beq_ready_for_post_cruise_ ? "true" : "false") << ","
+      << beq_application_phase_ << ","
+      << beq_invalid_reason_ << ","
       << drate_spectral_integrity_score_ << ","
       << srtt_spectral_integrity_score_ << ","
       << joint_spectral_integrity_score_ << ","
@@ -2596,11 +2996,11 @@ void FBBRSender::EmitFreqGateCsvRow(
       << (sample_valid ? "true" : "false") << ","
       << (merged_rescue_attempted_ ? "true" : "false") << ","
       << (merged_rescue_success_ ? "true" : "false") << ","
-      << trusted_bw_selection_compute_us_ << ","
+      << beq_selection_compute_us_ << ","
       << normal_window_count_ << ","
       << merged_window_count_ << ","
       << spectral_invalid_count_ << ","
-      << (trusted_bw_cleared_on_cruise_start_ ? "true" : "false");
+      << (beq_cleared_on_cruise_start_ ? "true" : "false");
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -2612,46 +3012,46 @@ void FBBRSender::EmitFreqGateCsvRow(
                         row.str());
 }
 
-void FBBRSender::PublishFbbrCruiseTrustedBw() {
-  TrustedBwSelectionResult selection = {
+void FBBRSender::PublishFbbrCruiseBeq() {
+  BeqSelectionResult selection = {
       BandwidthEstimate(),
       QuicBandwidth::Zero(),
       false,
       0.0,
-      kTrustedBwSourceNone};
+      kBeqSourceNone};
   if (!IsFinitePositiveBandwidth(selection.native_bw)) {
     selection.native_bw = BandwidthEstimate();
   }
 
   const std::string waveform_candidate_source =
-      trusted_bw_candidate_source_ == nullptr
-          ? kTrustedBwSourceNone : trusted_bw_candidate_source_;
+      beq_candidate_source_ == nullptr
+          ? kBeqSourceNone : beq_candidate_source_;
   const bool waveform_candidate_source_valid =
-      waveform_candidate_source == kTrustedBwSourceFbbrWindowMean ||
-      waveform_candidate_source == kTrustedBwSourceFbbrWindowDeliveredRate;
+      waveform_candidate_source == kBeqSourceFbbrWindowMean ||
+      waveform_candidate_source == kBeqSourceFbbrWindowDeliveredRate;
   const bool waveform_frequency_ready =
       fbbr_regime_ii_seen_this_cruise_ &&
-      trusted_baseline_locked_ &&
+      beq_baseline_locked_ &&
       waveform_candidate_source_valid &&
-      IsFinitePositiveBandwidth(trusted_bw_candidate_);
+      IsFinitePositiveBandwidth(beq_candidate_);
 
   if (waveform_frequency_ready) {
-    selection.trusted_bw = trusted_bw_candidate_;
-    selection.trusted_bw_valid = true;
-    selection.trusted_bw_conf = 1.0;
-    selection.trusted_bw_source = trusted_bw_candidate_source_;
-    AnchorGuardFilter(selection.trusted_bw);
+    selection.beq = beq_candidate_;
+    selection.beq_valid = true;
+    selection.beq_conf = 1.0;
+    selection.beq_source = beq_candidate_source_;
+    AnchorGuardFilter(selection.beq);
   } else if (guard_updated_this_cruise_ && guard_filter_valid_ &&
              IsFinitePositiveBandwidth(guard_filter_stage2_)) {
-    selection.trusted_bw = guard_filter_stage2_;
-    selection.trusted_bw_valid = true;
-    selection.trusted_bw_conf = 1.0;
-    selection.trusted_bw_source = kTrustedBwSourceGuardFilter;
-  } else if (HasUsableFbbrPreviousTrustedBw()) {
-    selection.trusted_bw = trusted_bw_;
-    selection.trusted_bw_valid = true;
-    selection.trusted_bw_conf = trusted_bw_conf_;
-    selection.trusted_bw_source = kTrustedBwSourcePreviousTrusted;
+    selection.beq = guard_filter_stage2_;
+    selection.beq_valid = true;
+    selection.beq_conf = 1.0;
+    selection.beq_source = kBeqSourceGuardFilter;
+  } else if (HasUsableFbbrPreviousBeq()) {
+    selection.beq = beq_;
+    selection.beq_valid = true;
+    selection.beq_conf = beq_conf_;
+    selection.beq_source = kBeqSourcePreviousBeq;
   } else {
     QuicBandwidth native_fallback = model_.MaxBandwidth();
     if (!IsFinitePositiveBandwidth(native_fallback)) {
@@ -2664,17 +3064,13 @@ void FBBRSender::PublishFbbrCruiseTrustedBw() {
       native_fallback =
           QuicBandwidth::FromBitsPerSecond(minimum_pacing_rate_bps_);
     }
-    selection.trusted_bw = native_fallback;
-    selection.trusted_bw_valid = IsFinitePositiveBandwidth(native_fallback);
-    selection.trusted_bw_conf = 1.0;
-    selection.trusted_bw_source = kTrustedBwSourceNativeFallback;
+    selection.beq = native_fallback;
+    selection.beq_valid = IsFinitePositiveBandwidth(native_fallback);
+    selection.beq_conf = 1.0;
+    selection.beq_source = kBeqSourceNativeFallback;
   }
 
-  if (IsFbbrServiceFair()) {
-    ApplyFbbrServiceFairTrustedBwCorrection(
-        &selection, waveform_frequency_ready);
-  }
-  PublishTrustedBwSelection(selection);
+  PublishBeqSelection(selection);
 }
 void FBBRSender::OnPacketSent(QuicTime sent_time,
                                   QuicByteCount bytes_in_flight,
@@ -2683,9 +3079,11 @@ void FBBRSender::OnPacketSent(QuicTime sent_time,
                                   HasRetransmittableData is_retransmittable) {
   current_time_ = sent_time;
   QuicBandwidth sender_rate = PacingRate(bytes_in_flight);
-  sender_rate_history_.push_back({sent_time, sender_rate});
-  while (sender_rate_history_.size() > kMaxHistorySamples) {
-    sender_rate_history_.pop_front();
+  if (!IsFbbr() || !maxbw_flat_trial_active_) {
+    sender_rate_history_.push_back({sent_time, sender_rate});
+    while (sender_rate_history_.size() > kMaxHistorySamples) {
+      sender_rate_history_.pop_front();
+    }
   }
 
   Bbr2Sender::OnPacketSent(sent_time,
@@ -2695,12 +3093,20 @@ void FBBRSender::OnPacketSent(QuicTime sent_time,
                            is_retransmittable);
 }
 
-void FBBRSender::OnConnectionMigration() {
-  if (IsFbbrServiceFair()) {
-    ResetFbbrServiceFairState();
-    ClearTrustedBw("connection_migration");
+void FBBRSender::OnApplicationLimited(QuicByteCount bytes_in_flight) {
+  Bbr2Sender::OnApplicationLimited(bytes_in_flight);
+  if (IsFbbr() && maxbw_flat_trial_active_ && model_.is_app_limited()) {
+    maxbw_flat_failure_pending_ = true;
   }
-  Bbr2Sender::OnConnectionMigration();
+}
+
+void FBBRSender::OnUpdateEcnBytes(uint64_t ecn_ce_count) {
+  const bool ecn_increased = ecn_ce_count > maxbw_flat_last_ecn_ce_count_;
+  maxbw_flat_last_ecn_ce_count_ = ecn_ce_count;
+  Bbr2Sender::OnUpdateEcnBytes(ecn_ce_count);
+  if (IsFbbr() && maxbw_flat_trial_active_ && ecn_increased) {
+    maxbw_flat_ecn_failure_pending_ = true;
+  }
 }
 
 void FBBRSender::OnCongestionEvent(
@@ -2710,13 +3116,14 @@ void FBBRSender::OnCongestionEvent(
     const AckedPacketVector& acked_packets,
     const LostPacketVector& lost_packets) {
   current_time_ = event_time;
+  const bool maxbw_flat_trial_was_active =
+      IsFbbr() && maxbw_flat_trial_active_;
   QuicByteCount acked_bytes = 0;
   for (const auto& ack : acked_packets) {
     acked_bytes += ack.bytes_acked;
   }
-  const Bbr2Mode mode_before_event = mode_;
   const QuicBandwidth fbbr_max_bw_before =
-      UsesFbbrServiceEnvelope() ? model_.MaxBandwidth()
+      IsFbbr() ? model_.MaxBandwidth()
                                 : QuicBandwidth::Zero();
 
   // Keep the ACK-rate sample raw for waveform analysis, but remove the
@@ -2728,37 +3135,36 @@ void FBBRSender::OnCongestionEvent(
   max_bw_attenuation_factor_ = CurrentMaxBwAttenuationFactor();
   model_.SetMaxBandwidthSampleAttenuation(max_bw_attenuation_factor_);
   model_.SetMinBandwidthSampleCorrection(
-      UsesFbbrServiceEnvelope() ? CurrentMinBwCorrectionFactor() : 1.0);
+      IsFbbr() ? CurrentMinBwCorrectionFactor() : 1.0);
 
   Bbr2Sender::OnCongestionEvent(rtt_updated,
                                 prior_in_flight,
                                 event_time,
                                 acked_packets,
                                 lost_packets);
-  if (IsFbbrServiceFair() &&
-      mode_before_event != Bbr2Mode::STARTUP &&
-      mode_ == Bbr2Mode::STARTUP) {
-    ResetFbbrServiceFairState();
-  }
   const QuicBandwidth fbbr_max_bw_after =
-      UsesFbbrServiceEnvelope() ? model_.MaxBandwidth()
+      IsFbbr() ? model_.MaxBandwidth()
                                 : QuicBandwidth::Zero();
   const bool fbbr_max_bw_updated =
-      UsesFbbrServiceEnvelope() &&
+      IsFbbr() &&
       IsFinitePositiveBandwidth(fbbr_max_bw_after) &&
       fbbr_max_bw_after != fbbr_max_bw_before;
+  const bool maxbw_flat_trial_event =
+      maxbw_flat_trial_was_active ||
+      (IsFbbr() && maxbw_flat_trial_active_);
 
   if (mode_ != Bbr2Mode::PROBE_BW) {
-    ClearTrustedBw("non_probe_bw");
+    ClearBeq("non_probe_bw");
   } else if (enable_convergence_gate_control_ && bbr_stable_) {
-    ClearTrustedBw("stable_closure");
+    ClearBeq("stable_closure");
   }
 
   if (!drain_completed_ && mode_ == Bbr2Mode::PROBE_BW) {
     drain_completed_ = true;
   }
 
-  if (last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_ &&
+  if (!maxbw_flat_trial_event &&
+      last_ack_time_ != QuicTime::Zero() && event_time > last_ack_time_ &&
       acked_bytes > 0) {
     QuicBandwidth recv_signal = use_delivery_rate_latest_for_signal_history_
                                     ? DeliveryRateLatest()
@@ -2795,10 +3201,10 @@ void FBBRSender::OnCongestionEvent(
       ack_window_history_.pop_front();
     }
   }
-  if (fbbr_max_bw_updated) {
+  if (!maxbw_flat_trial_event && fbbr_max_bw_updated) {
     RecordFbbrMaxBwUpdateForMaxSrtt(event_time, fbbr_max_bw_after);
   }
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr() && !maxbw_flat_trial_event) {
     FinalizePendingFbbrMaxSrttObservations(event_time);
   }
   last_ack_time_ = event_time;
@@ -2806,22 +3212,21 @@ void FBBRSender::OnCongestionEvent(
   // Record the cumulative counter before a due waveform analysis so an ACK
   // exactly at the window end contributes to Delivered(t_end). Points after
   // the boundary remain excluded by the interval lookup.
-  if (UsesFbbrServiceEnvelope() && !acked_packets.empty()) {
+  if (IsFbbr() && !maxbw_flat_trial_event &&
+      !acked_packets.empty()) {
     RecordFbbrDeliveredPoint(
         event_time,
         static_cast<uint64_t>(model_.total_bytes_acked()),
         model_.is_app_limited());
   }
-  if (IsFbbrServiceFair() && !acked_packets.empty()) {
-    UpdateFbbrServiceFairSignals(event_time);
-  }
-
   if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
-      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE) {
+      GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
+      !maxbw_flat_trial_event && !maxbw_flat_trial_active_) {
     // FBBR now uses the time-domain waveform detector exclusively.
     RunWaveformCruiseStateMachine(event_time);
   }
-  if (UsesFbbrServiceEnvelope() && !acked_packets.empty()) {
+  if (IsFbbr() && !maxbw_flat_trial_event &&
+      !acked_packets.empty()) {
     UpdateFbbrTelemetry(
         event_time,
         latest_congestion_event_inflight_valid_
@@ -2836,30 +3241,63 @@ QuicBandwidth FBBRSender::PacingRate(
   const QuicBandwidth native_bw = BandwidthEstimate();
   const Bbr2ProbeBwMode::CyclePhase phase = GetCurrentProbeBwPhase();
   const double phase_gain = static_cast<double>(PacingGain());
-  const bool use_previous_trusted_bw =
-      UsesFbbrServiceEnvelope() && mode_ == Bbr2Mode::PROBE_BW &&
-      HasUsableFbbrPreviousTrustedBw() &&
+  if (IsMaxBwFlatTrialPacingActive()) {
+    const QuicBandwidth trial_rate = maxbw_flat_trial_rate_;
+    beq_application_phase_ = "CRUISE";
+    // Do not call RecordFbbrRateTargets here: the flat step must not create
+    // service-envelope capacity or positive probe credit.
+    EmitPacingTrace(native_bw,
+                    trial_rate,
+                    FBBRPacingBaseSource::kMaxBwFlatTrial,
+                    native_pacing,
+                    trial_rate,
+                    1.0,
+                    0,
+                    0,
+                    0.0,
+                    false);
+    if (pacing_audit_trace_cb_) {
+      const double time_s =
+          static_cast<double>((current_time_ - QuicTime::Zero())
+                                  .ToMicroseconds()) /
+          1000000.0;
+      pacing_audit_trace_cb_(
+          time_s,
+          native_pacing.ToBitsPerSecond(),
+          trial_rate.ToBitsPerSecond(),
+          native_bw.ToBitsPerSecond(),
+          trial_rate.ToBitsPerSecond(),
+          PacingBaseSourceName(FBBRPacingBaseSource::kMaxBwFlatTrial),
+          1.0,
+          false,
+          beq_valid_);
+    }
+    return trial_rate;
+  }
+  const bool use_previous_beq =
+      IsFbbr() && mode_ == Bbr2Mode::PROBE_BW &&
+      HasUsableFbbrPreviousBeq() &&
       (!IsCruisePhase(phase) ||
        !fbbr_regime_i_or_iii_seen_this_cruise_);
 
   QuicBandwidth pacing_base_bw = native_bw;
   FBBRPacingBaseSource pacing_base_source =
       FBBRPacingBaseSource::kNativeBbr;
-  const bool trusted_value_is_usable =
-      trusted_bw_valid_ && !trusted_bw_.IsZero() &&
-      std::isfinite(static_cast<double>(trusted_bw_.ToBitsPerSecond()));
-  const bool trusted_result_is_fresh =
-      trusted_bw_fresh_ &&
-      trusted_bw_cruise_id_ ==
+  const bool beq_value_is_usable =
+      beq_valid_ && !beq_.IsZero() &&
+      std::isfinite(static_cast<double>(beq_.ToBitsPerSecond()));
+  const bool beq_result_is_fresh =
+      beq_fresh_ &&
+      beq_cruise_id_ ==
           static_cast<uint64_t>(std::max<int64_t>(0, cruise_id_));
   const bool stable_allows_application =
       !enable_convergence_gate_control_ || !bbr_stable_;
-  const bool use_trusted_bw =
-      IsTrustedBwApplicationPhase(phase) &&
-      trusted_bw_application_valid_ &&
-      trusted_bw_ready_for_post_cruise_ &&
-      trusted_result_is_fresh &&
-      trusted_value_is_usable &&
+  const bool use_beq =
+      IsBeqApplicationPhase(phase) &&
+      beq_application_valid_ &&
+      beq_ready_for_post_cruise_ &&
+      beq_result_is_fresh &&
+      beq_value_is_usable &&
       stable_allows_application;
 
   const bool use_waveform_cruise_baseline =
@@ -2870,26 +3308,26 @@ QuicBandwidth FBBRSender::PacingRate(
     pacing_base_bw = current_injection_baseline_bw_;
     pacing_base_source =
         FBBRPacingBaseSource::kWaveformCruiseBaseline;
-    trusted_bw_application_phase_ = "CRUISE";
-  } else if (use_previous_trusted_bw) {
-    pacing_base_bw = trusted_bw_;
-    pacing_base_source = FBBRPacingBaseSource::kTrustedBw;
-    trusted_bw_application_phase_ = PhaseApplicationName(phase);
-  } else if (use_trusted_bw) {
-    pacing_base_bw = trusted_bw_;
-    pacing_base_source = FBBRPacingBaseSource::kTrustedBw;
-    trusted_bw_application_phase_ = PhaseApplicationName(phase);
+    beq_application_phase_ = "CRUISE";
+  } else if (use_previous_beq) {
+    pacing_base_bw = beq_;
+    pacing_base_source = FBBRPacingBaseSource::kBeq;
+    beq_application_phase_ = PhaseApplicationName(phase);
+  } else if (use_beq) {
+    pacing_base_bw = beq_;
+    pacing_base_source = FBBRPacingBaseSource::kBeq;
+    beq_application_phase_ = PhaseApplicationName(phase);
   } else {
-    trusted_bw_application_phase_ = PhaseApplicationName(phase);
+    beq_application_phase_ = PhaseApplicationName(phase);
   }
 
   QuicBandwidth baseline_pacing = native_pacing;
   if (use_waveform_cruise_baseline) {
     current_probe_bw_phase_gain_ = 1.0;
     baseline_pacing = current_injection_baseline_bw_;
-  } else if (use_previous_trusted_bw) {
-    baseline_pacing = static_cast<float>(phase_gain) * trusted_bw_;
-  } else if (use_trusted_bw) {
+  } else if (use_previous_beq) {
+    baseline_pacing = static_cast<float>(phase_gain) * beq_;
+  } else if (use_beq) {
     baseline_pacing =
         static_cast<float>(phase_gain) * pacing_base_bw;
   }
@@ -2897,14 +3335,14 @@ QuicBandwidth FBBRSender::PacingRate(
   // limits, units, and integer rounding as the commanded target.  It removes
   // only positive phase and waveform increments; all negative gains remain.
   QuicBandwidth base_target_before_wave = baseline_pacing;
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     const float base_phase_gain =
         static_cast<float>(std::min(phase_gain, 1.0));
     if (use_waveform_cruise_baseline) {
       base_target_before_wave = current_injection_baseline_bw_;
-    } else if (use_previous_trusted_bw) {
-      base_target_before_wave = base_phase_gain * trusted_bw_;
-    } else if (use_trusted_bw) {
+    } else if (use_previous_beq) {
+      base_target_before_wave = base_phase_gain * beq_;
+    } else if (use_beq) {
       base_target_before_wave = base_phase_gain * pacing_base_bw;
     } else if (phase_gain > 1.0 &&
                IsFinitePositiveBandwidth(native_bw)) {
@@ -2946,13 +3384,13 @@ QuicBandwidth FBBRSender::PacingRate(
   const QuicBandwidth final_pacing =
       QuicBandwidth::FromBitsPerSecond(static_cast<uint64_t>(final_bps));
   const QuicBandwidth returned_pacing =
-      (!should_oscillate && !use_trusted_bw &&
-       !use_previous_trusted_bw &&
+      (!should_oscillate && !use_beq &&
+       !use_previous_beq &&
        !use_waveform_cruise_baseline)
           ? native_pacing
           : final_pacing;
   QuicBandwidth returned_base_target = returned_pacing;
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     const int64_t base_offset_bps = std::min<int64_t>(0, offset_bps);
     const int64_t base_final_bps = AddPacingOffsetWithFloor(
         SaturateBpsToInt64(base_target_before_wave.ToBitsPerSecond()),
@@ -2961,8 +3399,8 @@ QuicBandwidth FBBRSender::PacingRate(
         QuicBandwidth::FromBitsPerSecond(
             static_cast<uint64_t>(base_final_bps));
     returned_base_target =
-        (!should_oscillate && !use_trusted_bw &&
-         !use_previous_trusted_bw &&
+        (!should_oscillate && !use_beq &&
+         !use_previous_beq &&
          !use_waveform_cruise_baseline)
             ? base_target_before_wave
             : base_final;
@@ -2996,7 +3434,7 @@ QuicBandwidth FBBRSender::PacingRate(
         PacingBaseSourceName(pacing_base_source),
         phase_gain,
         should_oscillate,
-        trusted_bw_valid_);
+        beq_valid_);
   }
   return returned_pacing;
 }
@@ -3016,8 +3454,8 @@ const char* FBBRSender::WaveformStateName(WaveformCruiseState state) {
       return "ANALYZE_CYCLE";
     case WaveformCruiseState::kWaitPostAdjustmentSettle:
       return "WAIT_POST_ADJUSTMENT_SETTLE";
-    case WaveformCruiseState::kTrustedLocked:
-      return "TRUSTED_LOCKED";
+    case WaveformCruiseState::kBeqLocked:
+      return "BEQ_LOCKED";
     case WaveformCruiseState::kFallbackLocked:
       return "FALLBACK_LOCKED";
     default:
@@ -3043,17 +3481,9 @@ bool FBBRSender::IsFbbr() const {
   return GetCongestionControlType() == kFBBR;
 }
 
-bool FBBRSender::IsFbbrServiceFair() const {
-  return GetCongestionControlType() == kFBBRServiceFair;
-}
-
-bool FBBRSender::UsesFbbrServiceEnvelope() const {
-  return IsFbbr() || IsFbbrServiceFair();
-}
-
-bool FBBRSender::HasUsableFbbrPreviousTrustedBw() const {
-  return UsesFbbrServiceEnvelope() && trusted_bw_valid_ &&
-      IsFinitePositiveBandwidth(trusted_bw_);
+bool FBBRSender::HasUsableFbbrPreviousBeq() const {
+  return IsFbbr() && beq_valid_ &&
+      IsFinitePositiveBandwidth(beq_);
 }
 
 
@@ -3070,7 +3500,7 @@ TimeDelta FBBRSender::CurrentFbbrRtprop() const {
 
 
 QuicByteCount FBBRSender::GetCongestionWindow() const {
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     return ApplyFbbrInflightEnvelope(cwnd_);
   }
   return cwnd_;
@@ -3081,7 +3511,7 @@ void FBBRSender::RecordFbbrRateTargets(
     QuicTime now,
     QuicBandwidth target_rate,
     QuicBandwidth base_target_rate) const {
-  if (!UsesFbbrServiceEnvelope() ||
+  if (!IsFbbr() ||
       !IsFinitePositiveBandwidth(target_rate) ||
       !IsFinitePositiveBandwidth(base_target_rate)) {
     return;
@@ -3132,7 +3562,7 @@ void FBBRSender::RecordFbbrRateTargets(
 bool FBBRSender::HasFullFbbrTargetHistory(
     QuicTime now,
     TimeDelta rtprop) const {
-  if (!UsesFbbrServiceEnvelope() ||
+  if (!IsFbbr() ||
       !fbbr_rate_history_integrity_valid_ ||
       rtprop.IsZero() || rtprop.IsInfinite() ||
       rtprop.ToMicroseconds() <= 0 ||
@@ -3246,7 +3676,7 @@ void FBBRSender::RecordFbbrDeliveredPoint(
     QuicTime now,
     uint64_t cumulative_delivered,
     bool app_limited) {
-  if (!UsesFbbrServiceEnvelope()) {
+  if (!IsFbbr()) {
     return;
   }
   if (fbbr_delivered_history_.empty()) {
@@ -3269,7 +3699,6 @@ void FBBRSender::RecordFbbrDeliveredPoint(
   if (cumulative_delivered < last.cumulative_delivered_bytes) {
     // Begin a fresh counter generation.  The reset remains invalid until it
     // lies strictly before a subsequently covered RTprop window.
-    ResetFbbrServiceFairState();
     fbbr_delivered_history_.clear();
     fbbr_last_counter_reset_time_ = now;
   }
@@ -3312,7 +3741,7 @@ bool FBBRSender::ComputeFbbrIntervalDeliveryRateBps(
   if (delivery_rate_bps != nullptr) {
     *delivery_rate_bps = 0.0;
   }
-  if (!UsesFbbrServiceEnvelope() || delivery_rate_bps == nullptr ||
+  if (!IsFbbr() || delivery_rate_bps == nullptr ||
       !fbbr_delivered_history_integrity_valid_ ||
       window_end <= window_start ||
       fbbr_delivered_history_.empty()) {
@@ -3365,7 +3794,7 @@ bool FBBRSender::ComputeFbbrTimeWeightedSrttMeanMs(
   if (srtt_mean_ms != nullptr) {
     *srtt_mean_ms = 0.0;
   }
-  if (!UsesFbbrServiceEnvelope() || srtt_mean_ms == nullptr ||
+  if (!IsFbbr() || srtt_mean_ms == nullptr ||
       window_end <= window_start || srtt_history_.empty()) {
     return false;
   }
@@ -3438,7 +3867,7 @@ bool FBBRSender::HasValidFbbrServiceHistory(
   if (app_limited_contaminated != nullptr) {
     *app_limited_contaminated = false;
   }
-  if (!UsesFbbrServiceEnvelope() ||
+  if (!IsFbbr() ||
       !fbbr_delivered_history_integrity_valid_ ||
       rtprop.IsZero() || rtprop.IsInfinite() ||
       rtprop.ToMicroseconds() <= 0 ||
@@ -3489,358 +3918,6 @@ bool FBBRSender::HasValidFbbrServiceHistory(
     *app_limited_contaminated = contaminated;
   }
   return !contaminated;
-}
-
-void FBBRSender::ResetFbbrServiceFairState() {
-  if (!IsFbbrServiceFair()) {
-    return;
-  }
-  service_fair_service_rate_ = QuicBandwidth::Zero();
-  service_fair_previous_service_rate_ = QuicBandwidth::Zero();
-  service_fair_qdelay_ewma_ = TimeDelta::Zero();
-  service_fair_previous_qdelay_ewma_ = TimeDelta::Zero();
-  service_fair_cycle_count_ = 0;
-  service_fair_qdelay_valid_ = false;
-  service_fair_previous_qdelay_valid_ = false;
-  service_fair_service_history_valid_ = false;
-  service_fair_signal_reset_time_ = current_time_;
-  service_fair_last_update_cruise_id_ = -1;
-  service_fair_action_ = FbbrServiceFairAction::kNotRun;
-  service_fair_qdelay_trend_ = TimeDelta::Zero();
-  service_fair_service_rate_change_ = 0.0;
-  service_fair_alpha_bps_ = 0.0;
-  service_fair_raw_regime_candidate_bps_ = 0.0;
-  service_fair_final_regime_candidate_bps_ = 0.0;
-  service_fair_last_valid_regime_seen_this_cruise_ = false;
-  service_fair_last_valid_regime_this_cruise_ =
-      WaveformClassification::kInconclusive;
-}
-
-void FBBRSender::UpdateFbbrServiceFairSignals(QuicTime now) {
-  if (!IsFbbrServiceFair() || mode_ != Bbr2Mode::PROBE_BW) {
-    return;
-  }
-  const TimeDelta rtprop = CurrentFbbrRtprop();
-  const TimeDelta srtt = CurrentSmoothedRtt();
-  if (!rtprop.IsZero() && !rtprop.IsInfinite() &&
-      !srtt.IsZero() && !srtt.IsInfinite()) {
-    const int64_t sample_us = std::max<int64_t>(
-        0, srtt.ToMicroseconds() - rtprop.ToMicroseconds());
-    if (!service_fair_qdelay_valid_) {
-      service_fair_qdelay_ewma_ = TimeDelta::FromMicroseconds(sample_us);
-      service_fair_qdelay_valid_ = true;
-    } else {
-      const int64_t old_us = service_fair_qdelay_ewma_.ToMicroseconds();
-      const int64_t ewma_us = static_cast<int64_t>(std::llround(
-          (7.0 * static_cast<double>(old_us) +
-           static_cast<double>(sample_us)) /
-          8.0));
-      service_fair_qdelay_ewma_ =
-          TimeDelta::FromMicroseconds(std::max<int64_t>(0, ewma_us));
-    }
-  }
-
-  service_fair_service_history_valid_ = false;
-  if (rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0 ||
-      now < QuicTime::Zero() + rtprop) {
-    return;
-  }
-  const QuicTime window_start = now - rtprop;
-  if (service_fair_signal_reset_time_ != QuicTime::Zero() &&
-      service_fair_signal_reset_time_ >= window_start) {
-    return;
-  }
-  bool app_limited_contaminated = false;
-  if (!HasValidFbbrServiceHistory(
-          now, rtprop, model_.is_app_limited(),
-          &app_limited_contaminated)) {
-    return;
-  }
-  double service_rate_bps = 0.0;
-  if (!ComputeFbbrIntervalDeliveryRateBps(
-          window_start, now, &service_rate_bps)) {
-    return;
-  }
-  service_fair_service_rate_ = BandwidthFromBps(service_rate_bps);
-  service_fair_service_history_valid_ =
-      IsFinitePositiveBandwidth(service_fair_service_rate_);
-}
-
-double FBBRSender::ComputeFbbrServiceFairAlphaBps(TimeDelta rtprop) {
-  if (rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0) {
-    return 0.0;
-  }
-  const double rtprop_s =
-      static_cast<double>(rtprop.ToMicroseconds()) / 1000000.0;
-  return 0.5 * 8.0 * static_cast<double>(kDefaultTCPMSS) /
-      rtprop_s;
-}
-
-double FBBRSender::ApplyFbbrServiceFairRegimeIIIControlLimit(
-    double raw_candidate_bps,
-    double current_baseline_bps,
-    double service_rate_bps,
-    bool service_history_valid) {
-  if (!std::isfinite(raw_candidate_bps) || raw_candidate_bps <= 0.0 ||
-      !std::isfinite(current_baseline_bps) ||
-      current_baseline_bps <= 0.0) {
-    return raw_candidate_bps;
-  }
-  const double yield_cap_bps =
-      kFbbrServiceFairBeta * current_baseline_bps;
-  double next_bps = std::min(raw_candidate_bps, yield_cap_bps);
-  if (service_history_valid &&
-      std::isfinite(service_rate_bps) && service_rate_bps > 0.0) {
-    const double service_floor_bps =
-        std::min(yield_cap_bps, 0.98 * service_rate_bps);
-    next_bps = std::max(next_bps, service_floor_bps);
-  }
-  return std::min(yield_cap_bps, next_bps);
-}
-
-void FBBRSender::ApplyFbbrServiceFairTrustedBwCorrection(
-    TrustedBwSelectionResult* selection,
-    bool regime_ii_candidate_selected) {
-  if (!IsFbbrServiceFair() || selection == nullptr ||
-      !selection->trusted_bw_valid ||
-      !IsFinitePositiveBandwidth(selection->trusted_bw) ||
-      !IsFinitePositiveBandwidth(current_injection_baseline_bw_)) {
-    return;
-  }
-
-  const double candidate_bps =
-      static_cast<double>(
-          selection->trusted_bw.ToBitsPerSecond());
-  const double final_cruise_baseline_bps =
-      static_cast<double>(
-          current_injection_baseline_bw_.ToBitsPerSecond());
-  double corrected_bps = candidate_bps;
-
-  // A legal Regime II cumulative-delivery interval is the highest-priority
-  // measurement and must not be altered by either fairness or MaxBw.
-  if (regime_ii_candidate_selected) {
-    service_fair_raw_regime_candidate_bps_ = candidate_bps;
-    service_fair_final_regime_candidate_bps_ = candidate_bps;
-    EmitFbbrServiceFairTrace(
-        current_time_, "TRUSTED_PUBLISH",
-        WaveformClassification::kFullLoad);
-    return;
-  }
-
-  if (service_fair_last_valid_regime_seen_this_cruise_ &&
-      service_fair_last_valid_regime_this_cruise_ ==
-          WaveformClassification::kUnderload) {
-    corrected_bps =
-        std::max(candidate_bps, final_cruise_baseline_bps);
-    const QuicBandwidth max_bw = model_.MaxBandwidth();
-    if (IsFinitePositiveBandwidth(max_bw)) {
-      corrected_bps = std::min(
-          corrected_bps,
-          static_cast<double>(max_bw.ToBitsPerSecond()));
-    }
-  } else if (service_fair_last_valid_regime_seen_this_cruise_ &&
-             service_fair_last_valid_regime_this_cruise_ ==
-                 WaveformClassification::kOverload) {
-    corrected_bps =
-        std::min(candidate_bps, final_cruise_baseline_bps);
-    if (service_fair_service_history_valid_ &&
-        IsFinitePositiveBandwidth(service_fair_service_rate_)) {
-      const double service_floor_bps = std::min(
-          final_cruise_baseline_bps,
-          0.98 * static_cast<double>(
-              service_fair_service_rate_.ToBitsPerSecond()));
-      corrected_bps =
-          std::max(corrected_bps, service_floor_bps);
-    }
-  } else if (service_fair_action_ ==
-                 FbbrServiceFairAction::kAdditiveIncrease ||
-             service_fair_action_ ==
-                 FbbrServiceFairAction::kMultiplicativeDecrease) {
-    // A Cruise may end before the waveform classifier has a complete
-    // decision.  Preserve a completed queue/service AIMD step on Bcruise;
-    // HOLD and invalid histories leave the normal candidate untouched.
-    corrected_bps = final_cruise_baseline_bps;
-  }
-  corrected_bps = std::max(
-      static_cast<double>(minimum_pacing_rate_bps_),
-      corrected_bps);
-
-  service_fair_raw_regime_candidate_bps_ = candidate_bps;
-  service_fair_final_regime_candidate_bps_ = corrected_bps;
-  selection->trusted_bw = BandwidthFromBps(corrected_bps);
-  selection->trusted_bw_valid =
-      IsFinitePositiveBandwidth(selection->trusted_bw);
-  EmitFbbrServiceFairTrace(
-      current_time_, "TRUSTED_PUBLISH",
-      service_fair_last_valid_regime_seen_this_cruise_
-          ? service_fair_last_valid_regime_this_cruise_
-          : WaveformClassification::kInconclusive);
-}
-
-const char* FBBRSender::FbbrServiceFairActionName(
-    FbbrServiceFairAction action) {
-  switch (action) {
-    case FbbrServiceFairAction::kAdditiveIncrease:
-      return "ADDITIVE_INCREASE";
-    case FbbrServiceFairAction::kMultiplicativeDecrease:
-      return "MULTIPLICATIVE_DECREASE";
-    case FbbrServiceFairAction::kHold:
-      return "HOLD";
-    case FbbrServiceFairAction::kSkipAppLimited:
-      return "SKIP_APP_LIMITED";
-    case FbbrServiceFairAction::kSkipInvalidHistory:
-      return "SKIP_INVALID_HISTORY";
-    default:
-      return "NOT_RUN";
-  }
-}
-
-void FBBRSender::EmitFbbrServiceFairTrace(
-    QuicTime now,
-    const char* event,
-    WaveformClassification classification) const {
-  if (!IsFbbrServiceFair() || !cruise_load_trace_cb_) {
-    return;
-  }
-  const double time_s = now == QuicTime::Zero()
-      ? 0.0
-      : static_cast<double>(
-            (now - QuicTime::Zero()).ToMicroseconds()) /
-            1000000.0;
-  const double qdelay_ewma_ms =
-      static_cast<double>(service_fair_qdelay_ewma_.ToMicroseconds()) / 1000.0;
-  const double qdelay_trend_ms =
-      static_cast<double>(service_fair_qdelay_trend_.ToMicroseconds()) / 1000.0;
-  const bool baseline_valid =
-      IsFinitePositiveBandwidth(current_injection_baseline_bw_);
-  std::ostringstream row;
-  row << time_s << ","
-      << trace_flow_id_ << ","
-      << cruise_id_ << ","
-      << (event == nullptr ? "UNKNOWN" : event) << ","
-      << WaveformClassificationName(classification) << ","
-      << (baseline_valid
-              ? current_injection_baseline_bw_.ToBitsPerSecond() : 0) << ","
-      << (baseline_valid ? "true" : "false") << ","
-      << service_fair_cycle_count_ << ","
-      << FbbrServiceFairActionName(service_fair_action_) << ","
-      << qdelay_ewma_ms << ","
-      << qdelay_trend_ms << ","
-      << (IsFinitePositiveBandwidth(service_fair_service_rate_)
-              ? service_fair_service_rate_.ToBitsPerSecond() : 0) << ","
-      << service_fair_service_rate_change_ << ","
-      << service_fair_alpha_bps_ << ","
-      << kFbbrServiceFairBeta << ","
-      << service_fair_raw_regime_candidate_bps_ << ","
-      << service_fair_final_regime_candidate_bps_;
-  cruise_load_trace_cb_(time_s, time_s, 0.0, 0.0, 0.0, 0.0,
-                        "SERVICE_FAIRNESS", false, row.str());
-}
-
-void FBBRSender::RunFbbrServiceFairCycleUpdate(QuicTime now) {
-  if (!IsFbbrServiceFair() || mode_ != Bbr2Mode::PROBE_BW ||
-      service_fair_last_update_cruise_id_ == cruise_id_) {
-    return;
-  }
-  service_fair_last_update_cruise_id_ = cruise_id_;
-  service_fair_qdelay_trend_ = TimeDelta::Zero();
-  service_fair_service_rate_change_ = 0.0;
-  if (!IsFinitePositiveBandwidth(current_injection_baseline_bw_)) {
-    service_fair_action_ = FbbrServiceFairAction::kSkipInvalidHistory;
-    EmitFbbrServiceFairTrace(
-        now, "CYCLE_UPDATE",
-        WaveformClassification::kInconclusive);
-    return;
-  }
-
-  service_fair_raw_regime_candidate_bps_ =
-      static_cast<double>(
-          current_injection_baseline_bw_.ToBitsPerSecond());
-  service_fair_final_regime_candidate_bps_ =
-      service_fair_raw_regime_candidate_bps_;
-
-  const TimeDelta rtprop = CurrentFbbrRtprop();
-  service_fair_alpha_bps_ = ComputeFbbrServiceFairAlphaBps(rtprop);
-  if (model_.is_app_limited() && !service_fair_service_history_valid_) {
-    service_fair_action_ = FbbrServiceFairAction::kSkipAppLimited;
-    EmitFbbrServiceFairTrace(
-        now, "CYCLE_UPDATE",
-        WaveformClassification::kInconclusive);
-    return;
-  }
-  if (rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0 ||
-      !service_fair_qdelay_valid_ || !service_fair_service_history_valid_ ||
-      !IsFinitePositiveBandwidth(service_fair_service_rate_) ||
-      service_fair_alpha_bps_ <= 0.0) {
-    service_fair_action_ = FbbrServiceFairAction::kSkipInvalidHistory;
-    EmitFbbrServiceFairTrace(
-        now, "CYCLE_UPDATE",
-        WaveformClassification::kInconclusive);
-    return;
-  }
-
-  if (service_fair_previous_qdelay_valid_) {
-    service_fair_qdelay_trend_ = TimeDelta::FromMicroseconds(
-        service_fair_qdelay_ewma_.ToMicroseconds() -
-        service_fair_previous_qdelay_ewma_.ToMicroseconds());
-  }
-  if (IsFinitePositiveBandwidth(service_fair_previous_service_rate_)) {
-    service_fair_service_rate_change_ =
-        static_cast<double>(service_fair_service_rate_.ToBitsPerSecond()) /
-            static_cast<double>(
-                service_fair_previous_service_rate_.ToBitsPerSecond()) -
-        1.0;
-  }
-
-  const int64_t rtprop_us = rtprop.ToMicroseconds();
-  const int64_t q_low_us = std::max<int64_t>(
-      1000, static_cast<int64_t>(std::llround(0.03 * rtprop_us)));
-  const int64_t q_high_us = std::max<int64_t>(
-      2000, static_cast<int64_t>(std::llround(0.10 * rtprop_us)));
-  const int64_t trend_threshold_us = q_low_us;
-  const double current_baseline_bps =
-      static_cast<double>(
-          current_injection_baseline_bw_.ToBitsPerSecond());
-  double next_baseline_bps = current_baseline_bps;
-  if (service_fair_qdelay_ewma_.ToMicroseconds() > q_high_us ||
-      (service_fair_previous_qdelay_valid_ &&
-       service_fair_qdelay_trend_.ToMicroseconds() > trend_threshold_us)) {
-    next_baseline_bps = std::min(
-        current_baseline_bps,
-        std::max(static_cast<double>(kFbbrServiceFairMinimumBps),
-                 kFbbrServiceFairBeta * current_baseline_bps));
-    service_fair_action_ =
-        FbbrServiceFairAction::kMultiplicativeDecrease;
-  } else if (service_fair_qdelay_ewma_.ToMicroseconds() < q_low_us) {
-    next_baseline_bps += service_fair_alpha_bps_;
-    const QuicBandwidth max_bw = model_.MaxBandwidth();
-    if (IsFinitePositiveBandwidth(max_bw)) {
-      next_baseline_bps = std::min(
-          next_baseline_bps,
-          std::max(current_baseline_bps,
-                   static_cast<double>(
-                       max_bw.ToBitsPerSecond())));
-    }
-    service_fair_action_ = FbbrServiceFairAction::kAdditiveIncrease;
-  } else {
-    service_fair_action_ = FbbrServiceFairAction::kHold;
-  }
-
-  current_injection_baseline_bw_ =
-      BandwidthFromBps(next_baseline_bps);
-  service_fair_final_regime_candidate_bps_ =
-      static_cast<double>(
-          current_injection_baseline_bw_.ToBitsPerSecond());
-  service_fair_previous_qdelay_ewma_ = service_fair_qdelay_ewma_;
-  service_fair_previous_qdelay_valid_ = true;
-  service_fair_previous_service_rate_ = service_fair_service_rate_;
-  ++service_fair_cycle_count_;
-  EmitFbbrServiceFairTrace(
-      now, "CYCLE_UPDATE",
-      WaveformClassification::kInconclusive);
 }
 
 QuicByteCount FBBRSender::ComputeFbbrServiceInflightBytes(
@@ -3924,13 +4001,13 @@ FBBRSender::BuildFbbrEnvelopeSnapshot(
   FbbrEnvelopeSnapshot snapshot;
   snapshot.native_cwnd = native_cwnd;
   snapshot.actual_inflight = actual_inflight;
-  snapshot.previous_trusted_bw_valid =
-      HasUsableFbbrPreviousTrustedBw();
-  snapshot.previous_trusted_bw_from_guard =
-      snapshot.previous_trusted_bw_valid &&
-      std::string(trusted_bw_source_ == nullptr
-                      ? kTrustedBwSourceNone : trusted_bw_source_) ==
-          kTrustedBwSourceGuardFilter;
+  snapshot.previous_beq_valid =
+      HasUsableFbbrPreviousBeq();
+  snapshot.previous_beq_from_guard =
+      snapshot.previous_beq_valid &&
+      std::string(beq_source_ == nullptr
+                      ? kBeqSourceNone : beq_source_) ==
+          kBeqSourceGuardFilter;
   snapshot.pacing_target = fbbr_last_target_rate_;
   snapshot.pacing_base_target = fbbr_last_base_target_rate_;
   const TimeDelta rtprop = CurrentFbbrRtprop();
@@ -3985,7 +4062,7 @@ FBBRSender::BuildFbbrEnvelopeSnapshot(
               snapshot.target_history_valid
           ? actual_inflight - snapshot.inflight_cap : 0;
   snapshot.projection_active =
-      UsesFbbrServiceEnvelope() && !rtprop.IsZero() &&
+      IsFbbr() && !rtprop.IsZero() &&
       snapshot.target_history_valid && drain_completed_ &&
       mode_ == Bbr2Mode::PROBE_BW;
   snapshot.service_limited =
@@ -4001,7 +4078,7 @@ FBBRSender::BuildFbbrEnvelopeSnapshot(
 
 QuicByteCount FBBRSender::ApplyFbbrInflightEnvelope(
     QuicByteCount native_cwnd_target) const {
-  if (!UsesFbbrServiceEnvelope()) {
+  if (!IsFbbr()) {
     return native_cwnd_target;
   }
   const FbbrEnvelopeSnapshot snapshot =
@@ -4018,7 +4095,7 @@ QuicByteCount FBBRSender::ApplyFbbrInflightEnvelope(
 void FBBRSender::UpdateFbbrTelemetry(
     QuicTime now,
     QuicByteCount actual_inflight) {
-  if (!UsesFbbrServiceEnvelope()) {
+  if (!IsFbbr()) {
     return;
   }
   if (fbbr_telemetry_initialized_ &&
@@ -4026,16 +4103,16 @@ void FBBRSender::UpdateFbbrTelemetry(
     const uint64_t delta_us = static_cast<uint64_t>(
         (now - fbbr_telemetry_last_time_).ToMicroseconds());
     fbbr_telemetry_total_us_ += delta_us;
-    switch (fbbr_telemetry_previous_trusted_source_) {
-      case FbbrPreviousTrustedSource::kTrusted:
-        fbbr_previous_trusted_us_ += delta_us;
+    switch (fbbr_telemetry_previous_beq_source_) {
+      case FbbrPreviousBeqSource::kBeq:
+        fbbr_previous_beq_us_ += delta_us;
         break;
-      case FbbrPreviousTrustedSource::kGuard:
-        fbbr_previous_trusted_guard_source_us_ += delta_us;
+      case FbbrPreviousBeqSource::kGuard:
+        fbbr_previous_beq_guard_source_us_ += delta_us;
         break;
-      case FbbrPreviousTrustedSource::kInvalid:
+      case FbbrPreviousBeqSource::kInvalid:
       default:
-        fbbr_previous_trusted_invalid_us_ += delta_us;
+        fbbr_previous_beq_invalid_us_ += delta_us;
         break;
     }
     if (fbbr_telemetry_projection_active_) {
@@ -4080,12 +4157,12 @@ void FBBRSender::UpdateFbbrTelemetry(
       BuildFbbrEnvelopeSnapshot(cwnd_, actual_inflight);
   fbbr_telemetry_last_time_ = now;
   fbbr_telemetry_initialized_ = true;
-  fbbr_telemetry_previous_trusted_source_ =
-      !snapshot.previous_trusted_bw_valid
-          ? FbbrPreviousTrustedSource::kInvalid
-          : snapshot.previous_trusted_bw_from_guard
-              ? FbbrPreviousTrustedSource::kGuard
-              : FbbrPreviousTrustedSource::kTrusted;
+  fbbr_telemetry_previous_beq_source_ =
+      !snapshot.previous_beq_valid
+          ? FbbrPreviousBeqSource::kInvalid
+          : snapshot.previous_beq_from_guard
+              ? FbbrPreviousBeqSource::kGuard
+              : FbbrPreviousBeqSource::kBeq;
   fbbr_telemetry_projection_active_ = snapshot.projection_active;
   fbbr_telemetry_service_history_valid_ =
       snapshot.service_history_valid;
@@ -4122,7 +4199,7 @@ void FBBRSender::UpdateFbbrTelemetry(
 }
 
 void FBBRSender::EmitFbbrFlowSummary() const {
-  if (!UsesFbbrServiceEnvelope() || !cruise_load_trace_cb_) {
+  if (!IsFbbr() || !cruise_load_trace_cb_) {
     return;
   }
   auto ratio = [this](uint64_t value) {
@@ -4147,12 +4224,12 @@ void FBBRSender::EmitFbbrFlowSummary() const {
     return duration_us > 0.0L ? byte_us / duration_us : 0.0L;
   };
   std::ostringstream row;
-  row << (IsFbbrServiceFair() ? "FBBR-ServiceFair" : "FBBR")
+  row << "FBBR"
       << ","
       << trace_flow_id_ << ","
-      << ratio(fbbr_previous_trusted_us_) << ","
-      << ratio(fbbr_previous_trusted_guard_source_us_) << ","
-      << ratio(fbbr_previous_trusted_invalid_us_) << ","
+      << ratio(fbbr_previous_beq_us_) << ","
+      << ratio(fbbr_previous_beq_guard_source_us_) << ","
+      << ratio(fbbr_previous_beq_invalid_us_) << ","
       << ratio(fbbr_projection_active_us_) << ","
       << ratio(fbbr_service_history_valid_us_) << ","
       << ratio(fbbr_app_limited_fallback_us_) << ","
@@ -4372,8 +4449,8 @@ FBBRSender::ComputeFbbrInjectionBaseline(
       }
       result.update_baseline = true;
       result.next_baseline_bps = regime_ii_delivery_rate_bps;
-      result.update_trusted_bw = true;
-      result.trusted_bw_bps = regime_ii_delivery_rate_bps;
+      result.update_beq = true;
+      result.beq_bps = regime_ii_delivery_rate_bps;
     }
     result.valid = true;
     return result;
@@ -7562,7 +7639,7 @@ void FBBRSender::ResetWaveformCruiseState(QuicTime now) {
   waveform_window_periods_ = 0.0;
   waveform_window_extended_ = false;
   underload_located_ = false;
-  trusted_baseline_locked_ = false;
+  beq_baseline_locked_ = false;
   has_last_similar_drate_amplitude_ = false;
   last_similar_drate_amplitude_bps_ = 0.0;
   waveform_delta_reference_valid_ = false;
@@ -7578,9 +7655,9 @@ void FBBRSender::ResetWaveformCruiseState(QuicTime now) {
   waveform_last_clip_direction_ = 0;
   waveform_decision_count_ = 0;
   waveform_amplitude_reduction_count_ = 0;
-  trusted_bw_candidate_update_count_ = 0;
-  trusted_bw_candidate_ = QuicBandwidth::Zero();
-  trusted_bw_candidate_source_ = kTrustedBwSourceNone;
+  beq_candidate_update_count_ = 0;
+  beq_candidate_ = QuicBandwidth::Zero();
+  beq_candidate_source_ = kBeqSourceNone;
   waveform_last_action_ = "none";
   waveform_last_invalid_reason_ = "none";
   RefreshProbeAmplitudeProtection();
@@ -7800,7 +7877,7 @@ FBBRSender::AnalyzeFbbrWindow(QuicTime window_start,
       srtt.values, srtt.valid, &result.srtt_min_ms,
       &result.srtt_max_ms, &result.srtt_mean_ms,
       &result.srtt_stat_sample_count) && result.srtt_input_valid;
-  if (UsesFbbrServiceEnvelope() && result.srtt_stats_valid) {
+  if (IsFbbr() && result.srtt_stats_valid) {
     double time_weighted_srtt_mean_ms = 0.0;
     result.srtt_stats_valid = ComputeFbbrTimeWeightedSrttMeanMs(
         window_start, window_end, &time_weighted_srtt_mean_ms);
@@ -7808,12 +7885,12 @@ FBBRSender::AnalyzeFbbrWindow(QuicTime window_start,
         ? time_weighted_srtt_mean_ms : 0.0;
   }
 
-  const bool use_goertzel_component_match = UsesFbbrServiceEnvelope();
+  const bool use_goertzel_component_match = IsFbbr();
   GoertzelComponentResult sender_goertzel;
   GoertzelComponentResult drate_goertzel;
   double srate_period_s = 0.0;
   if (use_goertzel_component_match) {
-    // The injected frequency is known.  FBBR and ServiceFair therefore use
+    // The injected frequency is known. FBBR therefore uses
     // the direct generalized Goertzel response at that frequency, rather
     // than estimating a period from an autocorrelation peak.
     sender_goertzel = AnalyzeGoertzelComponent(
@@ -8238,7 +8315,7 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
                                       QuicTime window_end,
                                       double window_periods,
                                       bool extended_window) const {
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     return AnalyzeFbbrWindow(window_start, window_end,
                                    window_periods, extended_window);
   }
@@ -8318,10 +8395,10 @@ FBBRSender::AnalyzeWaveformWindow(QuicTime window_start,
   result.delivery_rate_min_bps = delivery_stats.min_bps;
   result.delivery_rate_max_bps = delivery_stats.max_bps;
   result.delivery_rate_mean_bps = delivery_stats.mean_bps;
-  result.latest_trusted_bw_bps = static_cast<double>(
-      fbbr_latest_trusted_bw_.ToBitsPerSecond());
-  result.smoothed_trusted_bw_bps = static_cast<double>(
-      fbbr_smoothed_trusted_bw_.ToBitsPerSecond());
+  result.latest_beq_bps = static_cast<double>(
+      fbbr_latest_beq_.ToBitsPerSecond());
+  result.smoothed_beq_bps = static_cast<double>(
+      fbbr_smoothed_beq_.ToBitsPerSecond());
   size_t app_limited_samples = 0;
   uint64_t acked_bytes = 0;
   for (const auto& sample : drate_samples) {
@@ -8824,10 +8901,10 @@ void FBBRSender::RefreshRtpropFromTrueBottomClip(
               1000000.0;
   };
   const TimeDelta rtprop_before =
-      UsesFbbrServiceEnvelope() && fbbr_rtprop_valid_
+      IsFbbr() && fbbr_rtprop_valid_
           ? fbbr_rtprop_ : model_.MinRtt();
   const QuicTime timestamp_before =
-      UsesFbbrServiceEnvelope() && fbbr_rtprop_valid_
+      IsFbbr() && fbbr_rtprop_valid_
           ? fbbr_rtprop_source_time_
           : model_.MinRttTimestamp();
   analysis->true_bottom_clip_rtprop_before_ms = rtprop_before.IsZero()
@@ -8846,7 +8923,7 @@ void FBBRSender::RefreshRtpropFromTrueBottomClip(
              std::llround(analysis->srtt_min_ms * 1000.0)));
   const TimeDelta bottom_min_rtt =
       TimeDelta::FromMicroseconds(minimum_rtt_us);
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     PublishFbbrRtprop(bottom_min_rtt, now, false);
   } else {
     model_.ForceUpdateMinRtt(bottom_min_rtt, now);
@@ -8996,7 +9073,6 @@ void FBBRSender::ApplyFbbrRegimeStateUpdates(
 void FBBRSender::ApplyFbbrClassification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
-  const bool is_service_fair = IsFbbrServiceFair();
   WaveformWindowAnalysis trace_analysis = analysis;
   const double baseline_before_bps = static_cast<double>(
       current_injection_baseline_bw_.ToBitsPerSecond());
@@ -9014,18 +9090,11 @@ void FBBRSender::ApplyFbbrClassification(
   trace_analysis.fbbr_regime_i_maxbw_midpoint_bps = 0.0;
   trace_analysis.fbbr_regime_i_maxbw_midpoint_triggered = false;
   trace_analysis.fbbr_regime_i_growth_triggered = false;
-  if (is_service_fair) {
-    service_fair_raw_regime_candidate_bps_ = baseline_before_bps;
-    service_fair_final_regime_candidate_bps_ = baseline_before_bps;
-  }
-
   if (analysis.classification == WaveformClassification::kInconclusive) {
     waveform_last_action_ = "FBBR_INCONCLUSIVE_BASELINE_HOLD";
     waveform_last_invalid_reason_ = analysis.invalid_reason;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
-    EmitFbbrServiceFairTrace(
-        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
@@ -9036,8 +9105,6 @@ void FBBRSender::ApplyFbbrClassification(
     trace_analysis.invalid_reason = waveform_last_invalid_reason_;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
-    EmitFbbrServiceFairTrace(
-        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
@@ -9063,8 +9130,6 @@ void FBBRSender::ApplyFbbrClassification(
       trace_analysis.invalid_reason = waveform_last_invalid_reason_;
       EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                               baseline_before_bps, amplitude_before_bps);
-      EmitFbbrServiceFairTrace(
-          now, "REGIME_EXECUTOR", analysis.classification);
       ScheduleWaveformCollectionAfterSettle(now, false);
       return;
     }
@@ -9089,8 +9154,6 @@ void FBBRSender::ApplyFbbrClassification(
     trace_analysis.invalid_reason = waveform_last_invalid_reason_;
     EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                             baseline_before_bps, amplitude_before_bps);
-    EmitFbbrServiceFairTrace(
-        now, "REGIME_EXECUTOR", analysis.classification);
     ScheduleWaveformCollectionAfterSettle(now, false);
     return;
   }
@@ -9098,25 +9161,7 @@ void FBBRSender::ApplyFbbrClassification(
   ApplyFbbrRegimeStateUpdates(&trace_analysis, now);
   const double raw_candidate_bps = actuator.update_baseline
       ? actuator.next_baseline_bps : baseline_before_bps;
-  double final_candidate_bps = raw_candidate_bps;
-  if (is_service_fair) {
-    service_fair_last_valid_regime_seen_this_cruise_ = true;
-    service_fair_last_valid_regime_this_cruise_ =
-        analysis.classification;
-    service_fair_raw_regime_candidate_bps_ = raw_candidate_bps;
-    if (analysis.classification == WaveformClassification::kOverload) {
-      final_candidate_bps = ApplyFbbrServiceFairRegimeIIIControlLimit(
-          raw_candidate_bps, baseline_before_bps,
-          IsFinitePositiveBandwidth(service_fair_service_rate_)
-              ? static_cast<double>(
-                    service_fair_service_rate_.ToBitsPerSecond())
-              : 0.0,
-          service_fair_service_history_valid_);
-    }
-    service_fair_final_regime_candidate_bps_ = final_candidate_bps;
-    current_injection_baseline_bw_ =
-        BandwidthFromBps(final_candidate_bps);
-  } else if (actuator.update_baseline) {
+  if (actuator.update_baseline) {
     current_injection_baseline_bw_ =
         BandwidthFromBps(actuator.next_baseline_bps);
   }
@@ -9124,27 +9169,25 @@ void FBBRSender::ApplyFbbrClassification(
       analysis.classification == WaveformClassification::kOverload) {
     fbbr_regime_i_or_iii_seen_this_cruise_ = true;
   }
-  if (actuator.update_trusted_bw) {
+  if (actuator.update_beq) {
     fbbr_regime_ii_seen_this_cruise_ = true;
-    fbbr_cruise_trusted_bw_ = BandwidthFromBps(actuator.trusted_bw_bps);
-    fbbr_latest_trusted_bw_ = fbbr_cruise_trusted_bw_;
-    fbbr_smoothed_trusted_bw_ = fbbr_cruise_trusted_bw_;
-    fbbr_smoothed_trusted_bw_valid_ = !fbbr_cruise_trusted_bw_.IsZero();
-    trusted_bw_candidate_ = fbbr_cruise_trusted_bw_;
-    trusted_bw_candidate_source_ =
-        kTrustedBwSourceFbbrWindowDeliveredRate;
-    trusted_baseline_locked_ = !trusted_bw_candidate_.IsZero();
-    if (trusted_baseline_locked_) {
-      ++trusted_bw_candidate_update_count_;
+    fbbr_cruise_beq_ = BandwidthFromBps(actuator.beq_bps);
+    fbbr_latest_beq_ = fbbr_cruise_beq_;
+    fbbr_smoothed_beq_ = fbbr_cruise_beq_;
+    fbbr_smoothed_beq_valid_ = !fbbr_cruise_beq_.IsZero();
+    beq_candidate_ = fbbr_cruise_beq_;
+    beq_candidate_source_ =
+        kBeqSourceFbbrWindowDeliveredRate;
+    beq_baseline_locked_ = !beq_candidate_.IsZero();
+    if (beq_baseline_locked_) {
+      ++beq_candidate_update_count_;
     }
-    trace_analysis.latest_trusted_bw_bps = actuator.trusted_bw_bps;
-    trace_analysis.smoothed_trusted_bw_bps = actuator.trusted_bw_bps;
+    trace_analysis.latest_beq_bps = actuator.beq_bps;
+    trace_analysis.smoothed_beq_bps = actuator.beq_bps;
   }
   const double raw_baseline_delta = actuator.update_baseline
       ? std::abs(raw_candidate_bps - baseline_before_bps) : 0.0;
-  const double applied_baseline_delta = is_service_fair
-      ? std::abs(final_candidate_bps - baseline_before_bps)
-      : raw_baseline_delta;
+  const double applied_baseline_delta = raw_baseline_delta;
   if (applied_baseline_delta > 0.5 &&
       baseline_adjustment_count_ < std::numeric_limits<uint32_t>::max()) {
     ++baseline_adjustment_count_;
@@ -9172,7 +9215,7 @@ void FBBRSender::ApplyFbbrClassification(
         : actuator.regime_i_maxbw_midpoint_triggered
             ? kWaveformDeltaSourceFbbrRegimeIMaxBwMidpoint
             : kWaveformDeltaSourceFbbrRegimeIGrowth;
-  } else if (actuator.update_trusted_bw && actuator.update_baseline) {
+  } else if (actuator.update_beq && actuator.update_baseline) {
     trace_analysis.delta_source =
         kWaveformDeltaSourceFbbrRegimeIIDeliveryRateBaseline;
   }
@@ -9184,8 +9227,8 @@ void FBBRSender::ApplyFbbrClassification(
   waveform_last_invalid_reason_ = "none";
 
   if (analysis.classification == WaveformClassification::kFullLoad) {
-    waveform_last_action_ = actuator.update_trusted_bw
-        ? "FBBR_REGIME_II_UPDATE_CRUISE_TRUSTED_BW_AND_BASELINE"
+    waveform_last_action_ = actuator.update_beq
+        ? "FBBR_REGIME_II_UPDATE_CRUISE_BEQ_AND_BASELINE"
         : "FBBR_REGIME_II_CURRENT_BASELINE_HOLD";
   } else if (analysis.classification ==
              WaveformClassification::kUnderload) {
@@ -9204,8 +9247,6 @@ void FBBRSender::ApplyFbbrClassification(
   }
   EmitWaveformSearchTrace(trace_analysis, waveform_last_action_,
                           baseline_before_bps, amplitude_before_bps);
-  EmitFbbrServiceFairTrace(
-      now, "REGIME_EXECUTOR", analysis.classification);
   ScheduleWaveformCollectionAfterSettle(now, false);
 }
 
@@ -9213,7 +9254,7 @@ void FBBRSender::ApplyFbbrClassification(
 void FBBRSender::ApplyWaveformClassification(
     const WaveformWindowAnalysis& analysis,
     QuicTime now) {
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     ApplyFbbrClassification(analysis, now);
     return;
   }
@@ -9256,9 +9297,9 @@ void FBBRSender::ApplyWaveformClassification(
     }
     waveform_cruise_state_ = WaveformCruiseState::kDisabled;
     waveform_last_invalid_reason_ = "max_baseline_adjustments_reached";
-    waveform_last_action_ = trusted_baseline_locked_
-        ? "STOP_SEARCH_KEEP_LATEST_TRUSTED_BW"
-        : "STOP_SEARCH_WITHOUT_TRUSTED_BW";
+    waveform_last_action_ = beq_baseline_locked_
+        ? "STOP_SEARCH_KEEP_LATEST_BEQ"
+        : "STOP_SEARCH_WITHOUT_BEQ";
     waveform_last_delta_source_ = kWaveformDeltaSourceNone;
     waveform_last_raw_delta_bw_bps_ = 0.0;
     waveform_last_applied_delta_bw_bps_ = 0.0;
@@ -9289,17 +9330,17 @@ void FBBRSender::ApplyWaveformClassification(
     }
 
     if (analysis.classification == WaveformClassification::kFullLoad) {
-      trusted_baseline_locked_ = true;
-      trusted_bw_candidate_ = current_injection_baseline_bw_;
-      trusted_bw_candidate_source_ = kTrustedBwSourceTimeWaveformBaseline;
-      ++trusted_bw_candidate_update_count_;
+      beq_baseline_locked_ = true;
+      beq_candidate_ = current_injection_baseline_bw_;
+      beq_candidate_source_ = kBeqSourceTimeWaveformBaseline;
+      ++beq_candidate_update_count_;
       trace_analysis.delta_source = kWaveformDeltaSourceNone;
       trace_analysis.raw_delta_bw_bps = 0.0;
       trace_analysis.applied_delta_bw_bps = 0.0;
       waveform_last_delta_source_ = kWaveformDeltaSourceNone;
       waveform_last_raw_delta_bw_bps_ = 0.0;
       waveform_last_applied_delta_bw_bps_ = 0.0;
-      waveform_last_action_ = "UPDATE_TRUSTED_BW_FROM_FULL_LOAD";
+      waveform_last_action_ = "UPDATE_BEQ_FROM_FULL_LOAD";
       ScheduleWaveformCollectionAfterSettle(now, false);
       EmitWaveformSearchTrace(trace_analysis,
                               waveform_last_action_,
@@ -9423,8 +9464,19 @@ bool FBBRSender::AmplifyWaveformProbeAfterInconclusive(
 }
 
 void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
-  if (!in_cruise_ || waveform_cruise_state_ ==
+  if (!in_cruise_ || maxbw_flat_trial_active_ || waveform_cruise_state_ ==
                          WaveformCruiseState::kDisabled) {
+    return;
+  }
+  if (maxbw_flat_waveform_epoch_pending_ &&
+      probe_epoch_start_time_ != QuicTime::Zero() &&
+      now >= probe_epoch_start_time_) {
+    maxbw_flat_waveform_epoch_pending_ = false;
+  }
+  if (cruise_exit_pending_) {
+    // A normal native Cruise exit has been deferred.  Do not analyze or
+    // schedule another window while the current 0 -> -1 -> 0 -> +1 -> 0
+    // cycle drains to its endpoint.
     return;
   }
   for (int transition = 0; transition < 4; ++transition) {
@@ -9450,7 +9502,7 @@ void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
     if (waveform_cruise_state_ == WaveformCruiseState::kAnalyzeCycle) {
       WaveformWindowAnalysis analysis;
       const bool use_rolling_retry =
-          UsesFbbrServiceEnvelope();
+          IsFbbr();
       if (use_rolling_retry && waveform_window_extended_ &&
           waveform_window_periods_ >= 3.0 &&
           cruise_modulation_freq_hz_ > 0.0) {
@@ -9478,7 +9530,7 @@ void FBBRSender::RunWaveformCruiseStateMachine(QuicTime now) {
             waveform_window_start_, waveform_window_end_,
             waveform_window_periods_, waveform_window_extended_);
       }
-      if (UsesFbbrServiceEnvelope()) {
+      if (IsFbbr()) {
         UpdateFbbrRetryState(&analysis);
       } else {
         UpdateMaxBwAttenuationFromWaveform(analysis);
@@ -9734,13 +9786,13 @@ void FBBRSender::EmitWaveformSearchTrace(
       << max_bw_actual_fluctuation_amplitude_bps_ << ","
       << max_bw_delivery_response_gain_ << ","
       << (max_bw_response_observed_ ? "true" : "false") << ","
-      << (trusted_baseline_locked_ ? "true" : "false") << ","
-      << trusted_bw_candidate_update_count_ << ","
+      << (beq_baseline_locked_ ? "true" : "false") << ","
+      << beq_candidate_update_count_ << ","
       << "true" << ","
-      << (trusted_bw_candidate_.IsZero()
+      << (beq_candidate_.IsZero()
               ? 0
-              : trusted_bw_candidate_.ToBitsPerSecond()) << ","
-      << trusted_bw_candidate_source_ << ","
+              : beq_candidate_.ToBitsPerSecond()) << ","
+      << beq_candidate_source_ << ","
       << (analysis.invalid_reason.empty()
               ? "none"
               : analysis.invalid_reason) << ","
@@ -9750,8 +9802,8 @@ void FBBRSender::EmitWaveformSearchTrace(
       << analysis.delivery_rate_min_bps << ","
       << analysis.delivery_rate_max_bps << ","
       << analysis.delivery_rate_mean_bps << ","
-      << analysis.latest_trusted_bw_bps << ","
-      << analysis.smoothed_trusted_bw_bps << ","
+      << analysis.latest_beq_bps << ","
+      << analysis.smoothed_beq_bps << ","
       << (analysis.plateau.drate_positive_half_clipped ? "true" : "false")
       << ","
       << (analysis.plateau.drate_negative_half_clipped ? "true" : "false")
@@ -9789,7 +9841,7 @@ void FBBRSender::EmitWaveformSearchTrace(
       << analysis.boundary_delta_bps << ","
       << waveform_amplitude_reduction_count_ << ","
       << floor_clip_confirmation_count_ << ","
-      << (IsFbbrServiceFair() ? "FBBR-ServiceFair" : "FBBR") << ","
+      << "FBBR" << ","
       << (analysis.fbbr_pipeline ? "fbbr_v2" : "legacy")
       << ","
       << (analysis.fbbr_pipeline ? "fbbr_v2" : "legacy")
@@ -9926,11 +9978,11 @@ void FBBRSender::EmitWaveformSearchTrace(
       << static_cast<double>(waveform_initial_probe_amplitude_bps_) *
              waveform_inconclusive_signal_amplification_max_ratio_ << ","
       << fbbr_rolling_retry_count_ << ","
-      << (fbbr.previous_trusted_bw_valid
-              ? trusted_bw_.ToBitsPerSecond() : 0) << ","
-      << (!fbbr.previous_trusted_bw_valid
+      << (fbbr.previous_beq_valid
+              ? beq_.ToBitsPerSecond() : 0) << ","
+      << (!fbbr.previous_beq_valid
               ? "invalid"
-              : fbbr.previous_trusted_bw_from_guard ? "guard" : "trusted")
+              : fbbr.previous_beq_from_guard ? "guard" : "beq")
       << ","
       << fbbr.plan_inflight << ","
       << fbbr.service_inflight << ","
@@ -9957,35 +10009,35 @@ void FBBRSender::EmitWaveformSearchTrace(
                         analysis.classification ==
                             WaveformClassification::kInconclusive,
                         row.str());
-  if (UsesFbbrServiceEnvelope()) {
+  if (IsFbbr()) {
     fbbr_window_ack_events_ = 0;
     fbbr_window_cap_binding_events_ = 0;
   }
 }
 
-void FBBRSender::PublishWaveformTrustedBw() {
+void FBBRSender::PublishWaveformBeq() {
   const double candidate_bps = static_cast<double>(
-      trusted_bw_candidate_.ToBitsPerSecond());
-  if (!trusted_baseline_locked_ || trusted_bw_candidate_.IsZero() ||
+      beq_candidate_.ToBitsPerSecond());
+  if (!beq_baseline_locked_ || beq_candidate_.IsZero() ||
       !std::isfinite(candidate_bps) || candidate_bps <= 0.0) {
-    ClearTrustedBw(waveform_last_invalid_reason_.empty() ||
+    ClearBeq(waveform_last_invalid_reason_.empty() ||
                            waveform_last_invalid_reason_ == "none"
                        ? "waveform_not_locked"
                        : waveform_last_invalid_reason_.c_str());
     return;
   }
-  TrustedBwSelectionResult selection = {
+  BeqSelectionResult selection = {
       BandwidthEstimate(),
-      trusted_bw_candidate_,
+      beq_candidate_,
       true,
       1.0,
-      trusted_bw_candidate_source_};
-  PublishTrustedBwSelection(selection);
+      beq_candidate_source_};
+  PublishBeqSelection(selection);
 }
 
 void FBBRSender::FinalizeCruise(QuicTime now) {
   RunWaveformCruiseStateMachine(now);
-  PublishFbbrCruiseTrustedBw();
+  PublishFbbrCruiseBeq();
   EmitCruiseSummaryTrace(now);
 }
 
@@ -10023,38 +10075,38 @@ void FBBRSender::EmitCruiseSummaryTrace(QuicTime now) const {
       << ","
 	      << cruise_end_native_bw_kbps << ","
 	      << fair_share_bandwidth_kbps << ","
-	      << (trusted_bw_valid_ ? trusted_bw_.ToBitsPerSecond() : 0) << ","
-	      << trusted_bw_source_ << ","
+	      << (beq_valid_ ? beq_.ToBitsPerSecond() : 0) << ","
+	      << beq_source_ << ","
 	      << "0,0,0,0,0,false,false,false,NOT_APPLICABLE,NOT_APPLICABLE,"
 	      << summary_selection_native_bw.ToBitsPerSecond() << ","
-	      << (trusted_bw_valid_ ? "true" : "false") << ","
-	      << trusted_bw_cruise_id_ << ","
-	      << (trusted_bw_fresh_ ? "true" : "false") << ","
-	      << (trusted_bw_application_valid_ ? "true" : "false") << ","
+	      << (beq_valid_ ? "true" : "false") << ","
+	      << beq_cruise_id_ << ","
+	      << (beq_fresh_ ? "true" : "false") << ","
+	      << (beq_application_valid_ ? "true" : "false") << ","
 	      << "time_waveform" << ","
 	      << WaveformStateName(waveform_cruise_state_) << ","
 	      << waveform_decision_count_ << ","
 	      << baseline_adjustment_count_ << ","
 	      << waveform_amplitude_reduction_count_ << ","
 		      << (underload_located_ ? "true" : "false") << ","
-		      << (trusted_bw_candidate_source_ == nullptr
-		              ? kTrustedBwSourceNone
-		              : trusted_bw_candidate_source_) << ","
-		      << (UsesFbbrServiceEnvelope() &&
+		      << (beq_candidate_source_ == nullptr
+		              ? kBeqSourceNone
+		              : beq_candidate_source_) << ","
+		      << (IsFbbr() &&
 		              IsFinitePositiveBandwidth(summary_fbbr_max_bw)
 		              ? "true" : "false") << ","
-		      << (UsesFbbrServiceEnvelope() &&
+		      << (IsFbbr() &&
 		              IsFinitePositiveBandwidth(summary_fbbr_max_bw)
 		              ? summary_fbbr_max_bw.ToBitsPerSecond() : 0) << ","
-		      << (UsesFbbrServiceEnvelope() && fbbr_rtprop_valid_
+		      << (IsFbbr() && fbbr_rtprop_valid_
 		              ? "true" : "false") << ","
-		      << (UsesFbbrServiceEnvelope() && fbbr_rtprop_valid_
+		      << (IsFbbr() && fbbr_rtprop_valid_
 		              ? static_cast<double>(fbbr_rtprop_.ToMicroseconds()) /
 		                    1000.0
 		              : 0.0) << ","
-		      << (UsesFbbrServiceEnvelope() && fbbr_max_srtt_valid_
+		      << (IsFbbr() && fbbr_max_srtt_valid_
 		              ? "true" : "false") << ","
-		      << (UsesFbbrServiceEnvelope() && fbbr_max_srtt_valid_
+		      << (IsFbbr() && fbbr_max_srtt_valid_
 		              ? fbbr_max_srtt_ms_ : 0.0);
   cruise_load_trace_cb_(cruise_start_s,
                         cruise_end_s,

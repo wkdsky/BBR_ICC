@@ -1,9 +1,8 @@
 {
-  "name": "cellular_links_taxi_5cc_matrix",
-  "description": "Five congestion-control comparison on the project cellular taxi Mahimahi trace.",
+  "name": "cellular_links_taxi_4cc_matrix",
+  "description": "Four congestion-control comparison on the project cellular taxi Mahimahi trace.",
   "ccs": [
     "FBBR",
-    "FBBR-ServiceFair",
     "oBBR",
     "BBRv2plus",
     "BBRv2"

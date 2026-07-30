@@ -77,7 +77,6 @@ private:
     void OpenFBBRCruiseSummaryFile();
     void OpenFBBRGateFile();
     void OpenFBBRWaveformSearchFile();
-    void OpenFBBRServiceFairnessFile();
     void OpenFBBRSummaryFile();
     void OpenStatsFile();
     void CloseOwdFile();
@@ -98,7 +97,6 @@ private:
     void CloseFBBRCruiseSummaryFile();
     void CloseFBBRGateFile();
     void CloseFBBRWaveformSearchFile();
-    void CloseFBBRServiceFairnessFile();
     void CloseFBBRSummaryFile();
     void CloseStatsFile();
     int m_id=0;
@@ -124,7 +122,6 @@ private:
     std::fstream m_fbbrCruiseSummary;
     std::fstream m_fbbrGate;
     std::fstream m_fbbrWaveformSearch;
-    std::fstream m_fbbrServiceFairness;
     std::fstream m_fbbrSummary;
     std::fstream m_stats;
     int32_t m_lastBbrMode = -1;  // Track last BBR mode to avoid duplicate records

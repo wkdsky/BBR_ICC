@@ -410,17 +410,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                false,
                                kFBBR);
         }
-        case kFBBRServiceFair:{
-            return new FBBRSender(clock->Now(),
-                               rtt_stats,
-                               unacked_packets,
-                               initial_congestion_window,
-                               max_congestion_window,
-                               random,
-                               stats,
-                               false,
-                               kFBBRServiceFair);
-        }
         case kFBBRNoProbeRtt:{
             return new FBBRSender(clock->Now(),
                                rtt_stats,
@@ -431,18 +420,6 @@ SendAlgorithmInterface * SendAlgorithmInterface::Create(
                                stats,
                                false,
                                kFBBR,
-                               false);
-        }
-        case kFBBRServiceFairNoProbeRtt:{
-            return new FBBRSender(clock->Now(),
-                               rtt_stats,
-                               unacked_packets,
-                               initial_congestion_window,
-                               max_congestion_window,
-                               random,
-                               stats,
-                               false,
-                               kFBBRServiceFair,
                                false);
         }
         case kCopa:{

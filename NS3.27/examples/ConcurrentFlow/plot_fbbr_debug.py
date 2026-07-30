@@ -49,7 +49,7 @@ plt.rcParams.update(
 FLOW_RE = re.compile(r"flow(\d+)", re.IGNORECASE)
 
 LINE_COLORS = {
-    "trusted": "#1f77b4",
+    "beq": "#1f77b4",
     "effective": "#d62728",
     "maxbw": "#2ca02c",
     "native": "#9467bd",
@@ -65,7 +65,7 @@ LINE_COLORS = {
 # remain distinguishable from the blue/orange raw-sample series. State is also
 # encoded redundantly by step geometry, marker shape, and line style.
 MAXBW_STATE_COLOR = "#7A5195"      # muted purple
-TRUSTEDBW_STATE_COLOR = "#008B8B"  # dark teal
+BEQ_STATE_COLOR = "#008B8B"  # dark teal
 WINDOW_EDGE_COLOR = "#B7791F"      # amber sampling-window boundary
 
 
@@ -675,7 +675,7 @@ def load_round_bandwidth(run_dir: Path) -> Dict[int, List[Dict[str, object]]]:
             reader = csv.DictReader(fh)
             for raw in reader:
                 selection_native_bps = to_float(raw.get("selection_native_bw_bps"))
-                trusted_bps = to_float(raw.get("best_trusted_bw"))
+                beq_bps = to_float(raw.get("best_beq"))
                 native_end_kbps = to_float(raw.get("cruise_end_native_bw_kbps"))
                 fair_kbps = to_float(raw.get("fair_share_bandwidth_kbps"))
                 rows.append(
@@ -691,9 +691,9 @@ def load_round_bandwidth(run_dir: Path) -> Dict[int, List[Dict[str, object]]]:
                         "best_drate_mean_mbps": to_float(raw.get("best_drate_mean_kbps")) / 1000.0,
                         "maxbw_mbps": selection_native_bps / 1e6,
                         "native_end_mbps": native_end_kbps / 1000.0,
-                        "trusted_bw_mbps": trusted_bps / 1e6,
+                        "beq_mbps": beq_bps / 1e6,
                         "fair_share_mbps": fair_kbps / 1000.0,
-                        "trusted_source": raw.get("best_trusted_bw_source", ""),
+                        "beq_source": raw.get("best_beq_source", ""),
                         "spectral_pass": to_bool(raw.get("dual_signal_spectral_gate_pass")),
                     }
                 )
@@ -716,9 +716,9 @@ def write_round_csv(output_dir: Path, by_flow: Dict[int, List[Dict[str, object]]
         "best_drate_mean_mbps",
         "maxbw_mbps",
         "native_end_mbps",
-        "trusted_bw_mbps",
+        "beq_mbps",
         "fair_share_mbps",
-        "trusted_source",
+        "beq_source",
         "spectral_pass",
     ]
     rows = []
@@ -748,7 +748,7 @@ def plot_round_bandwidth_per_flow(
         times = [float(row["cruise_end_time"]) for row in rows]
         add_phase_background(ax, run_dir, flow_id, max(times) if times else None)
         ax.plot(times, [row["maxbw_mbps"] for row in rows], label="maxbw / native selection", color=LINE_COLORS["maxbw"], linewidth=1.5)
-        ax.plot(times, [row["trusted_bw_mbps"] for row in rows], label="trustedBw", color=LINE_COLORS["trusted"], linewidth=1.5)
+        ax.plot(times, [row["beq_mbps"] for row in rows], label="beq", color=LINE_COLORS["beq"], linewidth=1.5)
         ax.plot(times, [row["native_end_mbps"] for row in rows], label="cruise-end native", color=LINE_COLORS["native"], linewidth=1.0, linestyle=":")
         fair = finite_values(float(row["fair_share_mbps"]) for row in rows)
         if fair:
@@ -811,7 +811,7 @@ def plot_round_aggregate(
     grid = build_grid(max_time, sample_step_s)
     metric_map = {
         "sum_maxbw_mbps": "maxbw_mbps",
-        "sum_trusted_bw_mbps": "trusted_bw_mbps",
+        "sum_beq_mbps": "beq_mbps",
         "sum_native_end_mbps": "native_end_mbps",
     }
     sampled_by_metric: Dict[str, List[float]] = {}
@@ -841,7 +841,7 @@ def plot_round_aggregate(
                 time_s,
                 active_counts[idx],
                 sampled_by_metric["sum_maxbw_mbps"][idx],
-                sampled_by_metric["sum_trusted_bw_mbps"][idx],
+                sampled_by_metric["sum_beq_mbps"][idx],
                 sampled_by_metric["sum_native_end_mbps"][idx],
             ]
         )
@@ -851,7 +851,7 @@ def plot_round_aggregate(
             "time_s",
             "active_selection_count",
             "sum_maxbw_mbps",
-            "sum_trusted_bw_mbps",
+            "sum_beq_mbps",
             "sum_native_end_mbps",
         ],
         rows,
@@ -860,7 +860,7 @@ def plot_round_aggregate(
     fig, ax = plt.subplots(figsize=(12.0, 5.8))
     add_phase_background(ax, run_dir, first_flow_id_with_modes(run_dir), max_time)
     ax.plot(grid, sampled_by_metric["sum_maxbw_mbps"], label="sum maxbw/native selection", color=LINE_COLORS["maxbw"], linewidth=1.6)
-    ax.plot(grid, sampled_by_metric["sum_trusted_bw_mbps"], label="sum trustedBw", color=LINE_COLORS["trusted"], linewidth=1.6)
+    ax.plot(grid, sampled_by_metric["sum_beq_mbps"], label="sum beq", color=LINE_COLORS["beq"], linewidth=1.6)
     ax.plot(grid, sampled_by_metric["sum_native_end_mbps"], label="sum cruise-end native", color=LINE_COLORS["native"], linewidth=1.0, linestyle=":")
     ax.axhline(service_rate_bps / 1e6, color="#333333", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     ax.set_xlabel("Time (s)")
@@ -1187,7 +1187,7 @@ def load_gate_pacing(path: Path, sample_step_s: float) -> List[Dict[str, float]]
                     "final_pacing_mbps": to_float(raw.get("final_pacing_rate_bps")) / 1e6,
                     "b_native_mbps": to_float(raw.get("current_native_bw_bps")) / 1e6,
                     "pacing_base_bw_mbps": to_float(raw.get("pacing_base_bw_bps")) / 1e6,
-                    "trusted_bw_mbps": to_float(raw.get("trusted_bw_bps")) / 1e6,
+                    "beq_mbps": to_float(raw.get("beq_bps")) / 1e6,
                 }
             )
     return rows
@@ -1224,7 +1224,7 @@ def plot_pacing_from_gate(
                     row["final_pacing_mbps"],
                     row["b_native_mbps"],
                     row["pacing_base_bw_mbps"],
-                    row["trusted_bw_mbps"],
+                    row["beq_mbps"],
                 ]
             )
     write_csv(
@@ -1236,7 +1236,7 @@ def plot_pacing_from_gate(
             "final_pacing_mbps",
             "b_native_mbps",
             "pacing_base_bw_mbps",
-            "trusted_bw_mbps",
+            "beq_mbps",
         ],
         csv_rows,
     )
@@ -1289,19 +1289,19 @@ def plot_pacing_from_gate(
     return per_flow_path, aggregate_path
 
 
-def load_gate_trusted_bw(path: Path) -> List[Dict[str, float]]:
-    """Read trusted_bw updates and instantaneous pacing-base from gate trace.
+def load_gate_beq(path: Path) -> List[Dict[str, float]]:
+    """Read beq updates and instantaneous pacing-base from gate trace.
 
     Returns one row per emitted round/pacing sample, with the following fields:
 
         time_s            : event time (s)
-        trusted_bw_mbps   : last selected trusted_bw (0 if invalid)
-        trusted_valid     : bool, whether trusted_bw was valid at this moment
-        trusted_source    : str, "NORMAL" / "MERGED" / "NONE" / other
-        trusted_conf      : float in [0,1], selection confidence
-        trusted_app_valid : bool, whether trusted_bw is allowed to drive pacing
-        trusted_app_phase : str, e.g. "CRUISE" / "POST_CRUISE" / "NONE"
-        trusted_cruise_id : int, last cruise the trusted_bw was selected on
+        beq_mbps   : last selected beq (0 if invalid)
+        beq_valid     : bool, whether beq was valid at this moment
+        beq_source    : str, "NORMAL" / "MERGED" / "NONE" / other
+        beq_conf      : float in [0,1], selection confidence
+        beq_app_valid : bool, whether beq is allowed to drive pacing
+        beq_app_phase : str, e.g. "CRUISE" / "POST_CRUISE" / "NONE"
+        beq_cruise_id : int, last cruise the beq was selected on
         pacing_base_mbps  : the bw actually used as pacing base this instant
         native_bw_mbps    : current Native BBR detected bw
         sample_type       : "round" or "pacing"
@@ -1316,13 +1316,13 @@ def load_gate_trusted_bw(path: Path) -> List[Dict[str, float]]:
             rows.append(
                 {
                     "time_s": time_s,
-                    "trusted_bw_mbps": to_float(raw.get("trusted_bw_bps")) / 1e6,
-                    "trusted_valid": to_bool(raw.get("trusted_bw_valid")),
-                    "trusted_source": str(raw.get("trusted_bw_source") or "NONE").strip(),
-                    "trusted_conf": to_float(raw.get("trusted_bw_conf")),
-                    "trusted_app_valid": to_bool(raw.get("trusted_bw_application_valid")),
-                    "trusted_app_phase": str(raw.get("trusted_bw_application_phase") or "NONE").strip(),
-                    "trusted_cruise_id": int(to_float(raw.get("trusted_bw_cruise_id"), 0.0)),
+                    "beq_mbps": to_float(raw.get("beq_bps")) / 1e6,
+                    "beq_valid": to_bool(raw.get("beq_valid")),
+                    "beq_source": str(raw.get("beq_source") or "NONE").strip(),
+                    "beq_conf": to_float(raw.get("beq_conf")),
+                    "beq_app_valid": to_bool(raw.get("beq_application_valid")),
+                    "beq_app_phase": str(raw.get("beq_application_phase") or "NONE").strip(),
+                    "beq_cruise_id": int(to_float(raw.get("beq_cruise_id"), 0.0)),
                     "pacing_base_mbps": to_float(raw.get("pacing_base_bw_bps")) / 1e6,
                     "native_bw_mbps": to_float(raw.get("current_native_bw_bps")) / 1e6,
                     "sample_type": str(raw.get("row_type") or "").strip(),
@@ -1332,10 +1332,10 @@ def load_gate_trusted_bw(path: Path) -> List[Dict[str, float]]:
     return rows  # type: ignore[return-value]
 
 
-def _trusted_source_color(source: str) -> str:
+def _beq_source_color(source: str) -> str:
     s = source.upper()
     if s == "TIME_WAVEFORM_SRTT_SEARCH":
-        return TRUSTEDBW_STATE_COLOR
+        return BEQ_STATE_COLOR
     if s == "NORMAL":
         return "#1f77b4"
     if s == "MERGED":
@@ -1345,38 +1345,38 @@ def _trusted_source_color(source: str) -> str:
     return "#bbbbbb"
 
 
-def plot_trusted_bw_per_flow(
+def plot_beq_per_flow(
     output_dir: Path,
     run_dir: Path,
     service_rate_bps: float,
 ) -> Tuple[Optional[Path], Optional[Path]]:
-    """Per-flow trusted_bw selection timeline + aggregate trusted_bw.
+    """Per-flow beq selection timeline + aggregate beq.
 
     Top panel series (per flow):
-        * trusted_bw (NORMAL)       : solid line, blue
-        * trusted_bw (MERGED)       : solid line, orange
-        * trusted_bw (other source) : solid line, gray
-        * trusted_bw_valid window   : pale green shading where trusted_bw is valid
+        * beq (NORMAL)       : solid line, blue
+        * beq (MERGED)       : solid line, orange
+        * beq (other source) : solid line, gray
+        * beq_valid window   : pale green shading where beq is valid
         * pacing_base_bw            : thin black line (what is actually used)
         * current_native_bw         : thin dashed purple line (BBR2 detected)
-    Bottom aggregate panel: sum of trusted_bw across all flows, with bottleneck
+    Bottom aggregate panel: sum of beq across all flows, with bottleneck
     capacity reference line and shaded post-cruise application windows.
 
-    The figure makes it obvious when a cruise successfully produced a trusted_bw
-    estimate, whether the rescue (MERGED) path was used, and how the trusted_bw
+    The figure makes it obvious when a cruise successfully produced a beq
+    estimate, whether the rescue (MERGED) path was used, and how the beq
     tracks the native detected bw during cruise vs. pacing-base after cruise.
     """
     gate_files = find_gate_files(run_dir)
     by_flow: Dict[int, List[Dict[str, float]]] = {}
     for path in gate_files:
         flow_id = flow_id_from_path(path)
-        rows = load_gate_trusted_bw(path)
+        rows = load_gate_beq(path)
         if flow_id > 0 and rows:
             by_flow[flow_id] = rows
     if not by_flow:
         return None, None
 
-    # Round-event rows drive the trusted_bw step; pacing-event rows only
+    # Round-event rows drive the beq step; pacing-event rows only
     # contribute pacing_base_mbps (which can change intra-round when
     # pacing_base_source switches back to NATIVE_BBR).
     def split(rows: List[Dict[str, float]]):
@@ -1392,30 +1392,30 @@ def plot_trusted_bw_per_flow(
                     flow_id,
                     row["time_s"],
                     row["sample_type"],
-                    row["trusted_bw_mbps"],
-                    row["trusted_valid"],
-                    row["trusted_source"],
-                    row["trusted_conf"],
-                    row["trusted_app_valid"],
-                    row["trusted_app_phase"],
-                    row["trusted_cruise_id"],
+                    row["beq_mbps"],
+                    row["beq_valid"],
+                    row["beq_source"],
+                    row["beq_conf"],
+                    row["beq_app_valid"],
+                    row["beq_app_phase"],
+                    row["beq_cruise_id"],
                     row["pacing_base_mbps"],
                     row["native_bw_mbps"],
                 ]
             )
     write_csv(
-        output_dir / "trusted_bw_timeseries.csv",
+        output_dir / "beq_timeseries.csv",
         [
             "flow_id",
             "time_s",
             "sample_type",
-            "trusted_bw_mbps",
-            "trusted_valid",
-            "trusted_source",
-            "trusted_conf",
-            "trusted_app_valid",
-            "trusted_app_phase",
-            "trusted_cruise_id",
+            "beq_mbps",
+            "beq_valid",
+            "beq_source",
+            "beq_conf",
+            "beq_app_valid",
+            "beq_app_phase",
+            "beq_cruise_id",
             "pacing_base_mbps",
             "native_bw_mbps",
         ],
@@ -1434,12 +1434,12 @@ def plot_trusted_bw_per_flow(
         rounds, pacings = split(rows)
         max_time = max(row["time_s"] for row in rows)
 
-        # Shaded band where trusted_bw is valid.
+        # Shaded band where beq is valid.
         in_band = False
         band_start = 0.0
         for row in rounds + pacings:
             t = row["time_s"]
-            v = bool(row["trusted_valid"])
+            v = bool(row["beq_valid"])
             if v and not in_band:
                 in_band = True
                 band_start = t
@@ -1463,15 +1463,15 @@ def plot_trusted_bw_per_flow(
                 zorder=0,
             )
 
-        # Step-trace the trusted_bw by source on round events.
+        # Step-trace the beq by source on round events.
         if rounds:
             t_round = [r["time_s"] for r in rounds]
             t_round_step: List[float] = []
             v_round_step: List[float] = []
             for r in rounds:
-                if r["trusted_valid"]:
+                if r["beq_valid"]:
                     t_round_step.append(r["time_s"])
-                    v_round_step.append(r["trusted_bw_mbps"])
+                    v_round_step.append(r["beq_mbps"])
             ax.plot(
                 t_round_step,
                 v_round_step,
@@ -1486,32 +1486,32 @@ def plot_trusted_bw_per_flow(
             # when they share the same source, so the colour encodes the
             # source without fabricating cross-source segments.
             sources = sorted({
-                str(r["trusted_source"]).upper()
+                str(r["beq_source"]).upper()
                 for r in rounds
-                if r["trusted_valid"] and str(r["trusted_source"]).upper() != "NONE"
+                if r["beq_valid"] and str(r["beq_source"]).upper() != "NONE"
             })
             for source in sources:
                 seg_t: List[float] = []
                 seg_v: List[float] = []
                 for r in rounds:
-                    if not r["trusted_valid"]:
+                    if not r["beq_valid"]:
                         continue
-                    if str(r["trusted_source"]).upper() != source:
+                    if str(r["beq_source"]).upper() != source:
                         continue
                     if seg_t and seg_t[-1] == r["time_s"]:
-                        seg_v[-1] = r["trusted_bw_mbps"]
+                        seg_v[-1] = r["beq_mbps"]
                     else:
                         seg_t.append(r["time_s"])
-                        seg_v.append(r["trusted_bw_mbps"])
+                        seg_v.append(r["beq_mbps"])
                 if seg_t:
                     ax.plot(
                         seg_t,
                         seg_v,
-                        color=_trusted_source_color(source),
+                        color=_beq_source_color(source),
                         linewidth=1.4,
                         marker="o",
                         markersize=2.5,
-                        label=f"trusted_bw [{source}]",
+                        label=f"beq [{source}]",
                     )
 
         # pacing_base line (the bw actually driving pacing).
@@ -1553,17 +1553,17 @@ def plot_trusted_bw_per_flow(
             )
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    handles.append(Patch(facecolor="#2ca02c", alpha=0.30, label="trusted_bw valid"))
+    handles.append(Patch(facecolor="#2ca02c", alpha=0.30, label="beq valid"))
     handles.append(Patch(facecolor="#888888", alpha=0.6, label="fair share"))
-    axes[0, 0].legend(handles, labels + ["trusted_bw valid", "fair share"], ncol=3, frameon=False, fontsize=8, loc="upper right")
+    axes[0, 0].legend(handles, labels + ["beq valid", "fair share"], ncol=3, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time (s)")
-    fig.suptitle("FBBR trusted_bw per flow", y=0.995)
+    fig.suptitle("FBBR beq per flow", y=0.995)
     fig.tight_layout()
-    per_flow_path = output_dir / "trusted_bw_per_flow.png"
+    per_flow_path = output_dir / "beq_per_flow.png"
     fig.savefig(per_flow_path, dpi=180)
     plt.close(fig)
 
-    # Aggregate trusted_bw across flows (sample-previous on grid).
+    # Aggregate beq across flows (sample-previous on grid).
     max_time = max(row["time_s"] for rows in by_flow.values() for row in rows)
     grid = build_grid(max_time, 0.1)
     aggregate = [0.0 for _ in grid]
@@ -1571,15 +1571,15 @@ def plot_trusted_bw_per_flow(
     for rows in by_flow.values():
         rounds = [r for r in rows if r["sample_type"] == "round"]
         series = [
-            (r["time_s"], r["trusted_bw_mbps"])
+            (r["time_s"], r["beq_mbps"])
             for r in rounds
-            if r["trusted_valid"]
+            if r["beq_valid"]
         ]
         sampled = sample_previous(series, grid, fill=0.0)
         aggregate = [aggregate[idx] + sampled[idx] for idx in range(len(grid))]
 
         frac_series = [
-            (r["time_s"], 1.0) for r in rounds if r["trusted_valid"]
+            (r["time_s"], 1.0) for r in rounds if r["beq_valid"]
         ]
         sampled_frac = sample_previous(frac_series, grid, fill=0.0)
         aggregate_valid_frac = [
@@ -1592,11 +1592,11 @@ def plot_trusted_bw_per_flow(
 
     fig, host = plt.subplots(figsize=(12.0, 5.6))
     add_phase_background(host, run_dir, first_flow_id_with_modes(run_dir), max_time)
-    host.plot(grid, aggregate, color=LINE_COLORS["trusted"], linewidth=1.4, label="sum trusted_bw (valid only)")
+    host.plot(grid, aggregate, color=LINE_COLORS["beq"], linewidth=1.4, label="sum beq (valid only)")
     host.axhline(service_rate_bps / 1e6, color="#555555", linestyle="--", linewidth=1.0, label="bottleneck capacity")
     host.set_xlabel("Time (s)")
     host.set_ylabel("Mbps")
-    host.set_title("Aggregate FBBR trusted_bw")
+    host.set_title("Aggregate FBBR beq")
     host.grid(True, alpha=0.25)
     host.legend(loc="upper left", frameon=False)
 
@@ -1608,7 +1608,7 @@ def plot_trusted_bw_per_flow(
         linewidth=0.9,
         linestyle=":",
         alpha=0.7,
-        label="fraction of flows with valid trusted_bw",
+        label="fraction of flows with valid beq",
     )
     frac_ax.set_ylabel("valid-fraction", color="#2ca02c")
     frac_ax.set_ylim(0.0, 1.05)
@@ -1617,7 +1617,7 @@ def plot_trusted_bw_per_flow(
     host.legend(h2 + host.get_legend_handles_labels()[0], l2 + host.get_legend_handles_labels()[1], loc="upper right", frameon=False)
 
     fig.tight_layout()
-    aggregate_path = output_dir / "trusted_bw_aggregate.png"
+    aggregate_path = output_dir / "beq_aggregate.png"
     fig.savefig(aggregate_path, dpi=180)
     plt.close(fig)
     return per_flow_path, aggregate_path
@@ -1716,16 +1716,16 @@ def plot_pacing_proxy(
         rows = by_flow[flow_id]
         times = [float(row["cruise_end_time"]) for row in rows]
         add_phase_background(ax, run_dir, flow_id, max(times) if times else None)
-        ax.plot(times, [row["trusted_bw_mbps"] for row in rows], label="TrustedBw", color=LINE_COLORS["effective"], linewidth=1.4)
+        ax.plot(times, [row["beq_mbps"] for row in rows], label="Beq", color=LINE_COLORS["effective"], linewidth=1.4)
         ax.plot(times, [row["maxbw_mbps"] for row in rows], label="maxbw/native selection", color=LINE_COLORS["maxbw"], linewidth=1.1, linestyle="--")
         ax.set_ylabel(f"Flow {flow_id}\nMbps")
         ax.grid(True, alpha=0.25)
     add_phase_legend(axes[0, 0])
     axes[0, 0].legend(ncol=2, frameon=False, fontsize=8, loc="upper right")
     axes[-1, 0].set_xlabel("Time at cruise end (s)")
-    fig.suptitle("Pacing trace missing: showing per-cruise TrustedBw", y=0.995)
+    fig.suptitle("Pacing trace missing: showing per-cruise Beq", y=0.995)
     fig.tight_layout()
-    path = output_dir / "trusted_bw_proxy_per_flow.png"
+    path = output_dir / "beq_proxy_per_flow.png"
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return path
@@ -1970,7 +1970,7 @@ def add_delivery_rate_highlight(
     selected_value_mbps: Optional[float] = None,
     compact_label: bool = False,
 ) -> Optional[float]:
-    """Emphasize one sampling window and return its selected TrustedBw value."""
+    """Emphasize one sampling window and return its selected Beq value."""
     if end_s <= start_s:
         return None
     window_rows = [
@@ -2012,7 +2012,7 @@ def add_delivery_rate_highlight(
         mean_value,
         start_s,
         end_s,
-        colors=TRUSTEDBW_STATE_COLOR,
+        colors=BEQ_STATE_COLOR,
         linestyles=(0, (4.0, 2.4)),
         linewidth=1.65,
         zorder=5,
@@ -2044,7 +2044,7 @@ def add_delivery_rate_highlight(
         zorder=6,
         arrowprops={
             "arrowstyle": "-",
-            "color": TRUSTEDBW_STATE_COLOR,
+            "color": BEQ_STATE_COLOR,
             "linewidth": 1.00,
             "shrinkA": 4,
             "shrinkB": 3,
@@ -2052,7 +2052,7 @@ def add_delivery_rate_highlight(
         bbox={
             "boxstyle": "square,pad=0.20",
             "facecolor": "white",
-            "edgecolor": TRUSTEDBW_STATE_COLOR,
+            "edgecolor": BEQ_STATE_COLOR,
             "linewidth": 0.80,
             "alpha": 0.97,
         },
@@ -2152,17 +2152,17 @@ def add_bandwidth_state_trajectories(
     start_s: float,
     initial_state_value: float,
     maxbw_points: Sequence[Tuple[float, float]],
-    trusted_updates: Sequence[Tuple[float, float, float, float]],
+    beq_updates: Sequence[Tuple[float, float, float, float]],
     end_s: float,
 ) -> None:
-    """Draw event-driven maxBw and CRUISE-exit TrustedBw state trajectories.
+    """Draw event-driven maxBw and CRUISE-exit Beq state trajectories.
 
     ``initial_state_value`` is the pre-existing state already in force at the
     left plot boundary (conceptually the previous round's maxBw).  Both the
-    maxBw and TrustedBw trajectories start from this common value on the y-axis.
+    maxBw and Beq trajectories start from this common value on the y-axis.
 
-    maxbw_points contains ``(peak_time, peak_value)`` pairs. trusted_updates
-    contains ``(window_start, window_end, cruise_end, trusted_value)`` tuples.
+    maxbw_points contains ``(peak_time, peak_value)`` pairs. beq_updates
+    contains ``(window_start, window_end, cruise_end, beq_value)`` tuples.
     """
     if not math.isfinite(initial_state_value):
         return
@@ -2222,7 +2222,7 @@ def add_bandwidth_state_trajectories(
     ordered_updates = sorted(
         [
             (window_start, window_end, update_time, value)
-            for window_start, window_end, update_time, value in trusted_updates
+            for window_start, window_end, update_time, value in beq_updates
             if math.isfinite(update_time)
             and math.isfinite(value)
             and update_time >= start_s - 1e-9
@@ -2231,27 +2231,27 @@ def add_bandwidth_state_trajectories(
         key=lambda item: item[2],
     )
 
-    trusted_times = [start_s]
-    trusted_values = [initial_state_value]
+    beq_times = [start_s]
+    beq_values = [initial_state_value]
     for _, _, update_time, value in ordered_updates:
-        if abs(update_time - trusted_times[-1]) <= 1e-9:
-            trusted_values[-1] = value
+        if abs(update_time - beq_times[-1]) <= 1e-9:
+            beq_values[-1] = value
         else:
-            trusted_times.append(update_time)
-            trusted_values.append(value)
-    if end_s > trusted_times[-1]:
-        trusted_times.append(end_s)
-        trusted_values.append(trusted_values[-1])
+            beq_times.append(update_time)
+            beq_values.append(value)
+    if end_s > beq_times[-1]:
+        beq_times.append(end_s)
+        beq_values.append(beq_values[-1])
 
     ax.step(
-        trusted_times,
-        trusted_values,
+        beq_times,
+        beq_values,
         where="post",
-        color=TRUSTEDBW_STATE_COLOR,
+        color=BEQ_STATE_COLOR,
         linewidth=1.45,
         solid_capstyle="butt",
         solid_joinstyle="miter",
-        label="TrustedBw",
+        label="Beq",
         zorder=4.25,
     )
 
@@ -2261,7 +2261,7 @@ def add_bandwidth_state_trajectories(
             ax.plot(
                 [guide_start, update_time],
                 [value, value],
-                color=TRUSTEDBW_STATE_COLOR,
+                color=BEQ_STATE_COLOR,
                 linewidth=1.25,
                 linestyle=(0, (2.4, 2.2)),
                 alpha=0.82,
@@ -2274,7 +2274,7 @@ def add_bandwidth_state_trajectories(
             s=38,
             marker="o",
             facecolor="white",
-            edgecolor=TRUSTEDBW_STATE_COLOR,
+            edgecolor=BEQ_STATE_COLOR,
             linewidth=1.25,
             zorder=7.2,
             label="_nolegend_",
@@ -2371,7 +2371,7 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
     highlight_start_s: Optional[float] = None,
     highlight_end_s: Optional[float] = None,
     highlight_cc: str = "FBBR",
-    highlight_label_prefix: str = "TrustedBw",
+    highlight_label_prefix: str = "Beq",
     highlight_windows: Optional[Sequence[Tuple[float, float]]] = None,
     highlight_values_mbps: Optional[Sequence[float]] = None,
     show_bbrv2_maxbw: bool = True,
@@ -2479,7 +2479,7 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
             alternating_background=True,
         )
 
-        trusted_window_results: List[Tuple[float, float, float]] = []
+        beq_window_results: List[Tuple[float, float, float]] = []
         if all_highlight_windows:
             highlight_cc_key = (
                 comparison_cc_label if highlight_cc == "FBBR" else highlight_cc
@@ -2504,7 +2504,7 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
                     relative_time_axis,
                 )
                 if selected_value is not None and math.isfinite(selected_value):
-                    trusted_window_results.append(
+                    beq_window_results.append(
                         (clipped_start, clipped_end, selected_value)
                     )
 
@@ -2569,8 +2569,8 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
                 if point is not None
             ]
 
-            trusted_updates: List[Tuple[float, float, float, float]] = []
-            for window_start, window_end, trusted_value in trusted_window_results:
+            beq_updates: List[Tuple[float, float, float, float]] = []
+            for window_start, window_end, beq_value in beq_window_results:
                 update_time = cruise_end_for_sampling_window(
                     fbbr_run_dir,
                     flow_id,
@@ -2579,8 +2579,8 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
                     end_s,
                 )
                 if update_time is not None:
-                    trusted_updates.append(
-                        (window_start, window_end, update_time, trusted_value)
+                    beq_updates.append(
+                        (window_start, window_end, update_time, beq_value)
                     )
 
             initial_state_value = (
@@ -2604,7 +2604,7 @@ def plot_bbrv2_vs_fbbr_delivery_rate(
                 start_s,
                 initial_state_value,
                 maxbw_points,
-                trusted_updates,
+                beq_updates,
                 end_s,
             )
 
@@ -2993,13 +2993,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if proxy:
             generated.append(proxy)
 
-    trusted_per_flow, trusted_aggregate = plot_trusted_bw_per_flow(
+    beq_per_flow, beq_aggregate = plot_beq_per_flow(
         output_dir, run_dir, service_rate_bps
     )
-    if trusted_per_flow:
-        generated.append(trusted_per_flow)
-    if trusted_aggregate:
-        generated.append(trusted_aggregate)
+    if beq_per_flow:
+        generated.append(beq_per_flow)
+    if beq_aggregate:
+        generated.append(beq_aggregate)
 
     delivery_path = plot_delivery_rate_first_window(output_dir, run_dir, 10.0)
     if delivery_path:

@@ -135,17 +135,11 @@ kBBRR,
 // ns-3.47 TcpCubic semantics adapted to the DQC transport interface.  Keep
 // this at the end so existing serialized enum values remain stable.
 kNs3Cubic,
-// Preserve the retired HybridV3 slot while exposing only the two supported
-// FBBR algorithms.
+// Preserve the retired HybridV3 slot while exposing FBBR.
 kFBBR = kNs3Cubic + 2,
-// Service-aware, Cruise-cycle AIMD fairness control layered on top of the
-// FBBR inflight envelope.  Appended to preserve existing values.
-kFBBRServiceFair,
-// Experiment-only aliases that construct the same supported FBBR algorithms
-// with ProbeRTT disabled.  Their sender identity remains kFBBR or
-// kFBBRServiceFair, so the established FBBR control path is unchanged.
-kFBBRNoProbeRtt,
-kFBBRServiceFairNoProbeRtt};
+// Keep the historical numeric gap so existing congestion-control enum values
+// remain stable.
+kFBBRNoProbeRtt = kFBBR + 2};
 ProtoPacketNumberLength ReadPacketNumberLength(uint8_t flag);
 ProtoPacketNumberLengthFlag PktNumLen2Flag(ProtoPacketNumberLength byte);
 ProtoPacketNumberLength GetMinPktNumLen(PacketNumber seq);

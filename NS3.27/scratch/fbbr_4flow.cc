@@ -38,6 +38,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include "ns3/fbbr_config_loader.h"
 #include "ns3/fbbr_sender.h"
 #include "ns3/send_packet_manager.h"
 #include "queue_occupancy_trace_helper.h"
@@ -159,313 +160,13 @@ std::string Trim(const std::string& in)
     return in.substr(begin, end - begin);
 }
 
-bool ParseBoolValue(const std::string& value, bool* out)
-{
-    std::string lower;
-    lower.reserve(value.size());
-    for(char c : value){
-        lower.push_back(static_cast<char>(
-            std::tolower(static_cast<unsigned char>(c))));
-    }
-    if(lower == "true" || lower == "1" || lower == "yes" || lower == "on"){
-        *out = true;
-        return true;
-    }
-    if(lower == "false" || lower == "0" || lower == "no" || lower == "off"){
-        *out = false;
-        return true;
-    }
-    return false;
-}
-
-bool ParseDoubleValue(const std::string& value, double* out)
-{
-    try {
-        size_t used = 0;
-        const double parsed = std::stod(value, &used);
-        if(Trim(value.substr(used)).empty()){
-            *out = parsed;
-            return true;
-        }
-    } catch(...) {
-    }
-    return false;
-}
-
-bool ParseUintValue(const std::string& value, uint32_t* out)
-{
-    try {
-        size_t used = 0;
-        const unsigned long parsed = std::stoul(value, &used);
-        if(Trim(value.substr(used)).empty()){
-            *out = static_cast<uint32_t>(parsed);
-            return true;
-        }
-    } catch(...) {
-    }
-    return false;
-}
-
-bool ParseUint64Value(const std::string& value, uint64_t* out)
-{
-    try {
-        size_t used = 0;
-        const unsigned long long parsed = std::stoull(value, &used);
-        if(Trim(value.substr(used)).empty()){
-            *out = static_cast<uint64_t>(parsed);
-            return true;
-        }
-    } catch(...) {
-    }
-    return false;
-}
-
-void WarnConfigLine(const std::string& path,
-                    uint32_t line_no,
-                    const std::string& message)
-{
-    std::cerr << "[fbbrConfig warning] " << path << ":" << line_no
-              << ": " << message << std::endl;
-}
-
-bool SetFBBRConfigValue(FBBRConfig* config,
-                           const std::string& key,
-                           const std::string& value,
-                           const std::string& path,
-                           uint32_t line_no)
-{
-    double d = 0.0;
-    uint32_t u32 = 0;
-    uint64_t u64 = 0;
-    bool b = false;
-
-    if(key.rfind("flow.", 0) == 0){
-        const size_t id_begin = 5;
-        const size_t id_end = key.find('.', id_begin);
-        if(id_end == std::string::npos){
-            WarnConfigLine(path, line_no, "invalid flow key: " + key);
-            return false;
-        }
-        uint32_t flow_id = 0;
-        if(!ParseUintValue(key.substr(id_begin, id_end - id_begin), &flow_id)){
-            WarnConfigLine(path, line_no, "invalid flow id in key: " + key);
-            return false;
-        }
-        const std::string field = key.substr(id_end + 1);
-        FBBRFlowConfig& flow = config->flow[flow_id];
-        if(field == "modulation_freq_hz"){
-            if(!ParseDoubleValue(value, &d)){
-                WarnConfigLine(path, line_no, "invalid double for " + key);
-                return false;
-            }
-            flow.modulation_freq_hz = d;
-            flow.has_modulation_freq_hz = true;
-            return true;
-        }
-        if(field == "fixed_amplitude_mbps"){
-            if(!ParseDoubleValue(value, &d)){
-                WarnConfigLine(path, line_no, "invalid double for " + key);
-                return false;
-            }
-            flow.fixed_amplitude_mbps = d;
-            flow.has_fixed_amplitude_mbps = true;
-            return true;
-        }
-        WarnConfigLine(path, line_no, "unknown flow field: " + key);
-        return false;
-    }
-
-#define SET_DOUBLE(KEY, FIELD) \
-    if(key == KEY){ \
-        if(!ParseDoubleValue(value, &d)){ \
-            WarnConfigLine(path, line_no, "invalid double for " + key); \
-            return false; \
-        } \
-        config->FIELD = d; \
-        return true; \
-    }
-#define SET_U32(KEY, FIELD) \
-    if(key == KEY){ \
-        if(!ParseUintValue(value, &u32)){ \
-            WarnConfigLine(path, line_no, "invalid uint for " + key); \
-            return false; \
-        } \
-        config->FIELD = u32; \
-        return true; \
-    }
-#define SET_U64(KEY, FIELD) \
-    if(key == KEY){ \
-        if(!ParseUint64Value(value, &u64)){ \
-            WarnConfigLine(path, line_no, "invalid uint64 for " + key); \
-            return false; \
-        } \
-        config->FIELD = u64; \
-        return true; \
-    }
-#define SET_BOOL(KEY, FIELD) \
-    if(key == KEY){ \
-        if(!ParseBoolValue(value, &b)){ \
-            WarnConfigLine(path, line_no, "invalid bool for " + key); \
-            return false; \
-        } \
-        config->FIELD = b; \
-        return true; \
-    }
-
-    SET_DOUBLE("default_modulation_freq_hz", default_modulation_freq_hz)
-    if(key == "default_amplitude_mode"){
-        config->default_amplitude_mode = value;
-        return true;
-    }
-    SET_DOUBLE("default_fixed_amplitude_mbps", default_fixed_amplitude_mbps)
-    SET_DOUBLE("pacing.minimum_rate_mbps", pacing_minimum_rate_mbps)
-    SET_DOUBLE("stability.single_round_exit_threshold", stability_single_round_exit_threshold)
-    SET_DOUBLE("stability.consecutive_exit_threshold", stability_consecutive_exit_threshold)
-    SET_U32("stability.stable_rounds", stability_stable_rounds)
-    SET_DOUBLE("stability.full_pipe_growth_threshold", stability_full_pipe_growth_threshold)
-    SET_BOOL("trusted_bw.clear_on_cruise_start", trusted_bw_clear_on_cruise_start)
-    if(key == "waveform.recv_signal_mode"){
-        config->waveform_recv_signal_mode = value;
-        return true;
-    }
-    SET_DOUBLE("waveform.initial_settle_rtt_mult", waveform_initial_settle_rtt_mult)
-    SET_DOUBLE("waveform.post_adjust_settle_rtt_mult", waveform_post_adjust_settle_rtt_mult)
-    SET_BOOL("waveform.negative_half_first", waveform_negative_half_first)
-    SET_DOUBLE("waveform.initial_window_periods", waveform_initial_window_periods)
-    SET_DOUBLE("waveform.extended_window_periods", waveform_extended_window_periods)
-    SET_DOUBLE("waveform.max_window_periods", waveform_max_window_periods)
-    SET_DOUBLE("waveform.period_tolerance_ratio", waveform_period_tolerance_ratio)
-    SET_DOUBLE("waveform.min_periodicity_correlation", waveform_min_periodicity_correlation)
-    SET_DOUBLE("waveform.min_cycle_coverage_ratio", waveform_min_cycle_coverage_ratio)
-    SET_DOUBLE("waveform.masked_min_cycle_coverage_ratio", waveform_masked_min_cycle_coverage_ratio)
-    SET_DOUBLE("waveform.local_slope_window_period_ratio", waveform_local_slope_window_period_ratio)
-    SET_DOUBLE("waveform.min_local_slope_window_ms", waveform_min_local_slope_window_ms)
-    SET_DOUBLE("waveform.clip_min_duration_ratio", waveform_clip_min_duration_ratio)
-    SET_DOUBLE("waveform.clip_min_half_overlap_ratio", waveform_clip_min_half_overlap_ratio)
-    SET_DOUBLE("waveform.clip_max_slope_ratio", waveform_clip_max_slope_ratio)
-    SET_DOUBLE("waveform.delta_drate_amplitude_ratio", waveform_delta_drate_amplitude_ratio)
-    SET_DOUBLE("waveform.delta_fallback_baseline_ratio", waveform_delta_fallback_baseline_ratio)
-    SET_DOUBLE("waveform.plateau_min_duration_ratio", waveform_plateau_min_duration_ratio)
-    SET_DOUBLE("waveform.plateau_max_slope_ratio", waveform_plateau_max_slope_ratio)
-    SET_DOUBLE("waveform.plateau_max_level_span_ratio", waveform_plateau_max_level_span_ratio)
-    SET_DOUBLE("waveform.plateau_extreme_distance_ratio", waveform_plateau_extreme_distance_ratio)
-    SET_DOUBLE("waveform.baseline_step_ratio", waveform_baseline_step_ratio)
-    SET_DOUBLE("waveform.amplitude_floor_ratio", waveform_amplitude_floor_ratio)
-    SET_U32("waveform.clip_floor_confirmations", waveform_clip_floor_confirmations)
-    SET_U32("waveform.max_baseline_adjustments", waveform_max_baseline_adjustments)
-    SET_U32("waveform.max_inconclusive_extensions", waveform_max_inconclusive_extensions)
-    SET_DOUBLE("waveform.inconclusive_signal_amplification_factor", waveform_inconclusive_signal_amplification_factor)
-    SET_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio", waveform_inconclusive_signal_amplification_max_ratio)
-    SET_DOUBLE("waveform.max_app_limited_sample_ratio", waveform_max_app_limited_sample_ratio)
-    SET_DOUBLE("waveform.max_interpolation_gap_period_ratio", waveform_max_interpolation_gap_period_ratio)
-    SET_DOUBLE("goertzel.min_coherent_power_ratio", goertzel_min_coherent_power_ratio)
-    SET_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
-    SET_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
-    SET_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
-    SET_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
-    SET_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)
-    SET_DOUBLE("waveform.activity.min_level_ratio", waveform_activity_min_level_ratio)
-    SET_DOUBLE("waveform.activity.step_noise_multiplier", waveform_activity_step_noise_multiplier)
-    SET_DOUBLE("waveform.activity.min_normalized_step_slope", waveform_activity_min_normalized_step_slope)
-    SET_U32("waveform.activity.min_active_steps", waveform_activity_min_active_steps)
-    SET_DOUBLE("waveform.activity.min_active_step_ratio", waveform_activity_min_active_step_ratio)
-    SET_DOUBLE("waveform.activity.min_directional_change_ratio", waveform_activity_min_directional_change_ratio)
-    SET_DOUBLE("waveform.activity.min_significant_path_ratio", waveform_activity_min_significant_path_ratio)
-    SET_U32("waveform.activity.min_slope_reversals", waveform_activity_min_slope_reversals)
-    SET_DOUBLE("waveform.horizontal.continuous_min_duration_ratio", waveform_horizontal_continuous_min_duration_ratio)
-    SET_DOUBLE("waveform.horizontal.min_valid_coverage_ratio", waveform_horizontal_min_valid_coverage_ratio)
-    SET_DOUBLE("waveform.horizontal.min_flat_fraction", waveform_horizontal_min_flat_fraction)
-    SET_DOUBLE("waveform.horizontal.max_local_slope_ratio", waveform_horizontal_max_local_slope_ratio)
-    SET_DOUBLE("waveform.horizontal.min_side_slope_ratio", waveform_horizontal_min_side_slope_ratio)
-    SET_DOUBLE("waveform.horizontal.min_boundary_kink_ratio", waveform_horizontal_min_boundary_kink_ratio)
-    SET_DOUBLE("waveform.horizontal.max_level_span_ratio", waveform_horizontal_max_level_span_ratio)
-    SET_DOUBLE("waveform.horizontal.max_total_drift_ratio", waveform_horizontal_max_total_drift_ratio)
-    SET_DOUBLE("waveform.horizontal.min_side_change_ratio", waveform_horizontal_min_side_change_ratio)
-    SET_DOUBLE("waveform.horizontal.amplitude_noise_multiplier", waveform_horizontal_amplitude_noise_multiplier)
-    SET_DOUBLE("waveform.horizontal.level_span_noise_multiplier", waveform_horizontal_level_span_noise_multiplier)
-    SET_DOUBLE("waveform.horizontal.slope_noise_multiplier", waveform_horizontal_slope_noise_multiplier)
-    SET_DOUBLE("waveform.horizontal.extreme_distance_ratio", waveform_horizontal_extreme_distance_ratio)
-    SET_DOUBLE("waveform.repeated_clip_max_period_error_ratio", waveform_repeated_clip_max_period_error_ratio)
-    SET_DOUBLE("waveform.repeated_clip_max_level_delta_ratio", waveform_repeated_clip_max_level_delta_ratio)
-    SET_DOUBLE("waveform.repeated_clip_contact_level_tolerance_ratio", waveform_repeated_clip_contact_level_tolerance_ratio)
-    SET_U32("waveform.repeated_clip_min_contact_samples_per_cycle", waveform_repeated_clip_min_contact_samples_per_cycle)
-    SET_U32("waveform.repeated_clip_min_total_contact_samples", waveform_repeated_clip_min_total_contact_samples)
-    SET_DOUBLE("waveform.repeated_clip_min_contact_sample_ratio", waveform_repeated_clip_min_contact_sample_ratio)
-    SET_DOUBLE("waveform.repeated_clip_min_contact_span_ratio_of_window", waveform_repeated_clip_min_contact_span_ratio_of_window)
-    SET_DOUBLE("waveform.repeated_clip_min_pooled_flat_fraction", waveform_repeated_clip_min_pooled_flat_fraction)
-    SET_DOUBLE("waveform.repeated_clip_min_verified_boundary_fraction", waveform_repeated_clip_min_verified_boundary_fraction)
-    SET_DOUBLE("waveform.repeated_clip_min_outside_excursion_ratio", waveform_repeated_clip_min_outside_excursion_ratio)
-    SET_DOUBLE("waveform.repeated_clip_min_extrapolated_overshoot_ratio", waveform_repeated_clip_min_extrapolated_overshoot_ratio)
-    SET_DOUBLE("waveform.repeated_clip_merge_gap_ratio", waveform_repeated_clip_merge_gap_ratio)
-    SET_DOUBLE("waveform.repeated_clip_max_missing_gap_ratio", waveform_repeated_clip_max_missing_gap_ratio)
-    SET_DOUBLE("waveform.shoulder.min_half_overlap_ratio", waveform_shoulder_min_half_overlap_ratio)
-    SET_DOUBLE("waveform.shoulder.min_side_change_ratio", waveform_shoulder_min_side_change_ratio)
-    SET_DOUBLE("waveform.shoulder.max_residual_cycle_period_error_ratio", waveform_shoulder_max_residual_cycle_period_error_ratio)
-    SET_DOUBLE("waveform.shoulder.min_residual_cycle_leg_duration_ratio", waveform_shoulder_min_residual_cycle_leg_duration_ratio)
-    SET_DOUBLE("waveform.middle.min_duration_ratio", waveform_middle_min_duration_ratio)
-    SET_DOUBLE("waveform.middle.max_duration_ratio", waveform_middle_max_duration_ratio)
-    SET_DOUBLE("waveform.middle.context_duration_ratio", waveform_middle_context_duration_ratio)
-    SET_DOUBLE("waveform.middle.min_trend_slope_ratio", waveform_middle_min_trend_slope_ratio)
-    SET_DOUBLE("waveform.middle.max_context_slope_delta_ratio", waveform_middle_max_context_slope_delta_ratio)
-    SET_DOUBLE("waveform.middle.min_slope_mismatch_ratio", waveform_middle_min_slope_mismatch_ratio)
-    SET_DOUBLE("waveform.middle.min_mismatching_sample_ratio", waveform_middle_min_mismatching_sample_ratio)
-    SET_U32("waveform.middle.min_mismatching_samples", waveform_middle_min_mismatching_samples)
-    SET_U32("waveform.middle.min_consecutive_mismatching_samples", waveform_middle_min_consecutive_mismatching_samples)
-    SET_DOUBLE("waveform.middle.min_bridge_deviation_ratio", waveform_middle_min_bridge_deviation_ratio)
-    SET_DOUBLE("waveform.middle.noise_multiplier", waveform_middle_noise_multiplier)
-    SET_DOUBLE("waveform.middle.max_mask_ratio_per_cycle", waveform_middle_max_mask_ratio_per_cycle)
-    SET_DOUBLE("fbbr.regime.period_tolerance_ratio", fbbr_regime_period_tolerance_ratio)
-    SET_DOUBLE("fbbr.regime.min_periodicity_correlation", fbbr_regime_min_periodicity_correlation)
-    SET_BOOL("fbbr.regime.periodic_upper_clip_is_hard_veto", fbbr_regime_periodic_upper_clip_is_hard_veto)
-    if(key == "trace.gate_trace_mode"){
-        config->trace_gate_trace_mode = value;
-        return true;
-    }
-    SET_U64("trace.gate_trace_sample_interval_us", trace_gate_trace_sample_interval_us)
-    SET_BOOL("trace.enable_cruise_window_trace", trace_enable_cruise_window_trace)
-    SET_BOOL("trace.enable_trusted_bw_selection_trace", trace_enable_trusted_bw_selection_trace)
-
-#undef SET_DOUBLE
-#undef SET_U32
-#undef SET_U64
-#undef SET_BOOL
-
-    WarnConfigLine(path, line_no, "unknown key: " + key);
-    return false;
-}
 
 bool LoadFBBRConfig(const std::string& path, FBBRConfig* config)
 {
-    std::ifstream in(path.c_str());
-    if(!in.is_open()){
-        std::cerr << "[fbbrConfig warning] unable to open config: "
-                  << path << "; using built-in defaults" << std::endl;
+    std::string error;
+    if(!dqc::LoadFBBRConfigFile(path, config, &error)){
+        std::cerr << "[fbbrConfig error] " << error << std::endl;
         return false;
-    }
-    std::string line;
-    uint32_t line_no = 0;
-    while(std::getline(in, line)){
-        ++line_no;
-        const size_t comment = line.find('#');
-        if(comment != std::string::npos){
-            line = line.substr(0, comment);
-        }
-        line = Trim(line);
-        if(line.empty()){
-            continue;
-        }
-        const size_t eq = line.find('=');
-        if(eq == std::string::npos){
-            WarnConfigLine(path, line_no, "expected key=value");
-            continue;
-        }
-        const std::string key = Trim(line.substr(0, eq));
-        const std::string value = Trim(line.substr(eq + 1));
-        if(key.empty()){
-            WarnConfigLine(path, line_no, "empty key");
-            continue;
-        }
-        SetFBBRConfigValue(config, key, value, path, line_no);
     }
     std::cout << "[fbbrConfig] loaded " << path << std::endl;
     return true;
@@ -493,7 +194,7 @@ void ApplyFBBRConfigToGlobals(const FBBRConfig& config)
     g_enable_cruise_window_trace =
         config.trace_enable_cruise_window_trace;
     g_enable_convergence_gate_trace =
-        config.trace_enable_trusted_bw_selection_trace;
+        config.trace_enable_beq_selection_trace;
 }
 
 void ApplyGlobalsToFBBRConfig(FBBRConfig* config)
@@ -513,7 +214,7 @@ void ApplyGlobalsToFBBRConfig(FBBRConfig* config)
         g_gate_trace_sample_interval_us;
     config->trace_enable_cruise_window_trace =
         g_enable_cruise_window_trace;
-    config->trace_enable_trusted_bw_selection_trace =
+    config->trace_enable_beq_selection_trace =
         g_enable_convergence_gate_trace;
 }
 
@@ -671,7 +372,7 @@ static Ptr<DqcSender> InstallDqc( dqc::CongestionControlType cc_type,
         }
     }
 		    // Configure FBBR oscillation parameters
-		    if(cc_type == kFBBR || cc_type == kFBBRServiceFair){
+		    if(cc_type == kFBBR){
 	        sendApp->ConfigureFBBR(g_fbbr_config, flow_index);
 	        sendApp->ConfigureFBBRConvergenceGate(g_enable_convergence_gate_trace,
 	                                                  g_enable_convergence_gate_control,
@@ -803,13 +504,11 @@ void ns3_fbbr(int ins, std::string algo, DqcTraceState *stat, double sim_time=60
     dqc::CongestionControlType cc = kFBBR;
     if(algo_key == "BBRv2"){
         cc = kBBRv2;
-    } else if(algo_key == "FBBR-ServiceFair"){
-        cc = kFBBRServiceFair;
     } else if(algo_key == "FBBR"){
         cc = kFBBR;
     } else {
         NS_ABORT_MSG("unsupported algorithm: " << algo
-                                               << " (supported: FBBR, FBBR-ServiceFair, BBRv2)");
+                                               << " (supported: FBBR, BBRv2)");
     }
 
     uint32_t max_bps=0;
@@ -942,9 +641,11 @@ int main (int argc, char *argv[]){
     std::string algo="FBBR";
 	    uint32_t run_id=1;
 	    uint32_t seed=1;
-	    g_fbbr_config_path =
+	g_fbbr_config_path =
 	        PreScanFBBRConfigPath(argc, argv, g_fbbr_config_path);
-	    LoadFBBRConfig(g_fbbr_config_path, &g_fbbr_config);
+	    if(!LoadFBBRConfig(g_fbbr_config_path, &g_fbbr_config)){
+	        return 1;
+	    }
 	    ApplyFBBRConfigToGlobals(g_fbbr_config);
 
 	    // Command line arguments
@@ -953,7 +654,7 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("sim_time", "Simulation time in seconds", sim_time);
     cmd.AddValue("trace_path", "Output trace directory path", trace_path);
     cmd.AddValue("outputDir", "Output trace directory path", output_dir);
-    cmd.AddValue("algo", "Congestion control: FBBR, FBBR-ServiceFair, or BBRv2", algo);
+    cmd.AddValue("algo", "Congestion control: FBBR or BBRv2", algo);
     cmd.AddValue("runId", "ns-3 RNG run id", run_id);
     cmd.AddValue("seed", "ns-3 RNG seed", seed);
 	    cmd.AddValue("enableConvergenceGateTrace", "Enable FBBR convergence-gate CSV trace", g_enable_convergence_gate_trace);
@@ -966,10 +667,6 @@ int main (int argc, char *argv[]){
     cmd.AddValue("enableHeavyTrace", "Enable per-packet/per-pacing heavy trace callbacks", g_enable_heavy_trace);
     cmd.AddValue("gateTraceMode", "FBBR gate trace mode: off, round_only, sampled_pacing, full", g_gate_trace_mode);
 	    cmd.AddValue("gateTraceSampleIntervalUs", "Minimum interval for sampled_pacing gate trace rows", g_gate_trace_sample_interval_us);
-	    cmd.AddValue("waveformRecvSignalMode", "Waveform receive signal: delivery_rate_latest or bandwidth_latest", g_fbbr_config.waveform_recv_signal_mode);
-	    cmd.AddValue("waveformInitialSettleRttMult", "Initial waveform settle RTT multiplier", g_fbbr_config.waveform_initial_settle_rtt_mult);
-	    cmd.AddValue("waveformPostAdjustSettleRttMult", "Post-adjust waveform settle RTT multiplier", g_fbbr_config.waveform_post_adjust_settle_rtt_mult);
-	    cmd.AddValue("waveformNegativeHalfFirst", "Start time waveform with the negative half-cycle", g_fbbr_config.waveform_negative_half_first);
 	    cmd.AddValue("waveformInitialWindowPeriods", "Initial waveform analysis periods", g_fbbr_config.waveform_initial_window_periods);
 	    cmd.AddValue("waveformExtendedWindowPeriods", "Extended waveform analysis periods", g_fbbr_config.waveform_extended_window_periods);
 	    cmd.AddValue("waveformMaxWindowPeriods", "Maximum waveform analysis periods", g_fbbr_config.waveform_max_window_periods);
@@ -983,25 +680,19 @@ int main (int argc, char *argv[]){
 	    cmd.AddValue("waveformClipMaxSlopeRatio", "Maximum clipping slope ratio", g_fbbr_config.waveform_clip_max_slope_ratio);
 	    cmd.AddValue("waveformDeltaDrateAmplitudeRatio", "Search delta ratio of recent Delivery Rate amplitude", g_fbbr_config.waveform_delta_drate_amplitude_ratio);
 	    cmd.AddValue("waveformDeltaFallbackBaselineRatio", "Fallback search delta ratio of injection baseline", g_fbbr_config.waveform_delta_fallback_baseline_ratio);
-	    cmd.AddValue("waveformPlateauMinDurationRatio", "Minimum plateau duration ratio", g_fbbr_config.waveform_plateau_min_duration_ratio);
-	    cmd.AddValue("waveformPlateauMaxSlopeRatio", "Maximum plateau slope ratio", g_fbbr_config.waveform_plateau_max_slope_ratio);
 	    cmd.AddValue("waveformPlateauMaxLevelSpanRatio", "Maximum plateau level span ratio", g_fbbr_config.waveform_plateau_max_level_span_ratio);
 	    cmd.AddValue("waveformPlateauExtremeDistanceRatio", "Plateau distance from cycle extreme", g_fbbr_config.waveform_plateau_extreme_distance_ratio);
-	    cmd.AddValue("waveformBaselineStepRatio", "Waveform baseline multiplicative step", g_fbbr_config.waveform_baseline_step_ratio);
-	    cmd.AddValue("waveformAmplitudeFloorRatio", "Waveform amplitude floor reference ratio", g_fbbr_config.waveform_amplitude_floor_ratio);
-	    cmd.AddValue("waveformClipFloorConfirmations", "Valid clip windows required at amplitude floor", g_fbbr_config.waveform_clip_floor_confirmations);
 	    cmd.AddValue("waveformMaxBaselineAdjustments", "Maximum waveform baseline adjustments", g_fbbr_config.waveform_max_baseline_adjustments);
-	    cmd.AddValue("waveformMaxInconclusiveExtensions", "Maximum one-period extensions after an inconclusive decision", g_fbbr_config.waveform_max_inconclusive_extensions);
 	    cmd.AddValue("waveformInconclusiveSignalAmplificationFactor", "Probe amplitude multiplier after a second inconclusive waveform decision", g_fbbr_config.waveform_inconclusive_signal_amplification_factor);
 	    cmd.AddValue("waveformInconclusiveSignalAmplificationMaxRatio", "Maximum amplified probe amplitude as a ratio of the cruise entry amplitude", g_fbbr_config.waveform_inconclusive_signal_amplification_max_ratio);
 	    cmd.AddValue("waveformMaxAppLimitedSampleRatio", "Maximum app-limited sample ratio", g_fbbr_config.waveform_max_app_limited_sample_ratio);
 	    cmd.AddValue("waveformMaxInterpolationGapPeriodRatio", "Maximum interpolation gap as period ratio", g_fbbr_config.waveform_max_interpolation_gap_period_ratio);
 	    cmd.AddValue("useEngineTimer", "Use DQC engine alarm timer; false uses processIntervalUs polling", g_use_engine_timer);
 	    cmd.AddValue("enableEquivalenceAuditTrace", "Enable packet/ACK/pacing audit traces for B/C equivalence checks", g_enable_equivalence_audit_trace);
-	    cmd.AddValue("stabilitySingleRoundExitThreshold", "TrustedBw selection MaxDRate single-round exit threshold", g_fbbr_config.stability_single_round_exit_threshold);
-	    cmd.AddValue("stabilityConsecutiveExitThreshold", "TrustedBw selection MaxDRate consecutive exit threshold", g_fbbr_config.stability_consecutive_exit_threshold);
-	    cmd.AddValue("stabilityStableRounds", "TrustedBw selection stable rounds", g_fbbr_config.stability_stable_rounds);
-	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "TrustedBw selection full-pipe growth threshold", g_fbbr_config.stability_full_pipe_growth_threshold);
+	    cmd.AddValue("stabilitySingleRoundExitThreshold", "Beq selection MaxDRate single-round exit threshold", g_fbbr_config.stability_single_round_exit_threshold);
+	    cmd.AddValue("stabilityConsecutiveExitThreshold", "Beq selection MaxDRate consecutive exit threshold", g_fbbr_config.stability_consecutive_exit_threshold);
+	    cmd.AddValue("stabilityStableRounds", "Beq selection stable rounds", g_fbbr_config.stability_stable_rounds);
+	    cmd.AddValue("stabilityFullPipeGrowthThreshold", "Beq selection full-pipe growth threshold", g_fbbr_config.stability_full_pipe_growth_threshold);
 	    // Per-flow parameters
     cmd.AddValue("freq1", "Flow 1 oscillation frequency (Hz)", g_freq_hz[0]);
     cmd.AddValue("freq2", "Flow 2 oscillation frequency (Hz)", g_freq_hz[1]);

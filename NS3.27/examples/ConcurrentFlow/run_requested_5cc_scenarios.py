@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the requested five-CC, six-scenario comparison matrix."""
+"""Run the requested four-CC, six-scenario comparison matrix."""
 
 import argparse
 import csv
@@ -20,7 +20,6 @@ DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 DEFAULT_FBBR_CONFIG = NS3_ROOT / "examples" / "CCconfig" / "fbbr_default.conf"
 CCS = (
     "FBBR",
-    "FBBR-ServiceFair",
     "BBRv2",
     "BBRv2plus",
     "oBBR",

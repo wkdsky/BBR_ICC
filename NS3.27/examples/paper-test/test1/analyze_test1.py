@@ -24,7 +24,6 @@ ALGORITHMS = [
     "BBRv2-ideal",
     "BBRv2",
     "FBBR",
-    "FBBR-ServiceFair",
 ]
 STAGE_COUNTS = [2, 4, 8, 16, 8, 4, 2]
 STAGE_LABELS = [
@@ -48,7 +47,6 @@ COLORS = {
     "BBRv2-ideal": "#000000",
     "BBRv2": "#E69F00",
     "FBBR": "#56B4E9",
-    "FBBR-ServiceFair": "#7A7A7A",
 }
 MARKERS = {
     "BBR-R": "o",
@@ -58,7 +56,6 @@ MARKERS = {
     "BBRv2-ideal": "P",
     "BBRv2": "v",
     "FBBR": "X",
-    "FBBR-ServiceFair": "<",
 }
 
 
@@ -817,7 +814,7 @@ def write_report(
         "- Bottleneck: C=100 Mbit/s, base RTT=40 ms, DropTail buffer=40 BDP.",
         "- Dynamic population: 2 -> 4 -> 8 -> 16 -> 8 -> 4 -> 2.",
         duration_line,
-        "- Algorithms: BBR-R, oBBR, BBRv2+, CUBIC, BBRv2-ideal, BBRv2, FBBR, FBBR-ServiceFair.",
+        "- Algorithms: BBR-R, oBBR, BBRv2+, CUBIC, BBRv2-ideal, BBRv2, FBBR.",
         "- BBRv2-ideal alone changes ProbeBW-UP admission: flow IDs enter in order and no two are in UP concurrently.",
         "- All other controllers, including BBRv2 without a suffix, retain their original control paths.",
         "- ProbeRTT is observed as a metric; no cross-algorithm ProbeRTT alias or control-path change is used.",

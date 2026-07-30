@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate FBBR TrustedBw selection and pacing invariants in trace trees."""
+"""Validate FBBR Beq selection and pacing invariants in trace trees."""
 
 import argparse
 import csv
@@ -9,12 +9,12 @@ from pathlib import Path
 
 REQUIRED_GATE_COLUMNS = {
     "current_native_bw_bps",
-    "trusted_bw_bps",
-    "trusted_bw_valid",
-    "trusted_bw_source",
-    "trusted_bw_cruise_id",
-    "trusted_bw_fresh",
-    "trusted_bw_application_valid",
+    "beq_bps",
+    "beq_valid",
+    "beq_source",
+    "beq_cruise_id",
+    "beq_fresh",
+    "beq_application_valid",
     "drate_spectral_integrity_score",
     "srtt_spectral_integrity_score",
     "joint_spectral_integrity_score",
@@ -86,11 +86,11 @@ def validate_trace_tree(results_dir):
         checked["gate"] += 1
         for line_no, row in enumerate(rows, 2):
             check_scores(path, line_no, row, violations)
-            trusted_valid = as_bool(row.get("trusted_bw_valid"))
-            trusted_bps = as_float(row.get("trusted_bw_bps"))
-            source = row.get("trusted_bw_source")
-            if not trusted_valid and (trusted_bps != 0.0 or source != "NONE"):
-                violations.append(f"{path}:{line_no}: invalid TrustedBw is not zero/NONE")
+            beq_valid = as_bool(row.get("beq_valid"))
+            beq_bps = as_float(row.get("beq_bps"))
+            source = row.get("beq_source")
+            if not beq_valid and (beq_bps != 0.0 or source != "NONE"):
+                violations.append(f"{path}:{line_no}: invalid Beq is not zero/NONE")
             if row.get("row_type") != "pacing":
                 continue
             base_source = row.get("pacing_base_source")
@@ -98,19 +98,19 @@ def validate_trace_tree(results_dir):
             native_bps = as_float(row.get("current_native_bw_bps"))
             gain = as_float(row.get("phase_pacing_gain"))
             final_bps = as_float(row.get("final_pacing_rate_bps"))
-            phase = row.get("trusted_bw_application_phase")
+            phase = row.get("beq_application_phase")
             if as_bool(row.get("is_cruise")) and base_source != "NATIVE_BBR":
                 violations.append(f"{path}:{line_no}: CRUISE did not use Native BBR baseline")
-            if base_source == "TRUSTED_BW":
+            if base_source == "BEQ":
                 if phase not in {"REFILL", "UP", "DOWN"}:
-                    violations.append(f"{path}:{line_no}: TrustedBw used outside REFILL/UP/DOWN")
-                if not (trusted_valid and as_bool(row.get("trusted_bw_fresh")) and
-                        as_bool(row.get("trusted_bw_application_valid"))):
-                    violations.append(f"{path}:{line_no}: TrustedBw baseline lacks fresh valid application")
-                if not close(base_bps, trusted_bps):
-                    violations.append(f"{path}:{line_no}: pacing baseline differs from TrustedBw")
+                    violations.append(f"{path}:{line_no}: Beq used outside REFILL/UP/DOWN")
+                if not (beq_valid and as_bool(row.get("beq_fresh")) and
+                        as_bool(row.get("beq_application_valid"))):
+                    violations.append(f"{path}:{line_no}: Beq baseline lacks fresh valid application")
+                if not close(base_bps, beq_bps):
+                    violations.append(f"{path}:{line_no}: pacing baseline differs from Beq")
                 if not close(final_bps, gain * base_bps):
-                    violations.append(f"{path}:{line_no}: TrustedBw pacing is not gain times baseline")
+                    violations.append(f"{path}:{line_no}: Beq pacing is not gain times baseline")
             elif base_source == "NATIVE_BBR":
                 if math.isfinite(native_bps) and native_bps > 0 and not close(base_bps, native_bps):
                     violations.append(f"{path}:{line_no}: native pacing baseline differs from NativeBw")
@@ -143,11 +143,11 @@ def validate_trace_tree(results_dir):
     for path in results_dir.rglob("*_cruise_best_full_load_window.csv"):
         fields, rows = read_rows(path)
         required = {
-            "best_trusted_bw",
-            "best_trusted_bw_source",
-            "trusted_bw_valid",
-            "trusted_bw_fresh",
-            "trusted_bw_application_valid",
+            "best_beq",
+            "best_beq_source",
+            "beq_valid",
+            "beq_fresh",
+            "beq_application_valid",
             "drate_spectral_integrity_score",
             "srtt_spectral_integrity_score",
             "joint_spectral_integrity_score",
@@ -163,16 +163,16 @@ def validate_trace_tree(results_dir):
         checked["summary"] += 1
         for line_no, row in enumerate(rows, 2):
             check_scores(path, line_no, row, violations)
-            valid = as_bool(row.get("trusted_bw_valid"))
+            valid = as_bool(row.get("beq_valid"))
             if valid and not as_bool(row.get("dual_signal_spectral_gate_pass")):
-                violations.append(f"{path}:{line_no}: published TrustedBw bypassed dual gate")
-            if valid and as_float(row.get("best_trusted_bw")) <= 0:
-                violations.append(f"{path}:{line_no}: valid TrustedBw is not positive")
+                violations.append(f"{path}:{line_no}: published Beq bypassed dual gate")
+            if valid and as_float(row.get("best_beq")) <= 0:
+                violations.append(f"{path}:{line_no}: valid Beq is not positive")
             if not valid and (
-                as_float(row.get("best_trusted_bw")) != 0.0 or
-                row.get("best_trusted_bw_source") != "NONE"
+                as_float(row.get("best_beq")) != 0.0 or
+                row.get("best_beq_source") != "NONE"
             ):
-                violations.append(f"{path}:{line_no}: invalid TrustedBw is not zero/NONE")
+                violations.append(f"{path}:{line_no}: invalid Beq is not zero/NONE")
 
     return checked, violations
 
@@ -183,7 +183,7 @@ def main():
     args, _ = parser.parse_known_args()
     checked, violations = validate_trace_tree(args.results_dir)
     report = [
-        "# TrustedBw Architecture Validation",
+        "# Beq Architecture Validation",
         "",
         f"- Gate files checked: {checked['gate']}",
         f"- Window files checked: {checked['window']}",
@@ -193,7 +193,7 @@ def main():
     ]
     report.extend(f"- {item}" for item in violations)
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    (args.results_dir / "trusted_bw_architecture_validation.md").write_text(
+    (args.results_dir / "beq_architecture_validation.md").write_text(
         "\n".join(report) + "\n", encoding="utf-8"
     )
     print("\n".join(report))

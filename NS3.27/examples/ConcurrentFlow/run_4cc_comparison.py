@@ -32,7 +32,6 @@ DEFAULT_LOG_ROOT = Path("/mnt/nasDisk_ds3617/wkd/1FreqBBR")
 
 CCS = ("BBRv2", "oBBR", "BBRv2plus", "FBBR")
 OPTIONAL_CCS = (
-    "FBBR-ServiceFair",
     "FreqCCv3",
     "BBR-R",
     "CUBIC",
@@ -440,12 +439,6 @@ ALGORITHM_PARAMS = {
         "algorithm": "FBBR",
         "notes": "以累计 delivered service 与正向 probing credit 构造短期 inflight envelope。",
     },
-    "FBBR-ServiceFair": {
-        "source": "src/dqc/model/thirdparty/congestion/fbbr_sender.cc",
-        "config_file": str(DEFAULT_FBBR_CONFIG),
-        "algorithm": "FBBR-ServiceFair",
-        "notes": "在 FBBR service envelope 上按 Cruise 周期施加服务率和排队延迟公平性控制。",
-    },
 }
 
 
@@ -578,7 +571,6 @@ def write_metadata(root: Path, args: argparse.Namespace, ccs: Iterable[str]) -> 
     }
     for cc in (
         "FBBR",
-        "FBBR-ServiceFair",
         "FreqCCv3",
     ):
         if cc in params:
@@ -736,7 +728,7 @@ def make_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "只运行指定 CC，可用逗号分隔。支持默认四种 CC，以及 "
-            "FBBR-ServiceFair、FreqCCv3、"
+            "FreqCCv3、"
             "BBR-R 和 CUBIC。"
         ),
     )
@@ -778,7 +770,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-heavy-trace", action=argparse.BooleanOptionalAction, default=False, help="是否开启 RTT/BW/sendrate 等重 trace。默认关闭。")
     parser.add_argument("--enable-queue-trace", action=argparse.BooleanOptionalAction, default=True, help="是否输出逐事件共享队列 trace；长实验可关闭并保留固定间隔 bottleneck_queue.csv。")
     parser.add_argument("--queue-sample-interval-us", type=int, default=200, help="bottleneck_queue.csv 固定采样间隔 us。默认 200。")
-    parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FBBR gate trace；绘制 Delivery Rate/TrustedBw 细节图时应开启。")
+    parser.add_argument("--enable-convergence-gate-trace", action=argparse.BooleanOptionalAction, default=False, help="是否输出 FBBR gate trace；绘制 Delivery Rate/Beq 细节图时应开启。")
     parser.add_argument("--gate-trace-mode", choices=("off", "round_only", "sampled_pacing", "full"), default="round_only", help="FBBR gate trace 粒度。细节图建议 sampled_pacing。")
     parser.add_argument("--fbbr-config", dest="fbbr_config", default=str(DEFAULT_FBBR_CONFIG), help="FBBR 配置文件路径；默认使用 fbbr_default.conf。")
     parser.add_argument("--seed", type=int, default=1, help="ns-3 RNG seed。默认 1。")

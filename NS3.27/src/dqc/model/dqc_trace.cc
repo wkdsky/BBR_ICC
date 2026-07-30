@@ -386,11 +386,6 @@ void DqcTrace::OnFBBRLoad(double window_start_s, double window_end_s,
         if(m_fbbrWaveformSearch.is_open()){
             m_fbbrWaveformSearch<<diagnostics<<"\n";
         }
-    }else if(label == "SERVICE_FAIRNESS"){
-        OpenFBBRServiceFairnessFile();
-        if(m_fbbrServiceFairness.is_open()){
-            m_fbbrServiceFairness<<diagnostics<<"\n";
-        }
     }else if(label == "CRUISE_SUMMARY"){
         OpenFBBRCruiseSummaryFile();
         if(m_fbbrCruiseSummary.is_open()){
@@ -444,7 +439,6 @@ void DqcTrace::Close(){
     CloseFBBRCruiseSummaryFile();
     CloseFBBRGateFile();
     CloseFBBRWaveformSearchFile();
-    CloseFBBRServiceFairnessFile();
     CloseFBBRSummaryFile();
     CloseStatsFile();
 }
@@ -553,12 +547,6 @@ void DqcTrace::CloseFBBRWaveformSearchFile(){
         m_fbbrWaveformSearch.close();
     }
 }
-void DqcTrace::CloseFBBRServiceFairnessFile(){
-    if(m_fbbrServiceFairness.is_open()){
-        m_fbbrServiceFairness.flush();
-        m_fbbrServiceFairness.close();
-    }
-}
 void DqcTrace::CloseFBBRSummaryFile(){
     if(m_fbbrSummary.is_open()){
         m_fbbrSummary.flush();
@@ -661,7 +649,7 @@ void DqcTrace::OpenFBBRCruiseSummaryFile(){
 	                                <<",best_srtt_waveform_quality,best_drate_amplitude_score,best_srtt_amplitude_score"
 	                                <<",best_drate_mean_kbps"
 	                                <<",cruise_end_native_bw_kbps,fair_share_bandwidth_kbps"
-	                                <<",best_trusted_bw,best_trusted_bw_source"
+	                                <<",best_beq,best_beq_source"
 	                                <<",best_full_load_quality_v1,best_full_load_quality_v2"
 	                                <<",drate_spectral_integrity_score"
 	                                <<",srtt_spectral_integrity_score"
@@ -671,15 +659,15 @@ void DqcTrace::OpenFBBRCruiseSummaryFile(){
 	                                <<",dual_signal_spectral_gate_pass"
 	                                <<",limiting_spectral_signal"
 	                                <<",best_spectral_invalid_reason"
-	                                <<",selection_native_bw_bps,trusted_bw_valid"
-	                                <<",trusted_bw_cruise_id,trusted_bw_fresh"
-	                                <<",trusted_bw_application_valid"
+	                                <<",selection_native_bw_bps,beq_valid"
+	                                <<",beq_cruise_id,beq_fresh"
+	                                <<",beq_application_valid"
 	                                <<",detector_mode,waveform_final_state"
 	                                <<",waveform_decision_count"
 	                                <<",waveform_baseline_adjustments"
 	                                <<",waveform_amplitude_reductions"
 	                                <<",waveform_underload_located"
-		                                <<",waveform_trusted_source"
+		                                <<",waveform_beq_source"
 		                                <<",fbbr_max_bw_valid"
 		                                <<",fbbr_max_bw_bps"
 		                                <<",fbbr_srtt_low_rtprop_valid"
@@ -781,17 +769,17 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",amplitude_after_bps,maxbw_attenuation_factor"
             <<",maxbw_actual_fluctuation_amplitude_bps"
             <<",maxbw_delivery_response_gain,maxbw_response_observed"
-            <<",trusted_baseline_locked"
-            <<",trusted_bw_candidate_update_count"
+            <<",beq_baseline_locked"
+            <<",beq_candidate_update_count"
             <<",search_continues_after_full_load"
-            <<",trusted_bw_candidate_bps,trusted_bw_candidate_source"
+            <<",beq_candidate_bps,beq_candidate_source"
             <<",invalid_reason,decision_rule"
             <<",delivery_rate_stat_sample_count"
             <<",delivery_rate_stats_valid"
             <<",delivery_rate_window_min_bps"
             <<",delivery_rate_window_max_bps"
             <<",delivery_rate_window_mean_bps"
-            <<",latest_trusted_bw_bps,smoothed_trusted_bw_bps"
+            <<",latest_beq_bps,smoothed_beq_bps"
             <<",drate_positive_half_clipped,drate_negative_half_clipped"
             <<",drate_only_negative_half"
             <<",drate_positive_half_span_bps,drate_negative_half_span_bps"
@@ -874,7 +862,7 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",inconclusive_extension_count,inconclusive_amplification_count"
             <<",initial_probe_amplitude_bps,current_probe_amplitude_bps"
             <<",inconclusive_amplitude_cap_bps,rolling_retry_count"
-            <<",fbbr_previous_trusted_bw,fbbr_previous_trusted_source"
+            <<",fbbr_previous_beq,fbbr_previous_beq_source"
             <<",fbbr_plan_inflight,fbbr_service_inflight"
             <<",fbbr_positive_probe_credit,fbbr_service_budget"
             <<",fbbr_envelope,fbbr_extra_acked,fbbr_inflight_cap"
@@ -883,30 +871,6 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",fbbr_app_limited_contaminated"
             <<",fbbr_projection_active,fbbr_service_restriction"
             <<",fbbr_enforced_excess,fbbr_cap_binding_fraction\n";
-    }
-}
-void DqcTrace::OpenFBBRServiceFairnessFile(){
-    if(!(m_enable & E_DQC_FBBR_LOAD) ||
-       m_fbbrServiceFairness.is_open()) return;
-    char buf[FILENAME_MAX];
-    memset(buf,0,FILENAME_MAX);
-    std::string path;
-    if(0==kDqcTracePath.size()){
-        path=std::string (getcwd(buf, FILENAME_MAX)) + "/traces/flow"
-            +std::to_string(m_id)+"_service_fairness.csv";
-    }else{
-        path=std::string(kDqcTracePath)+"flow"+std::to_string(m_id)
-            +"_service_fairness.csv";
-    }
-    m_fbbrServiceFairness.open(path.c_str(), std::fstream::out);
-    if(m_fbbrServiceFairness.is_open()){
-        m_fbbrServiceFairness
-            <<"time_s,flow_id,cruise_id,event,regime"
-            <<",control_baseline_bw,control_baseline_valid,fairness_cycle_count"
-            <<",fairness_action,qdelay_ewma,qdelay_trend"
-            <<",fair_service_rate,service_rate_change"
-            <<",alpha,beta,raw_regime_candidate"
-            <<",final_regime_candidate\n";
     }
 }
 void DqcTrace::OpenFBBRSummaryFile(){
@@ -924,9 +888,9 @@ void DqcTrace::OpenFBBRSummaryFile(){
     m_fbbrSummary.open(path.c_str(), std::fstream::out);
     if(m_fbbrSummary.is_open()){
         m_fbbrSummary
-            <<"algorithm,flow_id,previous_trusted_time_ratio"
-            <<",previous_trusted_guard_source_time_ratio"
-            <<",previous_trusted_invalid_time_ratio"
+            <<"algorithm,flow_id,previous_beq_time_ratio"
+            <<",previous_beq_guard_source_time_ratio"
+            <<",previous_beq_invalid_time_ratio"
             <<",projection_active_time_ratio"
             <<",service_history_valid_time_ratio"
             <<",app_limited_fallback_time_ratio"
@@ -959,11 +923,11 @@ void DqcTrace::OpenFBBRGateFile(){
 	                       <<",freq_tool_needed,freq_tool_on,w_freq"
 	                       <<",unstable_episode_id,unstable_episode_active"
 	                       <<",selection_native_bw_bps,current_native_bw_bps"
-	                       <<",trusted_bw_bps,trusted_bw_valid,trusted_bw_conf"
-	                       <<",trusted_bw_source,trusted_bw_cruise_id,trusted_bw_fresh"
-	                       <<",trusted_bw_application_valid"
-	                       <<",trusted_bw_ready_for_post_cruise"
-	                       <<",trusted_bw_application_phase,trusted_bw_invalid_reason"
+	                       <<",beq_bps,beq_valid,beq_conf"
+	                       <<",beq_source,beq_cruise_id,beq_fresh"
+	                       <<",beq_application_valid"
+	                       <<",beq_ready_for_post_cruise"
+	                       <<",beq_application_phase,beq_invalid_reason"
 	                       <<",drate_spectral_integrity_score"
 	                       <<",srtt_spectral_integrity_score"
 	                       <<",joint_spectral_integrity_score"
@@ -981,10 +945,10 @@ void DqcTrace::OpenFBBRGateFile(){
 	                       <<",maxbw_response_observed"
 	                       <<",sample_is_app_limited,sample_valid"
 	                       <<",merged_rescue_attempted,merged_rescue_success"
-	                       <<",trusted_bw_selection_compute_us"
+	                       <<",beq_selection_compute_us"
 	                       <<",normal_window_count,merged_window_count"
 	                       <<",spectral_invalid_count"
-	                       <<",trusted_bw_cleared_on_cruise_start"<<std::endl;
+	                       <<",beq_cleared_on_cruise_start"<<std::endl;
     }
 }
 DqcTraceState::DqcTraceState(std::string name){

@@ -16,6 +16,7 @@
 #include "ns3/applications-module.h"
 #include "ns3/core-module.h"
 #include "ns3/dqc-module.h"
+#include "ns3/fbbr_config_loader.h"
 #include "ns3/fbbr_sender.h"
 #include "ns3/internet-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
@@ -193,33 +194,6 @@ Trim(const std::string& in)
     return in.substr(begin, end - begin);
 }
 
-std::string
-ToLower(std::string value)
-{
-    for (size_t i = 0; i < value.size(); ++i)
-    {
-        value[i] =
-            static_cast<char>(std::tolower(static_cast<unsigned char>(value[i])));
-    }
-    return value;
-}
-
-bool
-ParseBoolValue(const std::string& value, bool* out)
-{
-    const std::string lower = ToLower(Trim(value));
-    if (lower == "true" || lower == "1" || lower == "yes" || lower == "on")
-    {
-        *out = true;
-        return true;
-    }
-    if (lower == "false" || lower == "0" || lower == "no" || lower == "off")
-    {
-        *out = false;
-        return true;
-    }
-    return false;
-}
 
 bool
 ParseDoubleValue(const std::string& value, double* out)
@@ -240,434 +214,15 @@ ParseDoubleValue(const std::string& value, double* out)
     return false;
 }
 
-bool
-ParseUintValue(const std::string& value, uint32_t* out)
-{
-    try
-    {
-        size_t used = 0;
-        const unsigned long parsed = std::stoul(value, &used);
-        if (Trim(value.substr(used)).empty())
-        {
-            *out = static_cast<uint32_t>(parsed);
-            return true;
-        }
-    }
-    catch (...)
-    {
-    }
-    return false;
-}
-
-bool
-ParseUint64Value(const std::string& value, uint64_t* out)
-{
-    try
-    {
-        size_t used = 0;
-        const unsigned long long parsed = std::stoull(value, &used);
-        if (Trim(value.substr(used)).empty())
-        {
-            *out = static_cast<uint64_t>(parsed);
-            return true;
-        }
-    }
-    catch (...)
-    {
-    }
-    return false;
-}
-
-void
-WarnConfigLine(const std::string& path,
-               uint32_t line_no,
-               const std::string& message)
-{
-    std::cerr << "[fbbr-config warning] " << path << ":" << line_no << ": "
-              << message << std::endl;
-}
-
-template <typename Config>
-bool
-SetCommonFrequencyConfigValue(Config* config,
-                              const std::string& key,
-                              const std::string& value,
-                              const std::string& path,
-                              uint32_t line_no)
-{
-    double d = 0.0;
-    uint32_t u32 = 0;
-    bool b = false;
-    uint64_t u64 = 0;
-
-    if (key.rfind("flow.", 0) == 0)
-    {
-        const size_t id_begin = 5;
-        const size_t id_end = key.find('.', id_begin);
-        if (id_end == std::string::npos)
-        {
-            WarnConfigLine(path, line_no, "invalid flow key: " + key);
-            return false;
-        }
-        uint32_t flow_id = 0;
-        if (!ParseUintValue(key.substr(id_begin, id_end - id_begin), &flow_id))
-        {
-            WarnConfigLine(path, line_no, "invalid flow id in key: " + key);
-            return false;
-        }
-        const std::string field = key.substr(id_end + 1);
-        auto& flow = config->flow[flow_id];
-        if (field == "modulation_freq_hz")
-        {
-            if (!ParseDoubleValue(value, &d))
-            {
-                WarnConfigLine(path, line_no, "invalid double for " + key);
-                return false;
-            }
-            flow.modulation_freq_hz = d;
-            flow.has_modulation_freq_hz = true;
-            return true;
-        }
-        if (field == "fixed_amplitude_mbps")
-        {
-            if (!ParseDoubleValue(value, &d))
-            {
-                WarnConfigLine(path, line_no, "invalid double for " + key);
-                return false;
-            }
-            flow.fixed_amplitude_mbps = d;
-            flow.has_fixed_amplitude_mbps = true;
-            return true;
-        }
-        WarnConfigLine(path, line_no, "unknown flow field: " + key);
-        return false;
-    }
-
-#define SET_DOUBLE(KEY, FIELD)                                                \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseDoubleValue(value, &d))                                      \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid double for " + key);       \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = d;                                                    \
-        return true;                                                          \
-    }
-#define SET_U32(KEY, FIELD)                                                   \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseUintValue(value, &u32))                                      \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid uint for " + key);         \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = u32;                                                  \
-        return true;                                                          \
-    }
-#define SET_U64(KEY, FIELD)                                                   \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseUint64Value(value, &u64))                                    \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid uint64 for " + key);       \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = u64;                                                  \
-        return true;                                                          \
-    }
-#define SET_BOOL(KEY, FIELD)                                                  \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseBoolValue(value, &b))                                        \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid bool for " + key);         \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = b;                                                    \
-        return true;                                                          \
-    }
-
-    SET_DOUBLE("default_modulation_freq_hz", default_modulation_freq_hz)
-    if (key == "default_amplitude_mode")
-    {
-        config->default_amplitude_mode = value;
-        return true;
-    }
-    SET_DOUBLE("default_fixed_amplitude_mbps", default_fixed_amplitude_mbps)
-    SET_DOUBLE("stability.single_round_exit_threshold",
-               stability_single_round_exit_threshold)
-    SET_DOUBLE("stability.consecutive_exit_threshold",
-               stability_consecutive_exit_threshold)
-    SET_U32("stability.stable_rounds", stability_stable_rounds)
-    SET_DOUBLE("stability.full_pipe_growth_threshold",
-               stability_full_pipe_growth_threshold)
-    SET_BOOL("trusted_bw.clear_on_cruise_start",
-             trusted_bw_clear_on_cruise_start)
-    if (key == "trace.gate_trace_mode")
-    {
-        config->trace_gate_trace_mode = value;
-        return true;
-    }
-    SET_U64("trace.gate_trace_sample_interval_us",
-            trace_gate_trace_sample_interval_us)
-    SET_BOOL("trace.enable_cruise_window_trace",
-             trace_enable_cruise_window_trace)
-    SET_BOOL("trace.enable_trusted_bw_selection_trace",
-             trace_enable_trusted_bw_selection_trace)
-
-#undef SET_DOUBLE
-#undef SET_U32
-#undef SET_U64
-#undef SET_BOOL
-
-    WarnConfigLine(path, line_no, "unknown key: " + key);
-    return false;
-}
-
-bool
-SetFBBRConfigValue(dqc::FBBRConfig* config,
-                      const std::string& key,
-                      const std::string& value,
-                      const std::string& path,
-                      uint32_t line_no)
-{
-    double d = 0.0;
-    uint32_t u32 = 0;
-    bool b = false;
-
-    if (key == "waveform.recv_signal_mode")
-    {
-        config->waveform_recv_signal_mode = value;
-        return true;
-    }
-    if (key == "waveform.negative_half_first")
-    {
-        if (!ParseBoolValue(value, &b))
-        {
-            WarnConfigLine(path, line_no, "invalid bool for " + key);
-            return false;
-        }
-        config->waveform_negative_half_first = b;
-        return true;
-    }
-    if (key == "pacing.minimum_rate_mbps")
-    {
-        if (!ParseDoubleValue(value, &d))
-        {
-            WarnConfigLine(path, line_no, "invalid double for " + key);
-            return false;
-        }
-        config->pacing_minimum_rate_mbps = d;
-        return true;
-    }
-
-#define SET_WAVEFORM_DOUBLE(KEY, FIELD)                                        \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseDoubleValue(value, &d))                                     \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid double for " + key);       \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = d;                                                    \
-        return true;                                                          \
-    }
-#define SET_WAVEFORM_U32(KEY, FIELD)                                           \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseUintValue(value, &u32))                                     \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid uint for " + key);         \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = u32;                                                  \
-        return true;                                                          \
-    }
-#define SET_WAVEFORM_BOOL(KEY, FIELD)                                          \
-    if (key == KEY)                                                           \
-    {                                                                         \
-        if (!ParseBoolValue(value, &b))                                       \
-        {                                                                     \
-            WarnConfigLine(path, line_no, "invalid bool for " + key);         \
-            return false;                                                     \
-        }                                                                     \
-        config->FIELD = b;                                                    \
-        return true;                                                          \
-    }
-
-    SET_WAVEFORM_DOUBLE("waveform.initial_settle_rtt_mult",
-                        waveform_initial_settle_rtt_mult)
-    SET_WAVEFORM_DOUBLE("waveform.post_adjust_settle_rtt_mult",
-                        waveform_post_adjust_settle_rtt_mult)
-    SET_WAVEFORM_DOUBLE("waveform.initial_window_periods",
-                        waveform_initial_window_periods)
-    SET_WAVEFORM_DOUBLE("waveform.extended_window_periods",
-                        waveform_extended_window_periods)
-    SET_WAVEFORM_DOUBLE("waveform.max_window_periods",
-                        waveform_max_window_periods)
-    SET_WAVEFORM_DOUBLE("waveform.period_tolerance_ratio",
-                        waveform_period_tolerance_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.min_periodicity_correlation",
-                        waveform_min_periodicity_correlation)
-    SET_WAVEFORM_DOUBLE("waveform.min_cycle_coverage_ratio",
-                        waveform_min_cycle_coverage_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.masked_min_cycle_coverage_ratio",
-                        waveform_masked_min_cycle_coverage_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.local_slope_window_period_ratio",
-                        waveform_local_slope_window_period_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.min_local_slope_window_ms",
-                        waveform_min_local_slope_window_ms)
-    SET_WAVEFORM_DOUBLE("waveform.clip_min_duration_ratio",
-                        waveform_clip_min_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.clip_min_half_overlap_ratio",
-                        waveform_clip_min_half_overlap_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.clip_max_slope_ratio",
-                        waveform_clip_max_slope_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.delta_drate_amplitude_ratio",
-                        waveform_delta_drate_amplitude_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.delta_fallback_baseline_ratio",
-                        waveform_delta_fallback_baseline_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.plateau_min_duration_ratio",
-                        waveform_plateau_min_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.plateau_max_slope_ratio",
-                        waveform_plateau_max_slope_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.plateau_max_level_span_ratio",
-                        waveform_plateau_max_level_span_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.plateau_extreme_distance_ratio",
-                        waveform_plateau_extreme_distance_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.baseline_step_ratio",
-                        waveform_baseline_step_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.amplitude_floor_ratio",
-                        waveform_amplitude_floor_ratio)
-    SET_WAVEFORM_U32("waveform.clip_floor_confirmations",
-                     waveform_clip_floor_confirmations)
-    SET_WAVEFORM_U32("waveform.max_baseline_adjustments",
-                     waveform_max_baseline_adjustments)
-    SET_WAVEFORM_U32("waveform.max_inconclusive_extensions",
-                     waveform_max_inconclusive_extensions)
-    SET_WAVEFORM_DOUBLE("waveform.inconclusive_signal_amplification_factor",
-                        waveform_inconclusive_signal_amplification_factor)
-    SET_WAVEFORM_DOUBLE("waveform.inconclusive_signal_amplification_max_ratio",
-                        waveform_inconclusive_signal_amplification_max_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.max_app_limited_sample_ratio",
-                        waveform_max_app_limited_sample_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.max_interpolation_gap_period_ratio",
-                        waveform_max_interpolation_gap_period_ratio)
-    SET_WAVEFORM_DOUBLE("goertzel.min_coherent_power_ratio",
-                        goertzel_min_coherent_power_ratio)
-    SET_WAVEFORM_DOUBLE("fbbr.regime.long_top_horizontal_duration_ratio", fbbr_regime_long_top_horizontal_duration_ratio)
-    SET_WAVEFORM_DOUBLE("fbbr.regime.long_bottom_horizontal_duration_ratio", fbbr_regime_long_bottom_horizontal_duration_ratio)
-    SET_WAVEFORM_U32("fbbr.wave_fidelity.no_wave_trigger_windows", fbbr_wave_fidelity_no_wave_trigger_windows)
-    SET_WAVEFORM_U32("fbbr.wave_fidelity.retry_window_advance_periods", fbbr_wave_fidelity_retry_window_advance_periods)
-    SET_WAVEFORM_DOUBLE("waveform.activity.amplitude_noise_multiplier", waveform_activity_amplitude_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.activity.min_level_ratio", waveform_activity_min_level_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.activity.step_noise_multiplier", waveform_activity_step_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.activity.min_normalized_step_slope", waveform_activity_min_normalized_step_slope)
-    SET_WAVEFORM_U32("waveform.activity.min_active_steps", waveform_activity_min_active_steps)
-    SET_WAVEFORM_DOUBLE("waveform.activity.min_active_step_ratio", waveform_activity_min_active_step_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.activity.min_directional_change_ratio", waveform_activity_min_directional_change_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.activity.min_significant_path_ratio", waveform_activity_min_significant_path_ratio)
-    SET_WAVEFORM_U32("waveform.activity.min_slope_reversals", waveform_activity_min_slope_reversals)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.continuous_min_duration_ratio", waveform_horizontal_continuous_min_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_valid_coverage_ratio", waveform_horizontal_min_valid_coverage_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_flat_fraction", waveform_horizontal_min_flat_fraction)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_local_slope_ratio", waveform_horizontal_max_local_slope_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_side_slope_ratio", waveform_horizontal_min_side_slope_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_boundary_kink_ratio", waveform_horizontal_min_boundary_kink_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_level_span_ratio", waveform_horizontal_max_level_span_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.max_total_drift_ratio", waveform_horizontal_max_total_drift_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.min_side_change_ratio", waveform_horizontal_min_side_change_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.amplitude_noise_multiplier", waveform_horizontal_amplitude_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.level_span_noise_multiplier", waveform_horizontal_level_span_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.slope_noise_multiplier", waveform_horizontal_slope_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.horizontal.extreme_distance_ratio", waveform_horizontal_extreme_distance_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_period_error_ratio", waveform_repeated_clip_max_period_error_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_level_delta_ratio", waveform_repeated_clip_max_level_delta_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_contact_level_tolerance_ratio", waveform_repeated_clip_contact_level_tolerance_ratio)
-    SET_WAVEFORM_U32("waveform.repeated_clip_min_contact_samples_per_cycle", waveform_repeated_clip_min_contact_samples_per_cycle)
-    SET_WAVEFORM_U32("waveform.repeated_clip_min_total_contact_samples", waveform_repeated_clip_min_total_contact_samples)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_contact_sample_ratio", waveform_repeated_clip_min_contact_sample_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_contact_span_ratio_of_window", waveform_repeated_clip_min_contact_span_ratio_of_window)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_pooled_flat_fraction", waveform_repeated_clip_min_pooled_flat_fraction)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_verified_boundary_fraction", waveform_repeated_clip_min_verified_boundary_fraction)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_outside_excursion_ratio", waveform_repeated_clip_min_outside_excursion_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_min_extrapolated_overshoot_ratio", waveform_repeated_clip_min_extrapolated_overshoot_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_merge_gap_ratio", waveform_repeated_clip_merge_gap_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.repeated_clip_max_missing_gap_ratio", waveform_repeated_clip_max_missing_gap_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_half_overlap_ratio", waveform_shoulder_min_half_overlap_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_side_change_ratio", waveform_shoulder_min_side_change_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.shoulder.max_residual_cycle_period_error_ratio", waveform_shoulder_max_residual_cycle_period_error_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.shoulder.min_residual_cycle_leg_duration_ratio", waveform_shoulder_min_residual_cycle_leg_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.min_duration_ratio", waveform_middle_min_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.max_duration_ratio", waveform_middle_max_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.context_duration_ratio", waveform_middle_context_duration_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.min_trend_slope_ratio", waveform_middle_min_trend_slope_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.max_context_slope_delta_ratio", waveform_middle_max_context_slope_delta_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.min_slope_mismatch_ratio", waveform_middle_min_slope_mismatch_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.min_mismatching_sample_ratio", waveform_middle_min_mismatching_sample_ratio)
-    SET_WAVEFORM_U32("waveform.middle.min_mismatching_samples", waveform_middle_min_mismatching_samples)
-    SET_WAVEFORM_U32("waveform.middle.min_consecutive_mismatching_samples", waveform_middle_min_consecutive_mismatching_samples)
-    SET_WAVEFORM_DOUBLE("waveform.middle.min_bridge_deviation_ratio", waveform_middle_min_bridge_deviation_ratio)
-    SET_WAVEFORM_DOUBLE("waveform.middle.noise_multiplier", waveform_middle_noise_multiplier)
-    SET_WAVEFORM_DOUBLE("waveform.middle.max_mask_ratio_per_cycle", waveform_middle_max_mask_ratio_per_cycle)
-    SET_WAVEFORM_DOUBLE("fbbr.regime.period_tolerance_ratio", fbbr_regime_period_tolerance_ratio)
-    SET_WAVEFORM_DOUBLE("fbbr.regime.min_periodicity_correlation", fbbr_regime_min_periodicity_correlation)
-    SET_WAVEFORM_BOOL("fbbr.regime.periodic_upper_clip_is_hard_veto", fbbr_regime_periodic_upper_clip_is_hard_veto)
-
-#undef SET_WAVEFORM_DOUBLE
-#undef SET_WAVEFORM_U32
-#undef SET_WAVEFORM_BOOL
-
-    return SetCommonFrequencyConfigValue(
-        config, key, value, path, line_no);
-}
 
 bool
 LoadFBBRConfig(const std::string& path, dqc::FBBRConfig* config)
 {
-    if (path.empty())
+    std::string error;
+    if (!dqc::LoadFBBRConfigFile(path, config, &error))
     {
+        std::cerr << "[fbbr-config error] " << error << std::endl;
         return false;
-    }
-
-    std::ifstream in(path.c_str());
-    if (!in.is_open())
-    {
-        std::cerr << "[fbbr-config warning] unable to open config: " << path
-                  << "; using built-in defaults" << std::endl;
-        return false;
-    }
-
-    std::string line;
-    uint32_t line_no = 0;
-    while (std::getline(in, line))
-    {
-        ++line_no;
-        const size_t comment = line.find('#');
-        if (comment != std::string::npos)
-        {
-            line = line.substr(0, comment);
-        }
-        line = Trim(line);
-        if (line.empty())
-        {
-            continue;
-        }
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos)
-        {
-            WarnConfigLine(path, line_no, "expected key=value");
-            continue;
-        }
-        const std::string key = Trim(line.substr(0, eq));
-        const std::string value = Trim(line.substr(eq + 1));
-        if (key.empty())
-        {
-            WarnConfigLine(path, line_no, "empty key");
-            continue;
-        }
-        SetFBBRConfigValue(config, key, value, path, line_no);
     }
     std::cout << "[fbbr-config] loaded " << path << std::endl;
     return true;
@@ -1127,10 +682,6 @@ ParseAlgorithm(const std::string& name)
     {
         return {dqc::kFBBR, "FBBR", false, true};
     }
-    if (key == "FBBR-ServiceFair")
-    {
-        return {dqc::kFBBRServiceFair, "FBBR-ServiceFair", false, true};
-    }
     if (key == "FreqCCv3")
     {
         return {dqc::kFreqCCv3, "FreqCCv3", false, true};
@@ -1141,7 +692,7 @@ ParseAlgorithm(const std::string& name)
     }
     NS_ABORT_MSG("unsupported algorithm: " << name
                                            << " (supported: CUBIC, BBR-R, oBBR, BBRv2plus, "
-                                              "FBBR, FBBR-ServiceFair, "
+                                              "FBBR, "
                                               "FreqCCv3, BBRv2)");
 }
 
@@ -1426,7 +977,9 @@ BuildFlowConfigs(uint32_t n_flows,
 
         if (flow.algo.is_fbbr)
         {
-            LoadFBBRConfig(flow.config_path, &flow.fbbr_config);
+            NS_ABORT_MSG_IF(!LoadFBBRConfig(flow.config_path, &flow.fbbr_config),
+                            "FBBR requires a valid configuration file: "
+                                << flow.config_path);
         }
         else if (!flow.config_path.empty())
         {
@@ -1851,7 +1404,7 @@ main(int argc, char* argv[])
     cmd.AddValue("simTime", "Simulation time in seconds", sim_time_s);
     cmd.AddValue("sim_time", "Alias of simTime", sim_time_s);
     cmd.AddValue("algos",
-                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FBBR-ServiceFair, FreqCCv3, BBRv2",
+                 "Comma list of algorithms: oBBR, BBRv2plus, FBBR, FreqCCv3, BBRv2",
                  algos);
     cmd.AddValue("startTimes",
                  "Comma list of per-flow injection times in seconds",

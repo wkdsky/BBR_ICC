@@ -32,6 +32,7 @@ public:
     }
 	void Bind(uint16_t port);
 	InetSocketAddress GetLocalAddress();
+    uint64_t GetReceivedBytes() const { return m_recvBytes; }
     bool OnStreamFrame(dqc::PacketStream &frame) override;
     void OnError(dqc::ProtoFramer* framer) override;
     void OnEcnMarkCount(uint64_t ecn_ce_count) override;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Plot BBRv2 vs FBBR raw delivery-rate samples, sampling windows, and
-peak-triggered maxBw / CRUISE-exit TrustedBw update trajectories.
+peak-triggered maxBw / CRUISE-exit Beq update trajectories.
 """
 
 import argparse
@@ -20,7 +20,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Create a BBRv2 vs FBBR delivery-rate comparison with "
-            "maxBw and TrustedBw update trajectories."
+            "maxBw and Beq update trajectories."
         )
     )
     parser.add_argument(
@@ -85,7 +85,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "TrustedBw selected from the corresponding --highlight-window; "
+            "Beq selected from the corresponding --highlight-window; "
             "it is shown as being committed at that CRUISE exit."
         ),
     )
@@ -96,10 +96,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--highlight-label",
-        default="TrustedBw",
+        default="Beq",
         help=(
             "Text used for the highlighted-window mean annotation. "
-            "Default: TrustedBw."
+            "Default: Beq."
         ),
     )
     parser.add_argument(
@@ -123,7 +123,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--initial-state-value-mbps",
         type=float,
         default=None,
-        help="Initial maxBw/TrustedBw state value at the left plot boundary.",
+        help="Initial maxBw/Beq state value at the left plot boundary.",
     )
     parser.add_argument(
         "--relative-time-axis",
