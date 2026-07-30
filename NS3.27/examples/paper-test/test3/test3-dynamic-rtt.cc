@@ -256,7 +256,7 @@ class DynamicRttExperiment {
                 << "expected_bdp_bytes,aggregate_inflight_bytes,"
                 << "excess_inflight_bytes,queue_bytes,queue_delay_ms,"
                 << "sum_pacing_bps,sum_max_bw_bps,snapshot_flow_count,"
-                << "mean_srtt_us,mean_min_rtt_us,mean_fbbr_rtprop_us";
+                << "mean_srtt_us,mean_min_rtt_us";
     for (uint32_t flow_id = 1; flow_id <= kFixedFlows; ++flow_id) {
       timeseries_ << ",flow" << flow_id << "_received_bytes";
     }
@@ -354,7 +354,6 @@ class DynamicRttExperiment {
     uint64_t sum_max_bw = 0;
     uint64_t sum_srtt_us = 0;
     uint64_t sum_min_rtt_us = 0;
-    uint64_t sum_fbbr_rtprop_us = 0;
     uint32_t snapshot_flow_count = 0;
     for (const FlowRuntime& flow : flows_) {
       DqcSender::Bbr2ExperimentSnapshot snapshot;
@@ -367,7 +366,6 @@ class DynamicRttExperiment {
       sum_max_bw += snapshot.max_bw_bps;
       sum_srtt_us += snapshot.srtt_us;
       sum_min_rtt_us += snapshot.min_rtt_us;
-      sum_fbbr_rtprop_us += snapshot.fbbr_rtprop_us;
     }
     const uint64_t excess_inflight = aggregate_inflight > expected_bdp_bytes
         ? aggregate_inflight - expected_bdp_bytes
@@ -380,9 +378,6 @@ class DynamicRttExperiment {
     const double mean_min_rtt_us = snapshot_flow_count > 0
         ? static_cast<double>(sum_min_rtt_us) / snapshot_flow_count
         : 0.0;
-    const double mean_fbbr_rtprop_us = snapshot_flow_count > 0
-        ? static_cast<double>(sum_fbbr_rtprop_us) / snapshot_flow_count
-        : 0.0;
     timeseries_ << algorithm_ << "," << ModeName() << "," << seed_ << ","
                 << run_id_ << "," << std::fixed << std::setprecision(6)
                 << now_s << "," << stage_index << "," << stage.base_rtt_s
@@ -391,7 +386,7 @@ class DynamicRttExperiment {
                 << excess_inflight << "," << queue_bytes << ","
                 << queue_delay_ms << "," << sum_pacing << "," << sum_max_bw
                 << "," << snapshot_flow_count << "," << mean_srtt_us << ","
-                << mean_min_rtt_us << "," << mean_fbbr_rtprop_us;
+                << mean_min_rtt_us;
     for (const FlowRuntime& flow : flows_) {
       timeseries_ << "," << flow.receiver->GetReceivedBytes();
     }

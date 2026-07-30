@@ -66,7 +66,7 @@ BBRv2 STARTUP / DRAIN / PROBE_BW
           离开 CRUISE：波形 BEQ -> guardBw -> 上轮 BEQ -> 原生带宽回退
                  |
                  v
-          REFILL / UP / DOWN 使用新鲜 BEQ；GetCongestionWindow 受服务包络限制
+          REFILL / UP / DOWN 使用新鲜 BEQ；GetCongestionWindow 直接返回原生 cwnd
 ~~~
 
 CRUISE 的原生退出在活动波形周期中会延迟到下一个周期边界，以避免截断 0 -> -1 -> 0 -> +1 -> 0 的激励。发生丢包或 recovery 时，安全退出不等待该边界。
@@ -95,7 +95,7 @@ q = ((t - probe_epoch_start) mod T) / T
 - Nsr 支持 N=1..20，20sr 的含义是 SR/20，不是 20*SR。
 - fixed_mbps、数值 Mbps 和旧 Miu 模式仍可解析，但当前 4sr 下不生效。
 - 若 B <= F，Aeff=0；否则 Aeff=min(A, B-F)。这保证负半波不会把 pacing 压到 F 以下。
-- PROBE_CRUISE 的 cwnd gain 固定为 1.25；由上一轮 RTprop 刷新触发的 PROBE_DOWN pacing gain 固定为 0.75。二者不是配置文件参数。
+- PROBE_CRUISE 的 cwnd gain 固定为 1.1；由上一轮 RTprop 刷新触发的 PROBE_DOWN pacing gain 固定为 0.75。二者不是配置文件参数。
 
 ### 4.2 收敛门控
 
@@ -340,27 +340,9 @@ guardBw = s2
 
 第一次有效样本令 s1=s2=raw。每轮 CRUISE 只重置 guard_updated_this_cruise 和测量窗口；滤波状态可跨 CRUISE 保留，但只有当前轮确实更新过它才允许作为后备 BEQ。
 
-## 10. Inflight 服务包络
+## 10. (已移除) Inflight 服务包络
 
-FBBR 不替换 BBRv2 原生 cwnd 的全部逻辑。它在 GetCongestionWindow 返回值上施加一个额外上限：
-
-1. 在最近一个 RTprop 内，积分记录的 target_rate，得到 plan_inflight。
-2. 同时从累计 delivered 计数得到 service_inflight。
-3. 对波形正向超过 base_target_rate 的部分积分，得到 positive_probe_credit。
-4. 若服务历史完整且没有 app-limited 污染：
-
-~~~text
-service_budget = service_inflight + positive_probe_credit
-envelope = min(plan_inflight, service_budget)
-~~~
-
-否则 envelope 回退为 plan_inflight。再加上 BBRv2 的 MaxAckHeight，并按 MSS 向上对齐，得到 inflight_cap。最终返回：
-
-~~~text
-min(native_cwnd, inflight_cap)
-~~~
-
-这个包络可防止命令 pacing 计划显著高于最近实际服务量时继续放大在途量；它不是基于全局公平份额的分配器。
+Inflight 服务包络（plan_inflight / service_inflight / positive_probe_credit / envelope / inflight_cap）已从 FBBR 中完全移除。`GetCongestionWindow()` 直接返回原生 BBRv2 的 `cwnd_`，不再施加额外的 in-flight 上限。相关的 `fbbr_rate_history_`、`fbbr_delivered_history_`、`FbbrEnvelopeSnapshot`、所有 `ComputeFbbr*` / `BuildFbbrEnvelopeSnapshot` / `ApplyFbbrInflightEnvelope` / `UpdateFbbrTelemetry` / `EmitFbbrFlowSummary` 方法和 telemetry 字段均已删除，`FBBR_FLOW_SUMMARY` 诊断路径不再产生。`ComputeFbbrIntervalDeliveryRateBps` 同样被移除，Regime II 的 interval 速率始终报为 invalid，FullLoad 命中时直接走 `FBBR_REGIME_II_INVALID_DELIVERED_INTERVAL_HOLD` 兜底。
 
 ## 11. MaxBw-flat 安全试验
 
@@ -371,7 +353,7 @@ MaxBw > current baseline
 SRTT <= 1.02*RTprop
 ~~~
 
-它暂停三角波、以 MaxBw 平速发送，并保留原服务包络。下列任一条件会拒绝试验：
+它暂停三角波、以 MaxBw 平速发送。下列任一条件会拒绝试验：
 
 - 丢包、ECN、recovery 或 app-limited。
 - SRTT>1.05*RTprop，或 SRTT>entry_SRTT+0.02*RTprop。
@@ -534,7 +516,7 @@ SRTT <= 1.02*RTprop
 | 基线为何变化 | waveform_last_action、delta_source、raw/applied baseline delta、I/III 子分支标记。 |
 | BEQ 为何不同 | beq_source：FBBR_WINDOW_DELIVERED_RATE、GUARD_FILTER、PREVIOUS_BEQ 或 NATIVE_FALLBACK。 |
 | 波形为何没有分类 | invalid_reason、coverage、app_limited_ratio、Goertzel component reason、无波 retry 状态。 |
-| 低队列是否由 cwnd 包络造成 | plan_inflight、service_inflight、positive_probe_credit、service_restriction、inflight_cap、cap_binding。 |
+| 低队列是否由 cwnd 包络造成 | cwnd 包络已移除；当前直接反映 BBRv2 原生 cwnd。 |
 | MaxBw 是否被验证 | MaxBw-flat trial 的启动、拒绝原因、good_rounds、three_good_rounds。 |
 
 ## 附录 A：当前生效配置全文

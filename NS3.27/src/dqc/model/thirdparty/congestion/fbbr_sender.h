@@ -295,52 +295,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   };
 
 
-  struct FbbrRateSegment {
-    QuicTime start = QuicTime::Zero();
-    QuicTime end = QuicTime::Zero();
-    QuicBandwidth target_rate = QuicBandwidth::Zero();
-    QuicBandwidth base_target_rate = QuicBandwidth::Zero();
-  };
-
-  struct FbbrDeliveredPoint {
-    QuicTime timestamp = QuicTime::Zero();
-    uint64_t cumulative_delivered_bytes = 0;
-    bool app_limited = false;
-  };
-
-  enum class FbbrPreviousBeqSource {
-    kBeq,
-    kGuard,
-    kInvalid,
-  };
-
-  struct FbbrEnvelopeSnapshot {
-    bool previous_beq_valid = false;
-    bool previous_beq_from_guard = false;
-    QuicBandwidth pacing_target = QuicBandwidth::Zero();
-    QuicBandwidth pacing_base_target = QuicBandwidth::Zero();
-    QuicByteCount plan_inflight = 0;
-    QuicByteCount service_inflight = 0;
-    QuicByteCount positive_probe_credit = 0;
-    QuicByteCount service_budget = 0;
-    QuicByteCount envelope = 0;
-    QuicByteCount extra_acked = 0;
-    QuicByteCount inflight_cap = 0;
-    QuicByteCount native_cwnd = 0;
-    QuicByteCount actual_inflight = 0;
-    QuicByteCount plan_excess = 0;
-    QuicByteCount service_restriction = 0;
-    QuicByteCount raw_queue_debt = 0;
-    QuicByteCount envelope_debt = 0;
-    QuicByteCount enforced_excess = 0;
-    bool target_history_valid = false;
-    bool service_history_valid = false;
-    bool app_limited_contaminated = false;
-    bool projection_active = false;
-    bool service_limited = false;
-    bool cap_binding = false;
-  };
-
   struct ResampledWaveformSeries {
     std::vector<double> values;
     std::vector<bool> valid;
@@ -820,57 +774,10 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool HasUsableFbbrPreviousBeq() const;
   TimeDelta CurrentFbbrRtprop() const;
 
-  void RecordFbbrRateTargets(
-      QuicTime now,
-      QuicBandwidth target_rate,
-      QuicBandwidth base_target_rate) const;
-  void RecordFbbrDeliveredPoint(
-      QuicTime now,
-      uint64_t cumulative_delivered,
-      bool app_limited);
-  bool ComputeFbbrIntervalDeliveryRateBps(
-      QuicTime window_start,
-      QuicTime window_end,
-      double* delivery_rate_bps) const;
   bool ComputeFbbrTimeWeightedSrttMeanMs(
       QuicTime window_start,
       QuicTime window_end,
       double* srtt_mean_ms) const;
-  bool HasFullFbbrTargetHistory(
-      QuicTime now,
-      TimeDelta rtprop) const;
-  bool HasValidFbbrServiceHistory(
-      QuicTime now,
-      TimeDelta rtprop,
-      bool current_app_limited,
-      bool* app_limited_contaminated) const;
-  QuicByteCount ComputeFbbrPlannedInflightBytes(
-      QuicTime now,
-      TimeDelta rtprop) const;
-  QuicByteCount ComputeFbbrPositiveProbeCreditBytes(
-      QuicTime now,
-      TimeDelta rtprop) const;
-  QuicByteCount ComputeFbbrServiceInflightBytes(
-      QuicTime now,
-      TimeDelta rtprop) const;
-  QuicByteCount ComputeFbbrEnvelopeBytes(
-      QuicByteCount plan_inflight,
-      QuicByteCount service_inflight,
-      QuicByteCount positive_probe_credit,
-      bool service_history_valid) const;
-  QuicByteCount ComputeFbbrInflightCapBytes(
-      QuicByteCount envelope,
-      QuicByteCount native_extra_acked,
-      QuicByteCount native_offload_budget) const;
-  QuicByteCount ApplyFbbrInflightEnvelope(
-      QuicByteCount native_cwnd_target) const;
-  FbbrEnvelopeSnapshot BuildFbbrEnvelopeSnapshot(
-      QuicByteCount native_cwnd,
-      QuicByteCount actual_inflight) const;
-  void UpdateFbbrTelemetry(
-      QuicTime now,
-      QuicByteCount actual_inflight);
-  void EmitFbbrFlowSummary() const;
   void ApplyFbbrClassification(
       const WaveformWindowAnalysis& analysis,
       QuicTime now);
@@ -1497,59 +1404,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable QuicTime last_pacing_gate_trace_time_;
 
 
-  // FBBR's service envelope uses target/base history and the bandwidth
-  // sampler's cumulative delivered history.
-  mutable std::deque<FbbrRateSegment> fbbr_rate_history_;
-  mutable TimeDelta fbbr_max_rtprop_seen_;
-  mutable bool fbbr_rate_history_integrity_valid_;
-  mutable QuicBandwidth fbbr_last_target_rate_;
-  mutable QuicBandwidth fbbr_last_base_target_rate_;
-  std::deque<FbbrDeliveredPoint> fbbr_delivered_history_;
-  bool fbbr_delivered_history_integrity_valid_;
-  QuicTime fbbr_last_counter_reset_time_;
+  // FBBR no longer enforces an inflight service envelope; the related
+  // histories, telemetry snapshots and emitters were removed.
   bool fbbr_regime_i_or_iii_seen_this_cruise_;
-
-  QuicTime fbbr_telemetry_last_time_;
-  bool fbbr_telemetry_initialized_;
-  FbbrPreviousBeqSource
-      fbbr_telemetry_previous_beq_source_;
-  bool fbbr_telemetry_projection_active_;
-  bool fbbr_telemetry_service_history_valid_;
-  bool fbbr_telemetry_app_limited_fallback_;
-  bool fbbr_telemetry_plan_only_fallback_;
-  bool fbbr_telemetry_service_limited_;
-  bool fbbr_telemetry_cap_binding_;
-  QuicByteCount fbbr_telemetry_plan_inflight_;
-  QuicByteCount fbbr_telemetry_service_inflight_;
-  QuicByteCount fbbr_telemetry_probe_credit_;
-  QuicByteCount fbbr_telemetry_extra_acked_;
-  QuicByteCount fbbr_telemetry_service_restriction_;
-  QuicByteCount fbbr_telemetry_enforced_excess_;
-  uint64_t fbbr_telemetry_total_us_;
-  uint64_t fbbr_previous_beq_us_;
-  uint64_t fbbr_previous_beq_guard_source_us_;
-  uint64_t fbbr_previous_beq_invalid_us_;
-  uint64_t fbbr_projection_active_us_;
-  uint64_t fbbr_service_history_valid_us_;
-  uint64_t fbbr_app_limited_fallback_us_;
-  uint64_t fbbr_plan_only_fallback_us_;
-  uint64_t fbbr_service_limited_us_;
-  uint64_t fbbr_cap_binding_us_;
-  long double fbbr_plan_inflight_byte_us_;
-  long double fbbr_service_inflight_byte_us_;
-  long double fbbr_probe_credit_byte_us_;
-  long double fbbr_extra_acked_byte_us_;
-  long double fbbr_service_restriction_byte_us_;
-  long double fbbr_enforced_excess_byte_us_;
-  std::vector<QuicByteCount> fbbr_plan_inflight_samples_;
-  std::vector<QuicByteCount> fbbr_service_inflight_samples_;
-  std::vector<QuicByteCount> fbbr_probe_credit_samples_;
-  std::vector<QuicByteCount> fbbr_extra_acked_samples_;
-  std::vector<QuicByteCount> fbbr_service_restriction_samples_;
-  std::vector<QuicByteCount> fbbr_enforced_excess_samples_;
-  mutable uint64_t fbbr_window_ack_events_;
-  mutable uint64_t fbbr_window_cap_binding_events_;
-  bool fbbr_flow_summary_emitted_;
 
   static constexpr size_t kMaxHistorySamples = 20000;
   static constexpr uint32_t kStableRounds = 3;

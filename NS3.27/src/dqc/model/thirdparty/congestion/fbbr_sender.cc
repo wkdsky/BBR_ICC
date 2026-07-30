@@ -57,7 +57,7 @@ constexpr const char* kWaveformDeltaSourceFbbrRegimeIIDeliveryRateBaseline =
     "FBBR_REGIME_II_DELIVERY_RATE_BASELINE";
 constexpr uint64_t kDefaultMinimumPacingRateBps = 200000;
 constexpr double kWaveformPostAdjustmentCollectionPeriods = 2.0;
-constexpr float kFBBRCruiseCwndGain = 1.25f;
+constexpr float kFBBRCruiseCwndGain = 1.1f;
 constexpr float kFBBRRtpropProbeDownPacingGain = 0.75f;
 constexpr const char* kLimitingSpectralSignalDrate = "DRATE";
 constexpr const char* kLimitingSpectralSignalSrtt = "SRTT";
@@ -899,48 +899,7 @@ FBBRSender::FBBRSender(
       gate_trace_sample_interval_(TimeDelta::FromMilliseconds(1)),
       last_pacing_gate_trace_time_(QuicTime::Zero()),
 
-      fbbr_max_rtprop_seen_(TimeDelta::Zero()),
-      fbbr_rate_history_integrity_valid_(true),
-      fbbr_last_target_rate_(QuicBandwidth::Zero()),
-      fbbr_last_base_target_rate_(QuicBandwidth::Zero()),
-      fbbr_delivered_history_integrity_valid_(true),
-      fbbr_last_counter_reset_time_(QuicTime::Zero()),
-      fbbr_regime_i_or_iii_seen_this_cruise_(false),
-      fbbr_telemetry_last_time_(QuicTime::Zero()),
-      fbbr_telemetry_initialized_(false),
-      fbbr_telemetry_previous_beq_source_(
-          FbbrPreviousBeqSource::kInvalid),
-      fbbr_telemetry_projection_active_(false),
-      fbbr_telemetry_service_history_valid_(false),
-      fbbr_telemetry_app_limited_fallback_(false),
-      fbbr_telemetry_plan_only_fallback_(false),
-      fbbr_telemetry_service_limited_(false),
-      fbbr_telemetry_cap_binding_(false),
-      fbbr_telemetry_plan_inflight_(0),
-      fbbr_telemetry_service_inflight_(0),
-      fbbr_telemetry_probe_credit_(0),
-      fbbr_telemetry_extra_acked_(0),
-      fbbr_telemetry_service_restriction_(0),
-      fbbr_telemetry_enforced_excess_(0),
-      fbbr_telemetry_total_us_(0),
-      fbbr_previous_beq_us_(0),
-      fbbr_previous_beq_guard_source_us_(0),
-      fbbr_previous_beq_invalid_us_(0),
-      fbbr_projection_active_us_(0),
-      fbbr_service_history_valid_us_(0),
-      fbbr_app_limited_fallback_us_(0),
-      fbbr_plan_only_fallback_us_(0),
-      fbbr_service_limited_us_(0),
-      fbbr_cap_binding_us_(0),
-      fbbr_plan_inflight_byte_us_(0.0L),
-      fbbr_service_inflight_byte_us_(0.0L),
-      fbbr_probe_credit_byte_us_(0.0L),
-      fbbr_extra_acked_byte_us_(0.0L),
-      fbbr_service_restriction_byte_us_(0.0L),
-      fbbr_enforced_excess_byte_us_(0.0L),
-      fbbr_window_ack_events_(0),
-      fbbr_window_cap_binding_events_(0),
-      fbbr_flow_summary_emitted_(false) {
+      fbbr_regime_i_or_iii_seen_this_cruise_(false) {
   InitializeFbbrRtpropFromModel();
   QUIC_DVLOG(2) << this << " Initializing FBBRSender @ " << now;
 }
@@ -1388,7 +1347,7 @@ void FBBRSender::StartMaxBwFlatTrial(QuicTime now) {
   maxbw_flat_cruise_exit_not_before_ = QuicTime::Zero();
   maxbw_flat_waveform_epoch_pending_ = false;
 
-  // Keep FBBR's envelope on the pre-trial service plan.  Flat pacing is
+  // Hold the pre-trial service plan at the flat trial rate.  Flat pacing is
   // deliberately not recorded as a target segment or a positive probe.
   current_injection_baseline_bw_ = maxbw_flat_trial_rate_;
   waveform_cruise_state_ = WaveformCruiseState::kDisabled;
@@ -2703,8 +2662,7 @@ void FBBRSender::PublishBeqSelection(
 
   beq_ = selection.beq;
   beq_valid_ = true;
-  // FBBR keeps BBRv2's native cwnd/BDP model and enforces its envelope only
-  // at the final send-allowance interface.
+  // FBBR keeps BBRv2's native cwnd/BDP model and paces from this beq.
   beq_conf_ = selection.beq_conf;
   beq_source_ = selection.beq_source;
   beq_cruise_id_ =
@@ -3209,28 +3167,11 @@ void FBBRSender::OnCongestionEvent(
   }
   last_ack_time_ = event_time;
 
-  // Record the cumulative counter before a due waveform analysis so an ACK
-  // exactly at the window end contributes to Delivered(t_end). Points after
-  // the boundary remain excluded by the interval lookup.
-  if (IsFbbr() && !maxbw_flat_trial_event &&
-      !acked_packets.empty()) {
-    RecordFbbrDeliveredPoint(
-        event_time,
-        static_cast<uint64_t>(model_.total_bytes_acked()),
-        model_.is_app_limited());
-  }
   if (in_cruise_ && mode_ == Bbr2Mode::PROBE_BW &&
       GetCurrentProbeBwPhase() == Bbr2ProbeBwMode::CyclePhase::PROBE_CRUISE &&
       !maxbw_flat_trial_event && !maxbw_flat_trial_active_) {
     // FBBR now uses the time-domain waveform detector exclusively.
     RunWaveformCruiseStateMachine(event_time);
-  }
-  if (IsFbbr() && !maxbw_flat_trial_event &&
-      !acked_packets.empty()) {
-    UpdateFbbrTelemetry(
-        event_time,
-        latest_congestion_event_inflight_valid_
-            ? latest_congestion_event_inflight_ : prior_in_flight);
   }
 }
 
@@ -3244,8 +3185,7 @@ QuicBandwidth FBBRSender::PacingRate(
   if (IsMaxBwFlatTrialPacingActive()) {
     const QuicBandwidth trial_rate = maxbw_flat_trial_rate_;
     beq_application_phase_ = "CRUISE";
-    // Do not call RecordFbbrRateTargets here: the flat step must not create
-    // service-envelope capacity or positive probe credit.
+    // Flat pacing is emitted as-is without further record-keeping.
     EmitPacingTrace(native_bw,
                     trial_rate,
                     FBBRPacingBaseSource::kMaxBwFlatTrial,
@@ -3407,8 +3347,6 @@ QuicBandwidth FBBRSender::PacingRate(
     returned_base_target =
         std::min(returned_base_target, returned_pacing);
   }
-  RecordFbbrRateTargets(
-      current_time_, returned_pacing, returned_base_target);
 
   EmitPacingTrace(native_bw,
                   pacing_base_bw,
@@ -3500,292 +3438,9 @@ TimeDelta FBBRSender::CurrentFbbrRtprop() const {
 
 
 QuicByteCount FBBRSender::GetCongestionWindow() const {
-  if (IsFbbr()) {
-    return ApplyFbbrInflightEnvelope(cwnd_);
-  }
   return cwnd_;
 }
 
-
-void FBBRSender::RecordFbbrRateTargets(
-    QuicTime now,
-    QuicBandwidth target_rate,
-    QuicBandwidth base_target_rate) const {
-  if (!IsFbbr() ||
-      !IsFinitePositiveBandwidth(target_rate) ||
-      !IsFinitePositiveBandwidth(base_target_rate)) {
-    return;
-  }
-  base_target_rate = std::min(base_target_rate, target_rate);
-  if (fbbr_rate_history_.empty()) {
-    fbbr_rate_history_.push_back(
-        {now, QuicTime::Zero(), target_rate, base_target_rate});
-    fbbr_last_target_rate_ = target_rate;
-    fbbr_last_base_target_rate_ = base_target_rate;
-    return;
-  }
-
-  FbbrRateSegment& open = fbbr_rate_history_.back();
-  if (now < open.start) {
-    fbbr_rate_history_integrity_valid_ = false;
-    return;
-  }
-  if (target_rate == open.target_rate &&
-      base_target_rate == open.base_target_rate) {
-    return;
-  }
-  if (now == open.start && open.end == QuicTime::Zero()) {
-    open.target_rate = target_rate;
-    open.base_target_rate = base_target_rate;
-    fbbr_last_target_rate_ = target_rate;
-    fbbr_last_base_target_rate_ = base_target_rate;
-    return;
-  }
-  open.end = now;
-  fbbr_rate_history_.push_back(
-      {now, QuicTime::Zero(), target_rate, base_target_rate});
-  fbbr_last_target_rate_ = target_rate;
-  fbbr_last_base_target_rate_ = base_target_rate;
-
-  if (!fbbr_max_rtprop_seen_.IsZero() &&
-      !fbbr_max_rtprop_seen_.IsInfinite() &&
-      now >= QuicTime::Zero() + fbbr_max_rtprop_seen_) {
-    const QuicTime cutoff = now - fbbr_max_rtprop_seen_;
-    // Keep the segment containing the integration boundary as its anchor.
-    while (fbbr_rate_history_.size() > 1 &&
-           fbbr_rate_history_[1].start <= cutoff) {
-      fbbr_rate_history_.pop_front();
-    }
-  }
-}
-
-bool FBBRSender::HasFullFbbrTargetHistory(
-    QuicTime now,
-    TimeDelta rtprop) const {
-  if (!IsFbbr() ||
-      !fbbr_rate_history_integrity_valid_ ||
-      rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0 ||
-      fbbr_rate_history_.empty() ||
-      now < QuicTime::Zero() + rtprop) {
-    return false;
-  }
-  if (fbbr_max_rtprop_seen_.IsZero() ||
-      rtprop > fbbr_max_rtprop_seen_) {
-    fbbr_max_rtprop_seen_ = rtprop;
-  }
-  const QuicTime window_start = now - rtprop;
-  QuicTime covered_until = window_start;
-  for (const FbbrRateSegment& segment : fbbr_rate_history_) {
-    if (!IsFinitePositiveBandwidth(segment.target_rate) ||
-        !IsFinitePositiveBandwidth(segment.base_target_rate) ||
-        segment.base_target_rate > segment.target_rate) {
-      return false;
-    }
-    const QuicTime segment_end =
-        segment.end == QuicTime::Zero() ? now
-                                        : std::min(now, segment.end);
-    if (segment_end <= covered_until || segment.start >= now) {
-      continue;
-    }
-    if (segment.start > covered_until) {
-      return false;
-    }
-    covered_until = std::max(covered_until, segment_end);
-    if (covered_until >= now) {
-      return true;
-    }
-  }
-  return false;
-}
-
-QuicByteCount FBBRSender::ComputeFbbrPlannedInflightBytes(
-    QuicTime now,
-    TimeDelta rtprop) const {
-  if (!HasFullFbbrTargetHistory(now, rtprop)) {
-    return 0;
-  }
-  const QuicTime window_start = now - rtprop;
-  long double bytes = 0.0L;
-  for (const FbbrRateSegment& segment : fbbr_rate_history_) {
-    const QuicTime segment_end =
-        segment.end == QuicTime::Zero() ? now
-                                        : std::min(now, segment.end);
-    const QuicTime overlap_start = std::max(window_start, segment.start);
-    const QuicTime overlap_end = std::min(now, segment_end);
-    if (overlap_end <= overlap_start) {
-      continue;
-    }
-    const int64_t overlap_us =
-        (overlap_end - overlap_start).ToMicroseconds();
-    if (overlap_us <= 0) {
-      continue;
-    }
-    bytes += static_cast<long double>(
-                 segment.target_rate.ToBitsPerSecond()) *
-             static_cast<long double>(overlap_us) / 8000000.0L;
-  }
-  if (!std::isfinite(bytes) || bytes <= 0.0L) {
-    return 0;
-  }
-  const long double maximum = static_cast<long double>(
-      std::numeric_limits<QuicByteCount>::max());
-  return static_cast<QuicByteCount>(
-      std::llround(std::min(bytes, maximum)));
-}
-
-QuicByteCount FBBRSender::ComputeFbbrPositiveProbeCreditBytes(
-    QuicTime now,
-    TimeDelta rtprop) const {
-  if (!HasFullFbbrTargetHistory(now, rtprop)) {
-    return 0;
-  }
-  const QuicTime window_start = now - rtprop;
-  long double bytes = 0.0L;
-  for (const FbbrRateSegment& segment : fbbr_rate_history_) {
-    const QuicTime segment_end =
-        segment.end == QuicTime::Zero() ? now
-                                        : std::min(now, segment.end);
-    const QuicTime overlap_start = std::max(window_start, segment.start);
-    const QuicTime overlap_end = std::min(now, segment_end);
-    if (overlap_end <= overlap_start ||
-        segment.target_rate <= segment.base_target_rate) {
-      continue;
-    }
-    const int64_t overlap_us =
-        (overlap_end - overlap_start).ToMicroseconds();
-    if (overlap_us <= 0) {
-      continue;
-    }
-    const int64_t excess_bps =
-        segment.target_rate.ToBitsPerSecond() -
-        segment.base_target_rate.ToBitsPerSecond();
-    bytes += static_cast<long double>(excess_bps) *
-             static_cast<long double>(overlap_us) / 8000000.0L;
-  }
-  if (!std::isfinite(bytes) || bytes <= 0.0L) {
-    return 0;
-  }
-  const long double maximum = static_cast<long double>(
-      std::numeric_limits<QuicByteCount>::max());
-  return static_cast<QuicByteCount>(
-      std::llround(std::min(bytes, maximum)));
-}
-
-void FBBRSender::RecordFbbrDeliveredPoint(
-    QuicTime now,
-    uint64_t cumulative_delivered,
-    bool app_limited) {
-  if (!IsFbbr()) {
-    return;
-  }
-  if (fbbr_delivered_history_.empty()) {
-    fbbr_delivered_history_.push_back(
-        {now, cumulative_delivered, app_limited});
-    return;
-  }
-  FbbrDeliveredPoint& last = fbbr_delivered_history_.back();
-  if (now < last.timestamp) {
-    fbbr_delivered_history_integrity_valid_ = false;
-    return;
-  }
-  if (now == last.timestamp) {
-    last.cumulative_delivered_bytes =
-        std::max(last.cumulative_delivered_bytes,
-                 cumulative_delivered);
-    last.app_limited = last.app_limited || app_limited;
-    return;
-  }
-  if (cumulative_delivered < last.cumulative_delivered_bytes) {
-    // Begin a fresh counter generation.  The reset remains invalid until it
-    // lies strictly before a subsequently covered RTprop window.
-    fbbr_delivered_history_.clear();
-    fbbr_last_counter_reset_time_ = now;
-  }
-  fbbr_delivered_history_.push_back(
-      {now, cumulative_delivered, app_limited});
-
-  TimeDelta retention = fbbr_max_rtprop_seen_;
-  if (cruise_modulation_freq_hz_ > 0.0 &&
-      std::isfinite(cruise_modulation_freq_hz_) &&
-      waveform_max_window_periods_ > 0.0 &&
-      std::isfinite(waveform_max_window_periods_)) {
-    const TimeDelta waveform_retention = TimeDelta::FromMicroseconds(
-        std::max<int64_t>(1, static_cast<int64_t>(std::ceil(
-            1000000.0 * waveform_max_window_periods_ /
-            cruise_modulation_freq_hz_))));
-    if (retention.IsZero() || retention.IsInfinite() ||
-        waveform_retention > retention) {
-      retention = waveform_retention;
-    }
-  }
-  if (!retention.IsZero() && !retention.IsInfinite() &&
-      now >= QuicTime::Zero() + retention) {
-    QuicTime cutoff = now - retention;
-    if (in_cruise_ && waveform_window_start_ != QuicTime::Zero() &&
-        waveform_window_start_ < now) {
-      cutoff = std::min(cutoff, waveform_window_start_);
-    }
-    // Retain the newest step point at or before the boundary.
-    while (fbbr_delivered_history_.size() > 1 &&
-           fbbr_delivered_history_[1].timestamp <= cutoff) {
-      fbbr_delivered_history_.pop_front();
-    }
-  }
-}
-
-bool FBBRSender::ComputeFbbrIntervalDeliveryRateBps(
-    QuicTime window_start,
-    QuicTime window_end,
-    double* delivery_rate_bps) const {
-  if (delivery_rate_bps != nullptr) {
-    *delivery_rate_bps = 0.0;
-  }
-  if (!IsFbbr() || delivery_rate_bps == nullptr ||
-      !fbbr_delivered_history_integrity_valid_ ||
-      window_end <= window_start ||
-      fbbr_delivered_history_.empty()) {
-    return false;
-  }
-  if (fbbr_last_counter_reset_time_ != QuicTime::Zero() &&
-      fbbr_last_counter_reset_time_ >= window_start &&
-      fbbr_last_counter_reset_time_ <= window_end) {
-    return false;
-  }
-
-  bool start_found = false;
-  bool end_found = false;
-  uint64_t delivered_at_start = 0;
-  uint64_t delivered_at_end = 0;
-  for (const FbbrDeliveredPoint& point : fbbr_delivered_history_) {
-    if (point.timestamp <= window_start) {
-      start_found = true;
-      delivered_at_start = point.cumulative_delivered_bytes;
-    }
-    if (point.timestamp <= window_end) {
-      end_found = true;
-      delivered_at_end = point.cumulative_delivered_bytes;
-    } else {
-      break;
-    }
-  }
-  const int64_t duration_us =
-      (window_end - window_start).ToMicroseconds();
-  if (!start_found || !end_found || duration_us <= 0 ||
-      delivered_at_end < delivered_at_start) {
-    return false;
-  }
-  const long double rate_bps =
-      static_cast<long double>(delivered_at_end - delivered_at_start) *
-      8000000.0L / static_cast<long double>(duration_us);
-  if (!std::isfinite(rate_bps) || rate_bps <= 0.0L ||
-      rate_bps > static_cast<long double>(
-                     std::numeric_limits<int64_t>::max())) {
-    return false;
-  }
-  *delivery_rate_bps = static_cast<double>(rate_bps);
-  return std::isfinite(*delivery_rate_bps) && *delivery_rate_bps > 0.0;
-}
 
 bool FBBRSender::ComputeFbbrTimeWeightedSrttMeanMs(
     QuicTime window_start,
@@ -3859,411 +3514,9 @@ bool FBBRSender::ComputeFbbrTimeWeightedSrttMeanMs(
   return std::isfinite(*srtt_mean_ms) && *srtt_mean_ms > 0.0;
 }
 
-bool FBBRSender::HasValidFbbrServiceHistory(
-    QuicTime now,
-    TimeDelta rtprop,
-    bool current_app_limited,
-    bool* app_limited_contaminated) const {
-  if (app_limited_contaminated != nullptr) {
-    *app_limited_contaminated = false;
-  }
-  if (!IsFbbr() ||
-      !fbbr_delivered_history_integrity_valid_ ||
-      rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0 ||
-      fbbr_delivered_history_.empty() ||
-      now < QuicTime::Zero() + rtprop) {
-    return false;
-  }
-  const QuicTime window_start = now - rtprop;
-  size_t anchor_index = fbbr_delivered_history_.size();
-  for (size_t i = 0; i < fbbr_delivered_history_.size(); ++i) {
-    if (fbbr_delivered_history_[i].timestamp <= window_start) {
-      anchor_index = i;
-    } else {
-      break;
-    }
-  }
-  if (anchor_index == fbbr_delivered_history_.size()) {
-    return false;
-  }
-  if (fbbr_last_counter_reset_time_ != QuicTime::Zero() &&
-      fbbr_last_counter_reset_time_ >= window_start &&
-      fbbr_last_counter_reset_time_ <= now) {
-    return false;
-  }
-
-  bool contaminated = current_app_limited;
-  uint64_t previous =
-      fbbr_delivered_history_[anchor_index]
-          .cumulative_delivered_bytes;
-  contaminated =
-      contaminated ||
-      fbbr_delivered_history_[anchor_index].app_limited;
-  for (size_t i = anchor_index + 1;
-       i < fbbr_delivered_history_.size(); ++i) {
-    const FbbrDeliveredPoint& point = fbbr_delivered_history_[i];
-    if (point.timestamp > now) {
-      break;
-    }
-    if (point.cumulative_delivered_bytes < previous) {
-      return false;
-    }
-    previous = point.cumulative_delivered_bytes;
-    if (point.timestamp >= window_start && point.app_limited) {
-      contaminated = true;
-    }
-  }
-  if (app_limited_contaminated != nullptr) {
-    *app_limited_contaminated = contaminated;
-  }
-  return !contaminated;
-}
-
-QuicByteCount FBBRSender::ComputeFbbrServiceInflightBytes(
-    QuicTime now,
-    TimeDelta rtprop) const {
-  if (rtprop.IsZero() || rtprop.IsInfinite() ||
-      rtprop.ToMicroseconds() <= 0 ||
-      fbbr_delivered_history_.empty() ||
-      now < QuicTime::Zero() + rtprop) {
-    return 0;
-  }
-  const QuicTime window_start = now - rtprop;
-  bool has_anchor = false;
-  uint64_t anchor_delivered = 0;
-  bool has_current = false;
-  uint64_t current_delivered = 0;
-  for (const FbbrDeliveredPoint& point :
-       fbbr_delivered_history_) {
-    if (point.timestamp <= window_start) {
-      has_anchor = true;
-      anchor_delivered = point.cumulative_delivered_bytes;
-    }
-    if (point.timestamp <= now) {
-      has_current = true;
-      current_delivered = point.cumulative_delivered_bytes;
-    } else {
-      break;
-    }
-  }
-  if (!has_anchor || !has_current ||
-      current_delivered < anchor_delivered) {
-    return 0;
-  }
-  return static_cast<QuicByteCount>(
-      current_delivered - anchor_delivered);
-}
-
-QuicByteCount FBBRSender::ComputeFbbrEnvelopeBytes(
-    QuicByteCount plan_inflight,
-    QuicByteCount service_inflight,
-    QuicByteCount positive_probe_credit,
-    bool service_history_valid) const {
-  if (!service_history_valid) {
-    return plan_inflight;
-  }
-  const QuicByteCount maximum =
-      std::numeric_limits<QuicByteCount>::max();
-  const QuicByteCount service_budget =
-      service_inflight > maximum - positive_probe_credit
-          ? maximum
-          : service_inflight + positive_probe_credit;
-  return std::min(plan_inflight, service_budget);
-}
-
-QuicByteCount FBBRSender::ComputeFbbrInflightCapBytes(
-    QuicByteCount envelope,
-    QuicByteCount native_extra_acked,
-    QuicByteCount native_offload_budget) const {
-  const QuicByteCount maximum = std::numeric_limits<QuicByteCount>::max();
-  auto saturating_add = [maximum](QuicByteCount lhs, QuicByteCount rhs) {
-    return lhs > maximum - rhs ? maximum : lhs + rhs;
-  };
-  QuicByteCount cap = saturating_add(envelope, native_extra_acked);
-  cap = saturating_add(cap, native_offload_budget);
-  cap = std::max(cap, cwnd_limits().Min());
-
-  const QuicByteCount quantum = kDefaultTCPMSS;
-  if (quantum > 0 && cap < maximum) {
-    const QuicByteCount remainder = cap % quantum;
-    if (remainder != 0) {
-      cap = saturating_add(cap, quantum - remainder);
-    }
-  }
-  return cap;
-}
-
-FBBRSender::FbbrEnvelopeSnapshot
-FBBRSender::BuildFbbrEnvelopeSnapshot(
-    QuicByteCount native_cwnd,
-    QuicByteCount actual_inflight) const {
-  FbbrEnvelopeSnapshot snapshot;
-  snapshot.native_cwnd = native_cwnd;
-  snapshot.actual_inflight = actual_inflight;
-  snapshot.previous_beq_valid =
-      HasUsableFbbrPreviousBeq();
-  snapshot.previous_beq_from_guard =
-      snapshot.previous_beq_valid &&
-      std::string(beq_source_ == nullptr
-                      ? kBeqSourceNone : beq_source_) ==
-          kBeqSourceGuardFilter;
-  snapshot.pacing_target = fbbr_last_target_rate_;
-  snapshot.pacing_base_target = fbbr_last_base_target_rate_;
-  const TimeDelta rtprop = CurrentFbbrRtprop();
-  snapshot.target_history_valid =
-      !rtprop.IsZero() &&
-      HasFullFbbrTargetHistory(current_time_, rtprop);
-  if (snapshot.target_history_valid) {
-    snapshot.plan_inflight =
-        ComputeFbbrPlannedInflightBytes(current_time_, rtprop);
-    snapshot.positive_probe_credit =
-        ComputeFbbrPositiveProbeCreditBytes(current_time_, rtprop);
-  }
-  if (!rtprop.IsZero()) {
-    snapshot.service_inflight =
-        ComputeFbbrServiceInflightBytes(current_time_, rtprop);
-    snapshot.service_history_valid =
-        HasValidFbbrServiceHistory(
-            current_time_, rtprop, model_.is_app_limited(),
-            &snapshot.app_limited_contaminated);
-  }
-  const QuicByteCount maximum =
-      std::numeric_limits<QuicByteCount>::max();
-  snapshot.service_budget =
-      snapshot.service_inflight >
-              maximum - snapshot.positive_probe_credit
-          ? maximum
-          : snapshot.service_inflight +
-                snapshot.positive_probe_credit;
-  snapshot.envelope = ComputeFbbrEnvelopeBytes(
-      snapshot.plan_inflight, snapshot.service_inflight,
-      snapshot.positive_probe_credit,
-      snapshot.service_history_valid);
-  snapshot.extra_acked = model_.MaxAckHeight();
-  if (snapshot.target_history_valid) {
-    snapshot.inflight_cap = ComputeFbbrInflightCapBytes(
-        snapshot.envelope, snapshot.extra_acked, 0);
-  }
-  snapshot.plan_excess =
-      snapshot.plan_inflight > snapshot.service_inflight
-          ? snapshot.plan_inflight - snapshot.service_inflight : 0;
-  snapshot.service_restriction =
-      snapshot.plan_inflight > snapshot.envelope
-          ? snapshot.plan_inflight - snapshot.envelope : 0;
-  snapshot.raw_queue_debt =
-      actual_inflight > snapshot.plan_inflight
-          ? actual_inflight - snapshot.plan_inflight : 0;
-  snapshot.envelope_debt =
-      actual_inflight > snapshot.envelope
-          ? actual_inflight - snapshot.envelope : 0;
-  snapshot.enforced_excess =
-      actual_inflight > snapshot.inflight_cap &&
-              snapshot.target_history_valid
-          ? actual_inflight - snapshot.inflight_cap : 0;
-  snapshot.projection_active =
-      IsFbbr() && !rtprop.IsZero() &&
-      snapshot.target_history_valid && drain_completed_ &&
-      mode_ == Bbr2Mode::PROBE_BW;
-  snapshot.service_limited =
-      snapshot.projection_active &&
-      snapshot.service_history_valid &&
-      snapshot.envelope < snapshot.plan_inflight;
-  snapshot.cap_binding =
-      snapshot.projection_active &&
-      snapshot.inflight_cap < snapshot.native_cwnd &&
-      snapshot.actual_inflight > snapshot.inflight_cap;
-  return snapshot;
-}
-
-QuicByteCount FBBRSender::ApplyFbbrInflightEnvelope(
-    QuicByteCount native_cwnd_target) const {
-  if (!IsFbbr()) {
-    return native_cwnd_target;
-  }
-  const FbbrEnvelopeSnapshot snapshot =
-      BuildFbbrEnvelopeSnapshot(
-          native_cwnd_target,
-          latest_congestion_event_inflight_valid_
-              ? latest_congestion_event_inflight_ : 0);
-  if (!snapshot.projection_active) {
-    return native_cwnd_target;
-  }
-  return std::min(native_cwnd_target, snapshot.inflight_cap);
-}
-
-void FBBRSender::UpdateFbbrTelemetry(
-    QuicTime now,
-    QuicByteCount actual_inflight) {
-  if (!IsFbbr()) {
-    return;
-  }
-  if (fbbr_telemetry_initialized_ &&
-      now >= fbbr_telemetry_last_time_) {
-    const uint64_t delta_us = static_cast<uint64_t>(
-        (now - fbbr_telemetry_last_time_).ToMicroseconds());
-    fbbr_telemetry_total_us_ += delta_us;
-    switch (fbbr_telemetry_previous_beq_source_) {
-      case FbbrPreviousBeqSource::kBeq:
-        fbbr_previous_beq_us_ += delta_us;
-        break;
-      case FbbrPreviousBeqSource::kGuard:
-        fbbr_previous_beq_guard_source_us_ += delta_us;
-        break;
-      case FbbrPreviousBeqSource::kInvalid:
-      default:
-        fbbr_previous_beq_invalid_us_ += delta_us;
-        break;
-    }
-    if (fbbr_telemetry_projection_active_) {
-      fbbr_projection_active_us_ += delta_us;
-    }
-    if (fbbr_telemetry_service_history_valid_) {
-      fbbr_service_history_valid_us_ += delta_us;
-    }
-    if (fbbr_telemetry_app_limited_fallback_) {
-      fbbr_app_limited_fallback_us_ += delta_us;
-    }
-    if (fbbr_telemetry_plan_only_fallback_) {
-      fbbr_plan_only_fallback_us_ += delta_us;
-    }
-    if (fbbr_telemetry_service_limited_) {
-      fbbr_service_limited_us_ += delta_us;
-    }
-    if (fbbr_telemetry_cap_binding_) {
-      fbbr_cap_binding_us_ += delta_us;
-    }
-    fbbr_plan_inflight_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_plan_inflight_) * delta_us;
-    fbbr_service_inflight_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_service_inflight_) * delta_us;
-    fbbr_probe_credit_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_probe_credit_) * delta_us;
-    fbbr_extra_acked_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_extra_acked_) * delta_us;
-    fbbr_service_restriction_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_service_restriction_) * delta_us;
-    fbbr_enforced_excess_byte_us_ +=
-        static_cast<long double>(
-            fbbr_telemetry_enforced_excess_) * delta_us;
-  }
-
-  const FbbrEnvelopeSnapshot snapshot =
-      BuildFbbrEnvelopeSnapshot(cwnd_, actual_inflight);
-  fbbr_telemetry_last_time_ = now;
-  fbbr_telemetry_initialized_ = true;
-  fbbr_telemetry_previous_beq_source_ =
-      !snapshot.previous_beq_valid
-          ? FbbrPreviousBeqSource::kInvalid
-          : snapshot.previous_beq_from_guard
-              ? FbbrPreviousBeqSource::kGuard
-              : FbbrPreviousBeqSource::kBeq;
-  fbbr_telemetry_projection_active_ = snapshot.projection_active;
-  fbbr_telemetry_service_history_valid_ =
-      snapshot.service_history_valid;
-  fbbr_telemetry_app_limited_fallback_ =
-      snapshot.projection_active &&
-      snapshot.app_limited_contaminated;
-  fbbr_telemetry_plan_only_fallback_ =
-      snapshot.projection_active &&
-      !snapshot.service_history_valid;
-  fbbr_telemetry_service_limited_ = snapshot.service_limited;
-  fbbr_telemetry_cap_binding_ = snapshot.cap_binding;
-  fbbr_telemetry_plan_inflight_ = snapshot.plan_inflight;
-  fbbr_telemetry_service_inflight_ = snapshot.service_inflight;
-  fbbr_telemetry_probe_credit_ =
-      snapshot.positive_probe_credit;
-  fbbr_telemetry_extra_acked_ = snapshot.extra_acked;
-  fbbr_telemetry_service_restriction_ =
-      snapshot.service_restriction;
-  fbbr_telemetry_enforced_excess_ = snapshot.enforced_excess;
-  fbbr_plan_inflight_samples_.push_back(snapshot.plan_inflight);
-  fbbr_service_inflight_samples_.push_back(
-      snapshot.service_inflight);
-  fbbr_probe_credit_samples_.push_back(
-      snapshot.positive_probe_credit);
-  fbbr_extra_acked_samples_.push_back(snapshot.extra_acked);
-  fbbr_service_restriction_samples_.push_back(
-      snapshot.service_restriction);
-  fbbr_enforced_excess_samples_.push_back(
-      snapshot.enforced_excess);
-  ++fbbr_window_ack_events_;
-  if (snapshot.cap_binding) {
-    ++fbbr_window_cap_binding_events_;
-  }
-}
-
-void FBBRSender::EmitFbbrFlowSummary() const {
-  if (!IsFbbr() || !cruise_load_trace_cb_) {
-    return;
-  }
-  auto ratio = [this](uint64_t value) {
-    return fbbr_telemetry_total_us_ == 0
-        ? 0.0
-        : static_cast<double>(value) /
-              static_cast<double>(fbbr_telemetry_total_us_);
-  };
-  auto p95 = [](const std::vector<QuicByteCount>& input) {
-    if (input.empty()) {
-      return static_cast<QuicByteCount>(0);
-    }
-    std::vector<QuicByteCount> values = input;
-    std::sort(values.begin(), values.end());
-    const size_t index = static_cast<size_t>(
-        std::ceil(0.95 * static_cast<double>(values.size()))) - 1;
-    return values[std::min(index, values.size() - 1)];
-  };
-  const long double duration_us =
-      static_cast<long double>(fbbr_telemetry_total_us_);
-  auto mean = [duration_us](long double byte_us) {
-    return duration_us > 0.0L ? byte_us / duration_us : 0.0L;
-  };
-  std::ostringstream row;
-  row << "FBBR"
-      << ","
-      << trace_flow_id_ << ","
-      << ratio(fbbr_previous_beq_us_) << ","
-      << ratio(fbbr_previous_beq_guard_source_us_) << ","
-      << ratio(fbbr_previous_beq_invalid_us_) << ","
-      << ratio(fbbr_projection_active_us_) << ","
-      << ratio(fbbr_service_history_valid_us_) << ","
-      << ratio(fbbr_app_limited_fallback_us_) << ","
-      << ratio(fbbr_plan_only_fallback_us_) << ","
-      << ratio(fbbr_service_limited_us_) << ","
-      << ratio(fbbr_cap_binding_us_) << ","
-      << static_cast<double>(
-             mean(fbbr_plan_inflight_byte_us_)) << ","
-      << p95(fbbr_plan_inflight_samples_) << ","
-      << static_cast<double>(
-             mean(fbbr_service_inflight_byte_us_)) << ","
-      << p95(fbbr_service_inflight_samples_) << ","
-      << static_cast<double>(
-             mean(fbbr_probe_credit_byte_us_)) << ","
-      << p95(fbbr_probe_credit_samples_) << ","
-      << static_cast<double>(
-             mean(fbbr_extra_acked_byte_us_)) << ","
-      << p95(fbbr_extra_acked_samples_) << ","
-      << static_cast<double>(
-             mean(fbbr_service_restriction_byte_us_)) << ","
-      << p95(fbbr_service_restriction_samples_) << ","
-      << static_cast<double>(
-             mean(fbbr_enforced_excess_byte_us_)) << ","
-      << p95(fbbr_enforced_excess_samples_);
-  cruise_load_trace_cb_(0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        "FBBR_FLOW_SUMMARY", false, row.str());
-}
-
 void FBBRSender::FinalizeFbbrTrace() {
-  if (fbbr_flow_summary_emitted_) {
-    return;
-  }
-  fbbr_flow_summary_emitted_ = true;
-  EmitFbbrFlowSummary();
+  // Inflight envelope telemetry was removed; the trace finaliser is kept
+  // as a no-op so external callers (e.g. dqc_sender.cc) still link.
 }
 
 FBBRSender::FbbrRegimeDecision FBBRSender::ClassifyFbbrRegime(
@@ -9113,16 +8366,13 @@ void FBBRSender::ApplyFbbrClassification(
   const QuicBandwidth max_bw = model_.MaxBandwidth();
   const bool min_bw_valid = IsFinitePositiveBandwidth(min_bw);
   const bool max_bw_valid = IsFinitePositiveBandwidth(max_bw);
-  double interval_delivery_rate_bps = 0.0;
-  bool interval_delivery_rate_valid = false;
+  // The inflight envelope mechanism was removed, so the interval delivery
+  // rate is no longer computable. FullLoad with a previously seen Regime
+  // I/III will fall back to a hold-and-settle.
+  const double interval_delivery_rate_bps = 0.0;
   if (analysis.classification == WaveformClassification::kFullLoad) {
-    interval_delivery_rate_valid = ComputeFbbrIntervalDeliveryRateBps(
-        analysis.window_start, analysis.window_end,
-        &interval_delivery_rate_bps);
-    trace_analysis.delivery_rate_mean_bps =
-        interval_delivery_rate_valid ? interval_delivery_rate_bps : 0.0;
-    if (fbbr_regime_i_or_iii_seen_this_cruise_ &&
-        !interval_delivery_rate_valid) {
+    trace_analysis.delivery_rate_mean_bps = 0.0;
+    if (fbbr_regime_i_or_iii_seen_this_cruise_) {
       waveform_last_action_ =
           "FBBR_REGIME_II_INVALID_DELIVERED_INTERVAL_HOLD";
       waveform_last_invalid_reason_ =
@@ -9617,16 +8867,6 @@ void FBBRSender::EmitWaveformSearchTrace(
       current_injection_baseline_bw_.ToBitsPerSecond());
   const double amplitude_after_bps =
       static_cast<double>(current_probe_amplitude_bps_);
-  const QuicByteCount actual_inflight =
-      latest_congestion_event_inflight_valid_
-          ? latest_congestion_event_inflight_ : 0;
-  const FbbrEnvelopeSnapshot fbbr =
-      BuildFbbrEnvelopeSnapshot(cwnd_, actual_inflight);
-  const double fbbr_cap_binding_fraction =
-      fbbr_window_ack_events_ == 0
-          ? 0.0
-          : static_cast<double>(fbbr_window_cap_binding_events_) /
-                static_cast<double>(fbbr_window_ack_events_);
   auto clip_case_name = [](SrttClipCase clip_case) {
     switch (clip_case) {
       case SrttClipCase::kU1PositiveShoulder: return "U1";
@@ -9978,27 +9218,8 @@ void FBBRSender::EmitWaveformSearchTrace(
       << static_cast<double>(waveform_initial_probe_amplitude_bps_) *
              waveform_inconclusive_signal_amplification_max_ratio_ << ","
       << fbbr_rolling_retry_count_ << ","
-      << (fbbr.previous_beq_valid
-              ? beq_.ToBitsPerSecond() : 0) << ","
-      << (!fbbr.previous_beq_valid
-              ? "invalid"
-              : fbbr.previous_beq_from_guard ? "guard" : "beq")
-      << ","
-      << fbbr.plan_inflight << ","
-      << fbbr.service_inflight << ","
-      << fbbr.positive_probe_credit << ","
-      << fbbr.service_budget << ","
-      << fbbr.envelope << ","
-      << fbbr.extra_acked << ","
-      << fbbr.inflight_cap << ","
-      << fbbr.native_cwnd << ","
-      << fbbr.actual_inflight << ","
-      << (fbbr.service_history_valid ? "true" : "false") << ","
-      << (fbbr.app_limited_contaminated ? "true" : "false") << ","
-      << (fbbr.projection_active ? "true" : "false") << ","
-      << fbbr.service_restriction << ","
-      << fbbr.enforced_excess << ","
-      << fbbr_cap_binding_fraction;
+      << (HasUsableFbbrPreviousBeq() ? beq_.ToBitsPerSecond() : 0) << ","
+      << (beq_source_ == nullptr ? "invalid" : beq_source_);
   cruise_load_trace_cb_(time_s,
                         time_s,
                         0.0,
@@ -10009,10 +9230,6 @@ void FBBRSender::EmitWaveformSearchTrace(
                         analysis.classification ==
                             WaveformClassification::kInconclusive,
                         row.str());
-  if (IsFbbr()) {
-    fbbr_window_ack_events_ = 0;
-    fbbr_window_cap_binding_events_ = 0;
-  }
 }
 
 void FBBRSender::PublishWaveformBeq() {

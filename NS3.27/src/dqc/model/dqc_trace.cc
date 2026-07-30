@@ -862,15 +862,7 @@ void DqcTrace::OpenFBBRWaveformSearchFile(){
             <<",inconclusive_extension_count,inconclusive_amplification_count"
             <<",initial_probe_amplitude_bps,current_probe_amplitude_bps"
             <<",inconclusive_amplitude_cap_bps,rolling_retry_count"
-            <<",fbbr_previous_beq,fbbr_previous_beq_source"
-            <<",fbbr_plan_inflight,fbbr_service_inflight"
-            <<",fbbr_positive_probe_credit,fbbr_service_budget"
-            <<",fbbr_envelope,fbbr_extra_acked,fbbr_inflight_cap"
-            <<",fbbr_native_cwnd,fbbr_actual_inflight"
-            <<",fbbr_service_history_valid"
-            <<",fbbr_app_limited_contaminated"
-            <<",fbbr_projection_active,fbbr_service_restriction"
-            <<",fbbr_enforced_excess,fbbr_cap_binding_fraction\n";
+            <<",fbbr_previous_beq,fbbr_previous_beq_source\n";
     }
 }
 void DqcTrace::OpenFBBRSummaryFile(){
