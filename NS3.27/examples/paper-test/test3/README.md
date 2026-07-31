@@ -33,9 +33,11 @@ examples/paper-test/test3/run_test3.sh --skip-build --jobs=1 --algorithm=FBBR
 ```
 
 FBBR always receives `examples/CCconfig/fbbr_default.conf`. Raw controller
-outputs are under `results/test3/raw/DYN-RTT`, and the analyzer produces
+outputs are under `results/test3/raw/DYN-RTT`, including a per-flow
+`controller_trace.csv` with BBR state, native/FBBR RTprop, cwnd/inflight
+limits, pacing, and FBBR BEQ state. The analyzer produces
 `results/test3/RESULTS.md`, per-stage and transition CSV summaries, and
-`results/test3/figures/dynamic_rtt_response.png`.
+`results/test3/figures/dynamic_rtt_response.png` contains one Fig.1-style figure with left-right subplots for aggregate throughput and mirrored queue-delay/relative-RTprop-error stage statistics.
 
 For each 60-second RTT stage, settled metrics exclude its first 15 seconds:
 aggregate goodput, utilization, per-flow goodput, Jain fairness, queue delay,

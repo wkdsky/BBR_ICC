@@ -9,9 +9,9 @@
 - 当前实验配置：[fbbr_default.conf](/home/wkd/FreqBBR/NS3.27/examples/CCconfig/fbbr_default.conf:1)。
 - Test2 的接入点：[test2-fixed4.cc](/home/wkd/FreqBBR/NS3.27/examples/paper-test/test2/test2-fixed4.cc:887)。
 
-FBBR 继承 BBRv2 的主状态机、带宽模型、ProbeRTT、丢包/ECN 响应和原生 PROBE_BW 转换。FBBR 的波形激励、采集、判别和 Regime 更新只在 PROBE_BW 的 PROBE_CRUISE 中运行；其结果通过 BEQ 应用和 inflight 包络延伸到 REFILL、UP、DOWN 等后续 PROBE_BW 子阶段。
+FBBR 继承 BBRv2 的主状态机、带宽模型、ProbeRTT、丢包/ECN 响应和原生 PROBE_BW 转换。FBBR 的波形激励、采集、判别和 Regime 更新只在 PROBE_BW 的 PROBE_CRUISE 中运行；其结果通过 CRUISE 基线和离开 CRUISE 时发布的 BEQ 影响后续 pacing。FBBR 不再维护额外的 inflight 服务包络，`GetCongestionWindow()` 直接使用原生 BBRv2 的 `cwnd_`。
 
-当前 Test2 会对每条 FBBR 流调用 ConfigureFBBR，但没有调用 ConfigureFBBRConvergenceGate。因此本次实验中收敛门控控制默认关闭：稳定性模块仍计算和记录状态，却不会因稳定而停掉 CRUISE 波动。
+当前 Test2 会对每条 FBBR 流调用 `ConfigureFBBR()`，但没有调用 `SetConvergenceGateControlEnabled(true)`。因此本次实验中收敛门控控制默认关闭：稳定性模块仍计算和记录状态，却不会因稳定而停掉 CRUISE 波动。
 
 ## 2. 记号与关键状态
 
@@ -22,12 +22,12 @@ FBBR 继承 BBRv2 的主状态机、带宽模型、ProbeRTT、丢包/ECN 响应�
 | Aeff | effective_probe_amplitude_bps_ | 受最小 pacing 速率保护后的有效幅度。 |
 | f | cruise_modulation_freq_hz_ | 注入频率；当前为 5 Hz，周期 T=0.2 s。 |
 | F | minimum_pacing_rate_bps_ | pacing 下限；当前 0.2 Mbit/s。 |
-| R | fbbr_rtprop_，回退到 model_.MinRtt() | FBBR 的 RTprop 参考值。 |
+| R | model_.MinRtt() | FBBR 的 RTprop 参考值。 |
 | M | fbbr_max_srtt_ms_ | 围绕 MaxBw 更新时刻采集的最大 SRTT。每次 MaxBw 更新记录以该时刻为中心、半窗为 3 个 RTT 的观测，成熟后写入 M。 |
 | Dmin/Dmax | 窗口中重采样 delivery-rate 的最小/最大值 | Regime III/I 执行器的首选基线候选。 |
 | MinBw/MaxBw | BBRv2 model_.MinBandwidth()/MaxBandwidth() | BBRv2 带宽模型给出的边界，用于 Regime I/III 中点候选和原生回退。 |
 | BEQ | beq_ | FBBR 在一轮 CRUISE 结束时发布的带宽基线；不是显式的公平份额。 |
-| guardBw | guard_filter_stage2_ | 正常 ACK delivery-rate 的两级低通结果；波形 BEQ 不可用时才作为 BEQ 后备。 |
+| CRUISE 时间加权 BEQ | delivery-rate/SRTT 历史 | 波形 BEQ 不可用时，优先使用 SRTT 位于 `[1.05R, 1.10R]` 的 delivery-rate 样本；没有符合样本时使用全 CRUISE 样本。 |
 | v_round | abs(D_round - D_prev) / D_prev | 连续两个非 app-limited RTT 轮次的最大 delivery-rate 相对变化。 |
 
 重要约束：fair_share_bandwidth_bps_ 只被写入 trace 汇总，不参与 Regime 判别、BEQ、pacing 或 inflight 决策。因此 FBBR 不依赖也不假设网络提供显式公平份额。
@@ -56,14 +56,15 @@ BBRv2 STARTUP / DRAIN / PROBE_BW
           Regime 判定：I(UNDERLOAD) / II(FULL_LOAD) / III(OVERLOAD)
                  |
                  +-- I：提高 B
-                 +-- II：在本轮已出现 I/III 后，将 B 与 BEQ 设为区间交付率
+                 +-- II：首次保持；本轮已见 I/III 时区间交付率无效，仍保持 B
                  +-- III：降低 B
                  |
                  v
           不确定：一次延长观察；之后可放大信号并重试
                  |
                  v
-          离开 CRUISE：波形 BEQ -> guardBw -> 上轮 BEQ -> 原生带宽回退
+          离开 CRUISE：波形 BEQ -> SRTT 区间时间加权 BEQ
+                         -> 全 CRUISE 时间加权 BEQ -> 原生带宽回退
                  |
                  v
           REFILL / UP / DOWN 使用新鲜 BEQ；GetCongestionWindow 直接返回原生 cwnd
@@ -87,7 +88,7 @@ q = ((t - probe_epoch_start) mod T) / T
 0.75 <= q < 1:    triangle(q) = 4 - 4q
 ~~~
 
-因此一个周期的相位顺序为 0 -> -1 -> 0 -> +1 -> 0，而不是从正半波开始。波形公式见 [TriangleWave](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2094)。
+因此一个周期的相位顺序为 0 -> -1 -> 0 -> +1 -> 0，而不是从正半波开始。波形公式见 [TriangleWave](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2034)。
 
 当前 A 的语义：
 
@@ -115,7 +116,7 @@ or
 
 退出稳定后，full_drate_ref 设为当前 D_round。之后若完成轮次达到 full_drate_ref * full_pipe_growth_threshold，则更新参考并重新计数；否则累积 stable_rounds 次轮次后回到稳定态。
 
-当前 Test2 不开启 enable_convergence_gate_control，所以 stable/unstable 不会决定是否产生三角波。若外部显式打开控制，stable 时会关闭调制并清除 BEQ 应用；unstable 时才允许调制。这套逻辑位于 [FinalizeCompletedRound](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2504) 和 [UpdateFreqWeightAndToolState](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2615)。
+当前 Test2 不开启 enable_convergence_gate_control，所以 stable/unstable 不会决定是否产生三角波。若外部显式打开控制，stable 时会关闭调制并清除 BEQ 应用；unstable 时才允许调制。这套逻辑位于 [FinalizeCompletedRound](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2442) 和 [UpdateFreqWeightAndToolState](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:2553)。
 
 ## 5. 信号采集与波形特征模块
 
@@ -156,11 +157,11 @@ coherent_power_ratio = |X(f)|^2 / (N * sum((x[n]-mean)^2))
 component_present = coherent_power_ratio >= goertzel.min_coherent_power_ratio
 ~~~
 
-FBBR 的 delivery-rate 波存在条件是：delivery-rate 输入有效，且 sender 与 delivery-rate 的目标频率分量都存在。SRTT 的波存在条件则由时域活动检测得到，不以 Goertzel 相似度替代。实现见 [AnalyzeGoertzelComponent](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:5783)。
+在 FBBR 路径中，sender-rate 与 delivery-rate 的目标频率分量直接用 Goertzel 判定，不再走旧的 sender/delivery-rate 周期相似度分支。delivery-rate 波还要求 delivery-rate 输入有效，且 sender 与 delivery-rate 的目标频率分量都存在。SRTT 的波存在条件由时域活动检测得到，不以 Goertzel 相似度替代。实现见 [AnalyzeGoertzelComponent](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:5056)。
 
 ### 5.3 时域活动、裁剪和掩码
 
-SRTT 和（在非 FBBR 路径中）delivery-rate 可被以下模块检查；FBBR 的 SRTT 仍使用这些时域证据：
+SRTT 以及 delivery-rate 的活动/裁剪预处理仍可使用以下时域模块；但 FBBR 对 sender-rate/delivery-rate 的最终目标频率匹配使用 Goertzel，SRTT 仍使用这些时域证据：
 
 - 活动检测：p95-p05 幅度需同时超过噪声倍数和相对电平阈值；还检查活动步数、活动比例、上下方向变化、有效路径比例和斜率反转。
 - 连续水平段：检测顶部/底部水平段、平坦比例、局部斜率、两侧斜率、边界折点、电平跨度、总漂移和极值距离。
@@ -193,7 +194,7 @@ SRTT 和（在非 FBBR 路径中）delivery-rate 可被以下模块检查；FBBR
 | OVERLOAD | III | 降低 B。 |
 | INCONCLUSIVE | 无 | 保持 B，扩窗或重试。 |
 
-判别函数为 [ClassifyFbbrRegime](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:4269)。以下表中，D 匹配/不匹配指 delivery-rate 对注入频率的 Goertzel 结果；SRTT 波指时域活动结果。
+判别函数为 [ClassifyFbbrRegime](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:3541)。以下表中，D 匹配/不匹配指 delivery-rate 对注入频率的 Goertzel 结果；SRTT 波指时域活动结果。
 
 ### 6.1 进入判定树前的条件
 
@@ -248,7 +249,7 @@ N07、N11、N15 才把当前窗口的 SRTTmin 发布为新的 FBBR RTprop。L3/N
 
 ## 7. 三个 Regime 的执行器
 
-执行器为 [ComputeFbbrInjectionBaseline](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:4419)。分类有效且 Dmin、Dmax、最小速率均有效后，规则如下。
+执行器为 [ComputeFbbrInjectionBaseline](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:3691)。分类有效且 Dmin、Dmax、最小速率均有效后，规则如下。
 
 ### 7.1 Regime I：UNDERLOAD
 
@@ -285,10 +286,10 @@ FBBR_REGIME_III_DECREASE_BASELINE_0P98
 ### 7.3 Regime II：FULL_LOAD
 
 - 若本轮 CRUISE 尚未出现 Regime I 或 III：保持 B，不发布新的 BEQ。
-- 若本轮已出现 I 或 III：要求窗口累计 delivered 计数完整且没有重置；计算 interval_delivery_rate=(Delivered(end)-Delivered(start))*8/window_duration。
-- 令 Bnext=interval_delivery_rate，同时 BEQ=interval_delivery_rate，BEQ 来源为 FBBR_WINDOW_DELIVERED_RATE。
+- 若本轮已出现 I 或 III：当前实现将 `interval_delivery_rate_bps` 固定为 `0.0`；由于 inflight 包络已移除，无法计算区间交付率，直接执行 `FBBR_REGIME_II_INVALID_DELIVERED_INTERVAL_HOLD`。
+- 因此当前 FBBR 的 Regime II 不更新 B 或 BEQ；`FBBR_WINDOW_MEAN`/`FBBR_WINDOW_DELIVERED_RATE` 候选路径不可达。
 
-如果 FullLoad 需要区间交付率却无法计算，操作保持基线，不用估计值替代。
+FullLoad 不使用区间交付率的估计值替代；无论是首次 FullLoad 还是区间速率无效，都会保持基线并重新 settle。
 
 ## 8. 不确定结果、扩窗和幅度重试
 
@@ -300,67 +301,60 @@ FBBR_REGIME_III_DECREASE_BASELINE_0P98
 4. 放大倍数为 waveform.inconclusive_signal_amplification_factor，且不超过初始幅度的 waveform.inconclusive_signal_amplification_max_ratio，同时仍经过 Aeff 和 F 的保护。
 5. 任意分类/执行器/统计输入无效时，不改变 B，重置 settle 后继续采集。
 
-## 9. BEQ 与 guardBw
+## 9. BEQ 与 CRUISE 时间加权回退
 
 ### 9.1 BEQ 选择优先级
 
-离开 CRUISE 时，按以下顺序发布 BEQ：
+离开 CRUISE 时，当前 FBBR 按以下顺序发布 BEQ：
 
-1. 本轮已出现 Regime II，且 waveform baseline 已锁定，来源是 FBBR_WINDOW_MEAN 或 FBBR_WINDOW_DELIVERED_RATE：使用波形候选，并把 guard filter 锚定到该 BEQ。
-2. 否则，若当前 CRUISE 更新过有效 guard filter：使用 guardBw，来源为 GUARD_FILTER。
-3. 否则，若存在可用的上一轮 BEQ：使用 PREVIOUS_BEQ。
-4. 否则：依次回退到 BBRv2 MaxBw、初始 CRUISE 基线、BandwidthEstimate、最小 pacing rate。
+1. 若当前 CRUISE 产生了合法的波形 BEQ：使用该 BEQ。
+2. 否则，选取当前 CRUISE 中对应 SRTT 位于 `[1.05R, 1.10R]` 的有效 delivery-rate 样本，按样本保持时间计算时间加权平均值，来源为 `CRUISE_SRTT_1P05_1P10_TIME_WEIGHTED`。
+3. 若没有符合 SRTT 区间的样本，使用当前 CRUISE 全部有效 delivery-rate 样本的时间加权平均值，来源为 `CRUISE_ALL_TIME_WEIGHTED`。
+4. 若整个 CRUISE 没有有效 delivery-rate 样本：依次回退到 BBRv2 MaxBw、初始 CRUISE 基线、BandwidthEstimate、最小 pacing rate，来源为 `NATIVE_FALLBACK`。
 
-BEQ 只在 PROBE_REFILL、PROBE_UP、PROBE_DOWN/PROBE_DOWN_SLIGHTLY 中以新鲜且有效的结果参与 pacing。正常活动波形的 CRUISE 使用当前注入基线 B；若波形被禁用，则会走原生/上一轮 BEQ 的回退路径。
+上一轮有效 BEQ 仍可作为下一轮 CRUISE 的初始注入基线，但不会在当前 CRUISE 的最终 BEQ 发布中替代当前 CRUISE 样本。
 
-### 9.2 guardBw 的精确定义
+选择出的 BEQ 只在 PROBE_REFILL、PROBE_UP、PROBE_DOWN/PROBE_DOWN_SLIGHTLY 中以新鲜且有效的结果参与 pacing。正常活动波形的 CRUISE 使用当前注入基线 B；若波形被禁用，则继续使用原生或当前轮已发布的 BEQ。
 
-guardBw 仅在 FBBR 的 PROBE_CRUISE 中从正常 ACK 更新。测量窗口至少为 max(当前 RTT, 50 ms)：
+### 9.2 时间加权回退的精确定义
+
+时间加权回退只使用当前 FBBR CRUISE 内的 delivery-rate 历史样本。每个有效样本从其时间戳保持到下一个 delivery-rate 样本或 CRUISE 结束：
 
 ~~~text
-delivery_elapsed = max(ack_elapsed, send_elapsed)
-raw = delta_delivered * 8 / delivery_elapsed
+Beq = sum(delivery_rate_i * duration_i) / sum(duration_i)
 ~~~
 
-有效样本要求：
+样本要求：
 
-- 有确认字节、有效 send state、有效 ACK/发送时间。
-- delta_delivered>0，ack_elapsed>0，send_elapsed>0。
-- delivery_elapsed>=MinRTT。
-- 整个 guard 窗口没有 app-limited 标记。
+- delivery-rate 样本自身有效且带宽为正。
 - MaxBw-flat trial 的 ACK 被显式排除。
+- SRTT 区间优先路径要求对应时刻的 SRTT 满足 `1.05R <= SRTT <= 1.10R`，两端点均包含。
 
-滤波器是两级一阶低通：
+delivery-rate 与 SRTT 按 ACK 事件时间关联；SRTT 使用不晚于该 delivery-rate 样本时间的最新有效值。优先路径没有可积分的符合样本时，改用同一 CRUISE 内全部有效 delivery-rate 样本。
 
-~~~text
-s1[n] = (7*s1[n-1] + raw[n]) / 8
-s2[n] = (7*s2[n-1] + s1[n]) / 8
-guardBw = s2
-~~~
+## 10. Inflight 服务包络已移除
 
-第一次有效样本令 s1=s2=raw。每轮 CRUISE 只重置 guard_updated_this_cruise 和测量窗口；滤波状态可跨 CRUISE 保留，但只有当前轮确实更新过它才允许作为后备 BEQ。
+旧的 inflight 服务包络（plan_inflight / service_inflight / positive_probe_credit / envelope / inflight_cap）及其专属历史、快照和 telemetry 控制已从 FBBR 中移除。`GetCongestionWindow()` 直接返回原生 BBRv2 的 `cwnd_`，不再施加额外的 in-flight 上限；旧的 `FBBR_FLOW_SUMMARY` 诊断路径也不再产生。`FinalizeFbbrTrace()` 仍保留为 no-op，以兼容外部调用。
 
-## 10. (已移除) Inflight 服务包络
-
-Inflight 服务包络（plan_inflight / service_inflight / positive_probe_credit / envelope / inflight_cap）已从 FBBR 中完全移除。`GetCongestionWindow()` 直接返回原生 BBRv2 的 `cwnd_`，不再施加额外的 in-flight 上限。相关的 `fbbr_rate_history_`、`fbbr_delivered_history_`、`FbbrEnvelopeSnapshot`、所有 `ComputeFbbr*` / `BuildFbbrEnvelopeSnapshot` / `ApplyFbbrInflightEnvelope` / `UpdateFbbrTelemetry` / `EmitFbbrFlowSummary` 方法和 telemetry 字段均已删除，`FBBR_FLOW_SUMMARY` 诊断路径不再产生。`ComputeFbbrIntervalDeliveryRateBps` 同样被移除，Regime II 的 interval 速率始终报为 invalid，FullLoad 命中时直接走 `FBBR_REGIME_II_INVALID_DELIVERED_INTERVAL_HOLD` 兜底。
+这不表示所有 `ComputeFbbr*` 方法都已删除：当前仍保留 `ComputeFbbrMaxSrttAround`、`ComputeFbbrTimeWeightedSrttMeanMs` 和 `ComputeFbbrInjectionBaseline`，分别服务于 MaxBw 附近 SRTT 观测、SRTT 时间加权均值和 Regime 执行器。区间交付率 helper 已移除，`ApplyFbbrClassification()` 将 Regime II 的 interval 速率固定为 `0.0`，因此 FullLoad 在需要区间速率时只能保持基线。
 
 ## 11. MaxBw-flat 安全试验
 
-FBBR 还实现了非配置化的 MaxBw-flat 试验。当处于 CRUISE、非 recovery、非 app-limited，且：
+FBBR 还实现了非配置化的 MaxBw-flat 试验。当当前是 FBBR 的 PROBE_CRUISE、非 recovery，且：
 
 ~~~text
-MaxBw > current baseline
-SRTT <= 1.02*RTprop
+MaxBw > initial_cruise_baseline
+MaxBw 和 initial_cruise_baseline 均为有效正带宽
 ~~~
 
-它暂停三角波、以 MaxBw 平速发送。下列任一条件会拒绝试验：
+它暂停三角波、以 MaxBw 平速发送。app-limited 和 RTT 条件在试验开始后检查；下列任一条件会拒绝试验：
 
 - 丢包、ECN、recovery 或 app-limited。
 - SRTT>1.05*RTprop，或 SRTT>entry_SRTT+0.02*RTprop。
 - 某 RTT 轮次 delivery rate<0.97*trial_rate。
 - 某轮最大 SRTT>1.03*RTprop，或 >entry_SRTT+0.01*RTprop。
 
-连续 3 个合格 RTT 轮次后接受，将 B 提升到试验 MaxBw；否则恢复原 B。试验 ACK 不进入 guard、收敛轮次、波形分类或 Regime 更新。实现见 [MaxBw-flat trial](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:1339)。
+连续 3 个合格 RTT 轮次后接受，将 B 提升到试验 MaxBw；否则恢复原 B。试验 ACK 不进入 CRUISE 时间加权回退、收敛轮次、波形分类或 Regime 更新。实现见 [MaxBw-flat trial](/home/wkd/FreqBBR/NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc:1308)。
 
 ## 12. 当前配置参数
 
@@ -497,14 +491,14 @@ SRTT <= 1.02*RTprop
 
 ### 12.9 trace 参数及其 Test2 例外
 
-| 参数 | 当前值 | 作用 |
+| 参数 | 配置文件值 | 当前 Test2 接线 |
 | --- | --- | --- |
-| trace.gate_trace_mode | round_only | 收敛门控 trace 输出模式。 |
-| trace.gate_trace_sample_interval_us | 10000 | sampled_pacing/full trace 的采样间隔。 |
-| trace.enable_cruise_window_trace | true | CRUISE 窗口 trace 开关。 |
-| trace.enable_beq_selection_trace | true | BEQ 选择 trace 开关。 |
+| trace.gate_trace_mode | round_only | `ConfigureFBBR()` 不读取；Test2 未调用 `SetGateTraceMode()`，实际保留构造默认 `round_only`。 |
+| trace.gate_trace_sample_interval_us | 10000 | `ConfigureFBBR()` 不读取；实际保留构造默认 1 ms，而不是配置文件的 10 ms。 |
+| trace.enable_cruise_window_trace | true | 配置解析器接受，但 `ConfigureFBBR()` 不应用该字段。 |
+| trace.enable_beq_selection_trace | true | 配置解析器接受，但 `ConfigureFBBR()` 不应用该字段。 |
 
-这些 trace 字段由配置解析器接受，但当前 Test2 只调用 ConfigureFBBR，不调用 ConfigureFBBRConvergenceGate；因此 Test2 中它们不会自动接入 FBBRSender 的 gate trace 控制。scratch/fbbr_4flow 会把这几项接到其 runner 的运行时选项中。
+这些 trace 字段由配置解析器接受，但 `ConfigureFBBR()` 没有读取它们。当前 Test2 只调用 `ConfigureFBBR()`，没有调用 `SetConvergenceGateTraceEnabled()`、`SetConvergenceGateControlEnabled()` 或 `SetGateTraceMode()`；因此实际 FBBR 默认值为 gate trace enabled=true、control=false、mode=round_only、sample interval=1 ms。两个 `trace.enable_*` 配置项本身不会改变运行时状态。
 
 ## 13. 观测与调试
 
@@ -514,7 +508,7 @@ SRTT <= 1.02*RTprop
 | --- | --- |
 | 某轮为何进入 I/II/III | Waveform trace 中 decision_rule=N01..N16、selected clip case、SRTT/DRate 有波、M、R、Dmin/Dmax。 |
 | 基线为何变化 | waveform_last_action、delta_source、raw/applied baseline delta、I/III 子分支标记。 |
-| BEQ 为何不同 | beq_source：FBBR_WINDOW_DELIVERED_RATE、GUARD_FILTER、PREVIOUS_BEQ 或 NATIVE_FALLBACK。 |
+| BEQ 为何不同 | `beq_source` 表示波形 BEQ、`CRUISE_SRTT_1P05_1P10_TIME_WEIGHTED`、`CRUISE_ALL_TIME_WEIGHTED` 或 `NATIVE_FALLBACK`。 |
 | 波形为何没有分类 | invalid_reason、coverage、app_limited_ratio、Goertzel component reason、无波 retry 状态。 |
 | 低队列是否由 cwnd 包络造成 | cwnd 包络已移除；当前直接反映 BBRv2 原生 cwnd。 |
 | MaxBw 是否被验证 | MaxBw-flat trial 的启动、拒绝原因、good_rounds、three_good_rounds。 |

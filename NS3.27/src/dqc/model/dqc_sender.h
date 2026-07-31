@@ -112,11 +112,24 @@ public:
         double pacing_gain{0.0};
         uint64_t pacing_rate_bps{0};
         uint64_t max_bw_bps{0};
+        uint64_t bandwidth_estimate_bps{0};
         uint64_t delivery_rate_bps{0};
         uint64_t cwnd_bytes{0};
         uint64_t inflight_bytes{0};
+        uint64_t latest_rtt_us{0};
         uint64_t srtt_us{0};
         uint64_t min_rtt_us{0};
+        uint64_t model_min_rtt_us{0};
+        double model_min_rtt_timestamp_s{0.0};
+        uint64_t inflight_hi_bytes{0};
+        uint64_t inflight_lo_bytes{0};
+        uint64_t cwnd_mode_cap_bytes{0};
+        uint64_t cwnd_global_cap_bytes{0};
+        bool fbbr_beq_valid{false};
+        uint64_t fbbr_beq_bps{0};
+        uint64_t fbbr_injection_baseline_bps{0};
+        std::string fbbr_beq_source{"none"};
+        std::string fbbr_waveform_last_action{"none"};
         uint64_t delivered_bytes{0};
         uint64_t sent_bytes{0};
         uint64_t acked_bytes{0};
@@ -126,6 +139,9 @@ public:
         double probe_phase_start_time_s{0.0};
     };
     bool GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) const;
+    bool GetTransportRttSnapshot(uint64_t *srtt_us,
+                                 uint64_t *min_rtt_us,
+                                 uint64_t *latest_rtt_us) const;
     void SetBbr2ForcedProbeUp(double probe_up_time_s,
                               double min_probe_up_duration_s);
     void SetBbr2StrictProbeUp(uint32_t probe_order,

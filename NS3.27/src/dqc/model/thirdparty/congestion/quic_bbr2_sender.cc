@@ -542,6 +542,14 @@ QuicByteCount Bbr2Sender::GetTargetBytesInflight() const {
   return std::min(bdp, GetCongestionWindow());
 }
 
+QuicByteCount Bbr2Sender::GetCwndModeUpperBoundForExperiment() const {
+  return GetCwndLimitsByMode().Max();
+}
+
+QuicByteCount Bbr2Sender::GetCwndGlobalUpperBoundForExperiment() const {
+  return cwnd_limits().Max();
+}
+
 /*void Bbr2Sender::PopulateConnectionStats(QuicConnectionStats* stats) const {
   stats->num_ack_aggregation_epochs = model_.num_ack_aggregation_epochs();
 }*/

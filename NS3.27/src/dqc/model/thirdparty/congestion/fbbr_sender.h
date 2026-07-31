@@ -122,7 +122,7 @@ struct FBBRConfig {
   double waveform_delta_drate_amplitude_ratio = 0.50;
   double waveform_delta_fallback_baseline_ratio = 0.25;
   double waveform_plateau_max_level_span_ratio = 0.15;
-  // Active obvious-clipping guards in the time-waveform control path.
+  // Active obvious-clipping checks in the time-waveform control path.
   double waveform_plateau_extreme_distance_ratio = 0.15;
   uint32_t waveform_max_baseline_adjustments = 8;
   double waveform_inconclusive_signal_amplification_factor = 1.25;
@@ -229,6 +229,17 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void SetGateTraceMode(FBBRGateTraceMode mode,
                         uint64_t sample_interval_us);
   void FinalizeFbbrTrace();
+
+  // A compact read-only control-plane snapshot used by Test 3 diagnostics.
+  struct ExperimentState {
+    bool beq_valid = false;
+    QuicBandwidth beq = QuicBandwidth::Zero();
+    QuicBandwidth injection_baseline = QuicBandwidth::Zero();
+    std::string beq_source = "none";
+    std::string waveform_last_action = "none";
+  };
+  ExperimentState ExportExperimentState() const;
+
   CongestionControlType GetCongestionControlType() const override {
     return Bbr2Sender::GetCongestionControlType();
   }
@@ -247,6 +258,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   void OnApplicationLimited(QuicByteCount bytes_in_flight) override;
   void OnUpdateEcnBytes(uint64_t ecn_ce_count) override;
+  bool MarkProbeRttAppLimited() const override { return true; }
 
   QuicBandwidth PacingRate(QuicByteCount bytes_in_flight) const override;
   QuicByteCount GetCongestionWindow() const override;
@@ -555,15 +567,15 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   struct FbbrRegimeContext {
     bool max_srtt_valid = false;
     double max_srtt_ms = 0.0;
-    bool rtprop_valid = false;
-    double rtprop_ms = 0.0;
+    bool min_rtt_valid = false;
+    double min_rtt_ms = 0.0;
   };
 
   struct FbbrRegimeDecision {
     WaveformClassification classification =
         WaveformClassification::kInconclusive;
     const char* rule_id = "";
-    bool refresh_rtprop = false;
+    bool refresh_min_rtt = false;
   };
 
   struct FbbrActuatorResult {
@@ -660,9 +672,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     bool srtt_only_positive_half = false;
     bool srtt_clip_ambiguous = false;
     BicClippingDetectionResult bic_clipping;
-    bool true_bottom_clip_rtprop_refresh_applied = false;
-    double true_bottom_clip_rtprop_before_ms = 0.0;
-    double true_bottom_clip_rtprop_after_ms = 0.0;
+    bool true_bottom_clip_min_rtt_refresh_applied = false;
+    double true_bottom_clip_min_rtt_before_ms = 0.0;
+    double true_bottom_clip_min_rtt_after_ms = 0.0;
     double true_bottom_clip_min_rtt_timestamp_before_s = 0.0;
     double true_bottom_clip_min_rtt_timestamp_after_s = 0.0;
     double true_bottom_clip_probe_rtt_deadline_after_s = 0.0;
@@ -688,8 +700,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
     double fbbr_max_bw_before_bps = 0.0;
     bool fbbr_max_bw_after_valid = false;
     double fbbr_max_bw_after_bps = 0.0;
-    bool fbbr_rtprop_valid = false;
-    double fbbr_rtprop_ms = 0.0;
+    bool model_min_rtt_valid = false;
+    double model_min_rtt_ms = 0.0;
     bool fbbr_max_srtt_valid = false;
     double fbbr_max_srtt_ms = 0.0;
     bool fbbr_regime_i_maxdrate_triggered = false;
@@ -734,10 +746,10 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                            float cwnd_gain) const override;
   void OnCongestionEventStarted(
       const Bbr2CongestionEvent& congestion_event) override;
-  void InitializeFbbrRtpropFromModel();
-  void PublishFbbrRtprop(TimeDelta rtprop,
-                         QuicTime source_time,
-                         bool from_probe_rtt);
+  void UpdateNativeMinRtt(TimeDelta min_rtt,
+                          QuicTime source_time,
+                          bool from_probe_rtt);
+  void ResetBeqForNativeMinRttRise();
 
   Bbr2ProbeBwMode::CyclePhase GetCurrentProbeBwPhase() const;
   bool ShouldStartMaxBwFlatTrial() const;
@@ -761,19 +773,17 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
 
   void EnterCruise(QuicTime now);
   void LeaveCruise(QuicTime now);
-  static bool ShouldEnableRtpropProbeDown(
-      bool previous_cruise_rtprop_updated,
+  static bool ShouldEnableMinRttProbeDown(
+      bool previous_cruise_min_rtt_updated,
       QuicByteCount bytes_in_flight,
       QuicByteCount bdp);
-  static bool ShouldExitRtpropProbeDown(QuicByteCount bytes_in_flight,
+  static bool ShouldExitMinRttProbeDown(QuicByteCount bytes_in_flight,
                                         QuicByteCount bdp);
   void FinalizeCruise(QuicTime now);
   void ResetWaveformCruiseState(QuicTime now);
   void RunWaveformCruiseStateMachine(QuicTime now);
   bool IsFbbr() const;
   bool HasUsableFbbrPreviousBeq() const;
-  TimeDelta CurrentFbbrRtprop() const;
-
   bool ComputeFbbrTimeWeightedSrttMeanMs(
       QuicTime window_start,
       QuicTime window_end,
@@ -790,8 +800,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   void ApplyFbbrRegimeStateUpdates(
       WaveformWindowAnalysis* trace_analysis,
       QuicTime now);
-  void RefreshRtpropFromTrueBottomClip(WaveformWindowAnalysis* analysis,
-                                      QuicTime now);
+  void RefreshMinRttFromTrueBottomClip(WaveformWindowAnalysis* analysis,
+                                       QuicTime now);
   void ScheduleWaveformCollectionAfterSettle(QuicTime now,
                                              bool initial_settle);
   void StartWaveformCollectionAt(QuicTime cycle_start,
@@ -836,19 +846,8 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
                                double baseline_before_bps,
                                double amplitude_before_bps) const;
   void PublishWaveformBeq();
-  void PublishFbbrCruiseBeq();
+  void PublishFbbrCruiseBeq(QuicTime now);
   void PublishBeqSelection(const BeqSelectionResult& selection);
-  void UpdateGuardEstimatorFromCongestionEvent(
-      const Bbr2CongestionEvent& congestion_event);
-  void StartGuardMeasurementWindow(
-      const Bbr2CongestionEvent& congestion_event);
-  void UpdateGuardFilter(QuicBandwidth raw_sample);
-  void AnchorGuardFilter(QuicBandwidth beq);
-  TimeDelta CurrentGuardRttSample(
-      const Bbr2CongestionEvent& congestion_event) const;
-  TimeDelta CurrentGuardMinRtt(TimeDelta fallback_rtt) const;
-  static QuicBandwidth ApplyGuardLowPass(QuicBandwidth previous,
-                                         QuicBandwidth sample);
   void EmitCruiseSummaryTrace(QuicTime now) const;
   void UpdateRoundDeliveryRateSample(
       const Bbr2CongestionEvent& congestion_event);
@@ -1038,6 +1037,22 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   };
   static DeliveryRateWindowStats ComputeDeliveryRateWindowStats(
       const std::vector<FBBRRateSample>& samples);
+  struct TimeWeightedDeliveryRateStats {
+    size_t sample_count = 0;
+    bool valid = false;
+    double mean_bps = 0.0;
+  };
+  TimeWeightedDeliveryRateStats ComputeTimeWeightedDeliveryRate(
+      const std::vector<FBBRRateSample>& samples,
+      QuicTime window_start,
+      QuicTime window_end,
+      double rtprop_ms,
+      bool require_srtt_range) const;
+  bool ComputeFbbrCruiseFallbackBeq(QuicTime window_start,
+                                    QuicTime window_end,
+                                    TimeDelta rtprop,
+                                    QuicBandwidth* beq,
+                                    const char** source) const;
   struct SrttWindowStats {
     size_t sample_count = 0;
     bool valid = false;
@@ -1129,7 +1144,7 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
       double sample_step_s,
       double nominal_period_s,
       double* correlation);
-  static bool ShouldRefreshRtpropForTrueClip(bool top_clip,
+  static bool ShouldRefreshMinRttForTrueClip(bool top_clip,
                                              bool bottom_clip);
   static BicClippingDetectionResult DetectBicSrttClipping(
       const std::vector<double>& srtt,
@@ -1168,10 +1183,10 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool cruise_exit_force_immediate_;
   mutable bool cruise_exit_pending_;
   mutable QuicTime cruise_exit_cycle_end_;
-  bool current_cruise_rtprop_updated_;
-  bool previous_cruise_rtprop_updated_;
-  bool rtprop_probe_down_active_;
-  TimeDelta cruise_rtprop_at_entry_;
+  bool current_cruise_min_rtt_updated_;
+  bool previous_cruise_min_rtt_updated_;
+  bool min_rtt_probe_down_active_;
+  TimeDelta cruise_min_rtt_at_entry_;
   QuicByteCount latest_congestion_event_prior_inflight_;
   bool latest_congestion_event_prior_inflight_valid_;
   QuicByteCount latest_congestion_event_inflight_;
@@ -1223,9 +1238,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   bool fbbr_max_srtt_valid_;
   double fbbr_max_srtt_ms_;
   uint64_t fbbr_max_srtt_source_cruise_id_;
-  bool fbbr_rtprop_valid_;
-  TimeDelta fbbr_rtprop_;
-  QuicTime fbbr_rtprop_source_time_;
   uint8_t fbbr_srtt_no_wave_streak_;
   uint8_t fbbr_drate_no_wave_streak_;
   bool fbbr_wave_fidelity_enhancement_active_;
@@ -1340,15 +1352,6 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   std::deque<FbbrMaxSrttObservation>
       pending_fbbr_max_srtt_observations_;
   bool cruise_freq_tool_active_;
-  bool guard_filter_valid_;
-  QuicBandwidth guard_filter_stage1_;
-  QuicBandwidth guard_filter_stage2_;
-  bool guard_updated_this_cruise_;
-  bool guard_window_active_;
-  QuicByteCount guard_window_delivered_start_;
-  QuicTime guard_window_ack_start_;
-  QuicTime guard_window_send_start_;
-  bool guard_window_app_limited_;
 
   CruiseLoadTraceCallback cruise_load_trace_cb_;
   PacingAuditTraceCallback pacing_audit_trace_cb_;
@@ -1374,6 +1377,9 @@ class QUIC_EXPORT_PRIVATE FBBRSender : public Bbr2Sender {
   mutable bool beq_ready_for_post_cruise_;
   mutable const char* beq_application_phase_;
   mutable bool beq_cleared_on_cruise_start_;
+  bool native_max_bw_pacing_after_min_rtt_rise_;
+  bool native_probe_rtt_reset_active_;
+  TimeDelta native_probe_rtt_min_rtt_before_;
   mutable std::string beq_invalid_reason_;
   uint64_t unstable_episode_id_;
   bool unstable_episode_active_;

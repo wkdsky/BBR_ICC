@@ -68,6 +68,24 @@ FileToken(const std::string& value)
   return token;
 }
 
+std::string
+CsvEscape(const std::string& value)
+{
+  if (value.find_first_of(",\"\n\r") == std::string::npos) {
+    return value;
+  }
+  std::string escaped = "\"";
+  for (char character : value) {
+    if (character == '\"') {
+      escaped += "\"\"";
+    } else {
+      escaped.push_back(character);
+    }
+  }
+  escaped += "\"";
+  return escaped;
+}
+
 dqc::CongestionControlType
 ResolveAlgorithm(const std::string& algorithm)
 {
@@ -222,9 +240,11 @@ class DynamicRttExperiment {
   {
     profile_.open((output_prefix_ + "_rtt_profile.csv").c_str());
     timeseries_.open((output_prefix_ + "_rtt_timeseries.csv").c_str());
+    controller_trace_.open((output_prefix_ + "_controller_trace.csv").c_str());
     summary_.open((output_prefix_ + "_run_summary.csv").c_str());
     metadata_.open((output_prefix_ + "_metadata.json").c_str());
-    if (!profile_.is_open() || !timeseries_.is_open() || !summary_.is_open() ||
+    if (!profile_.is_open() || !timeseries_.is_open() ||
+        !controller_trace_.is_open() || !summary_.is_open() ||
         !metadata_.is_open()) {
       std::cerr << "Failed to open Test 3 output files under "
                 << output_prefix_ << std::endl;
@@ -256,11 +276,22 @@ class DynamicRttExperiment {
                 << "expected_bdp_bytes,aggregate_inflight_bytes,"
                 << "excess_inflight_bytes,queue_bytes,queue_delay_ms,"
                 << "sum_pacing_bps,sum_max_bw_bps,snapshot_flow_count,"
-                << "mean_srtt_us,mean_min_rtt_us";
+                << "mean_srtt_us,mean_min_rtt_us,mean_latest_rtt_us";
     for (uint32_t flow_id = 1; flow_id <= kFixedFlows; ++flow_id) {
       timeseries_ << ",flow" << flow_id << "_received_bytes";
     }
     timeseries_ << "\n";
+    controller_trace_
+        << "algorithm,mode,seed,run_id,time_s,stage_index,flow_id,bbr_state,"
+        << "probe_phase,pacing_gain,pacing_rate_bps,max_bw_bps,"
+        << "bandwidth_estimate_bps,delivery_rate_bps,cwnd_bytes,"
+        << "inflight_bytes,transport_srtt_us,transport_min_rtt_us,"
+        << "transport_latest_rtt_us,"
+        << "model_min_rtt_us,model_min_rtt_timestamp_s,inflight_hi_bytes,"
+        << "inflight_lo_bytes,cwnd_mode_cap_bytes,cwnd_global_cap_bytes,"
+        << "fbbr_beq_valid,fbbr_beq_bps,fbbr_injection_baseline_bps,"
+        << "fbbr_beq_source,fbbr_waveform_last_action,delivered_bytes,"
+        << "lost_bytes,last_ack_time_s,probe_phase_start_time_s\n";
     summary_ << "algorithm,mode,seed,run_id,simulation_time_s,active_flows,"
              << "capacity_bps,queue_bytes,profile_stages,queue_drop_packets,"
              << "queue_drop_bytes,validation_pass\n";
@@ -354,18 +385,31 @@ class DynamicRttExperiment {
     uint64_t sum_max_bw = 0;
     uint64_t sum_srtt_us = 0;
     uint64_t sum_min_rtt_us = 0;
+    uint64_t sum_latest_rtt_us = 0;
     uint32_t snapshot_flow_count = 0;
     for (const FlowRuntime& flow : flows_) {
       DqcSender::Bbr2ExperimentSnapshot snapshot;
-      if (!flow.sender->GetBbr2ExperimentSnapshot(&snapshot)) {
+      if (flow.sender->GetBbr2ExperimentSnapshot(&snapshot)) {
+        ++snapshot_flow_count;
+        aggregate_inflight += snapshot.inflight_bytes;
+        sum_pacing += snapshot.pacing_rate_bps;
+        sum_max_bw += snapshot.max_bw_bps;
+        sum_srtt_us += snapshot.srtt_us;
+        sum_min_rtt_us += snapshot.min_rtt_us;
+        sum_latest_rtt_us += snapshot.latest_rtt_us;
+        WriteControllerTrace(now_s, stage_index, flow.flow_id, snapshot);
         continue;
       }
-      ++snapshot_flow_count;
-      aggregate_inflight += snapshot.inflight_bytes;
-      sum_pacing += snapshot.pacing_rate_bps;
-      sum_max_bw += snapshot.max_bw_bps;
-      sum_srtt_us += snapshot.srtt_us;
-      sum_min_rtt_us += snapshot.min_rtt_us;
+      uint64_t srtt_us = 0;
+      uint64_t min_rtt_us = 0;
+      uint64_t latest_rtt_us = 0;
+      if (flow.sender->GetTransportRttSnapshot(
+              &srtt_us, &min_rtt_us, &latest_rtt_us)) {
+        ++snapshot_flow_count;
+        sum_srtt_us += srtt_us;
+        sum_min_rtt_us += min_rtt_us;
+        sum_latest_rtt_us += latest_rtt_us;
+      }
     }
     const uint64_t excess_inflight = aggregate_inflight > expected_bdp_bytes
         ? aggregate_inflight - expected_bdp_bytes
@@ -378,6 +422,9 @@ class DynamicRttExperiment {
     const double mean_min_rtt_us = snapshot_flow_count > 0
         ? static_cast<double>(sum_min_rtt_us) / snapshot_flow_count
         : 0.0;
+    const double mean_latest_rtt_us = snapshot_flow_count > 0
+        ? static_cast<double>(sum_latest_rtt_us) / snapshot_flow_count
+        : 0.0;
     timeseries_ << algorithm_ << "," << ModeName() << "," << seed_ << ","
                 << run_id_ << "," << std::fixed << std::setprecision(6)
                 << now_s << "," << stage_index << "," << stage.base_rtt_s
@@ -386,12 +433,50 @@ class DynamicRttExperiment {
                 << excess_inflight << "," << queue_bytes << ","
                 << queue_delay_ms << "," << sum_pacing << "," << sum_max_bw
                 << "," << snapshot_flow_count << "," << mean_srtt_us << ","
-                << mean_min_rtt_us;
+                << mean_min_rtt_us << "," << mean_latest_rtt_us;
     for (const FlowRuntime& flow : flows_) {
       timeseries_ << "," << flow.receiver->GetReceivedBytes();
     }
     timeseries_ << "\n";
     ++sample_count_;
+  }
+
+  void WriteControllerTrace(
+      double now_s,
+      size_t stage_index,
+      uint32_t flow_id,
+      const DqcSender::Bbr2ExperimentSnapshot& snapshot)
+  {
+    controller_trace_ << algorithm_ << "," << ModeName() << "," << seed_
+                      << "," << run_id_ << "," << std::fixed
+                      << std::setprecision(6) << now_s << "," << stage_index
+                      << "," << flow_id << "," << snapshot.bbr_state << ","
+                      << CsvEscape(snapshot.probe_phase) << ","
+                      << snapshot.pacing_gain << ","
+                      << snapshot.pacing_rate_bps << ","
+                      << snapshot.max_bw_bps << ","
+                      << snapshot.bandwidth_estimate_bps << ","
+                      << snapshot.delivery_rate_bps << ","
+                      << snapshot.cwnd_bytes << ","
+                      << snapshot.inflight_bytes << ","
+                      << snapshot.srtt_us << ","
+                      << snapshot.min_rtt_us << ","
+                      << snapshot.latest_rtt_us << ","
+                      << snapshot.model_min_rtt_us << ","
+                      << snapshot.model_min_rtt_timestamp_s << ","
+                      << snapshot.inflight_hi_bytes << ","
+                      << snapshot.inflight_lo_bytes << ","
+                      << snapshot.cwnd_mode_cap_bytes << ","
+                      << snapshot.cwnd_global_cap_bytes << ","
+                      << (snapshot.fbbr_beq_valid ? 1 : 0) << ","
+                      << snapshot.fbbr_beq_bps << ","
+                      << snapshot.fbbr_injection_baseline_bps << ","
+                      << CsvEscape(snapshot.fbbr_beq_source) << ","
+                      << CsvEscape(snapshot.fbbr_waveform_last_action) << ","
+                      << snapshot.delivered_bytes << ","
+                      << snapshot.lost_bytes << ","
+                      << snapshot.last_ack_time_s << ","
+                      << snapshot.probe_phase_start_time_s << "\n";
   }
 
   std::string algorithm_;
@@ -414,6 +499,7 @@ class DynamicRttExperiment {
   uint64_t sample_count_ = 0;
   std::ofstream profile_;
   std::ofstream timeseries_;
+  std::ofstream controller_trace_;
   std::ofstream summary_;
   std::ofstream metadata_;
 };

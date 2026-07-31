@@ -79,7 +79,7 @@ sha256sum "${FBBR_CONFIG_REL}" > "${RESULTS_REL}/fbbr_default.conf.sha256"
 export LD_LIBRARY_PATH="${NS3_DIR}/build${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 printf '%s\n' \
-  'scenario_id,capacity_bps,capacity_mbps,initial_queue_bdp,bottleneck_delay_s,access_bps,simulation_time_s,sample_interval_s,settle_guard_s,propagation_rtt_profile,purpose,algorithm,mode,seed,run_id,run_summary_path,rtt_profile_path,rtt_timeseries_path,metadata_path' \
+  'scenario_id,capacity_bps,capacity_mbps,initial_queue_bdp,bottleneck_delay_s,access_bps,simulation_time_s,sample_interval_s,settle_guard_s,propagation_rtt_profile,purpose,algorithm,mode,seed,run_id,run_summary_path,rtt_profile_path,rtt_timeseries_path,controller_trace_path,metadata_path' \
   > "${MANIFEST_REL}"
 
 run_case() {
@@ -131,7 +131,7 @@ run_case() {
     tail -n 160 "${log_path}" >&2
     exit 1
   fi
-  for suffix in run_summary rtt_profile rtt_timeseries; do
+  for suffix in run_summary rtt_profile rtt_timeseries controller_trace; do
     if [[ ! -s "${prefix}_${suffix}.csv" ]]; then
       echo "Missing expected output: ${prefix}_${suffix}.csv" >&2
       exit 1
@@ -141,13 +141,14 @@ run_case() {
     echo "Missing expected output: ${prefix}_metadata.json" >&2
     exit 1
   fi
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${scenario_id}" "${capacity_bps}" "${capacity_mbps}" \
     "${initial_queue_bdp}" "${bottleneck_delay_s}" "${access_bps}" \
     "${simulation_time_s}" "${sample_interval_s}" "${settle_guard_s}" \
     "${profile_pipe}" "${purpose}" "${algorithm}" "${mode}" "1" "${run_id}" \
     "${prefix}_run_summary.csv" "${prefix}_rtt_profile.csv" \
-    "${prefix}_rtt_timeseries.csv" "${prefix}_metadata.json" \
+    "${prefix}_rtt_timeseries.csv" "${prefix}_controller_trace.csv" \
+    "${prefix}_metadata.json" \
     > "${manifest_entry}"
 }
 

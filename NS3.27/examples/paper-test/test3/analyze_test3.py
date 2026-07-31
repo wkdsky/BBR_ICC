@@ -13,6 +13,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import font_manager
+from matplotlib.lines import Line2D
+
+
+def register_times_new_roman() -> None:
+    for font_path in font_manager.findSystemFonts(fontext="ttf"):
+        if Path(font_path).stem.lower() == "times_new_roman":
+            font_manager.fontManager.addfont(font_path)
+            return
+
+
+register_times_new_roman()
 
 
 ALGORITHMS = [
@@ -34,6 +46,51 @@ COLORS = {
     "BBRv2": "#CC3311",
     "FBBR": "#EE3377",
 }
+MARKERS = {
+    "BBR-R": "o",
+    "oBBR": "s",
+    "BBRv2+": "^",
+    "CUBIC": "D",
+    "BBRv2-formal": "P",
+    "BBRv2": "v",
+    "FBBR": "X",
+}
+LINESTYLES = {
+    "BBR-R": "-",
+    "oBBR": (0, (6, 2)),
+    "BBRv2+": (0, (4, 1.5, 1, 1.5)),
+    "CUBIC": (0, (1, 1.5)),
+    "BBRv2-formal": (0, (7, 1.5, 1.5, 1.5)),
+    "BBRv2": (0, (4, 1.5, 1, 1.5, 1, 1.5)),
+    "FBBR": (0, (1, 1.5, 1, 3)),
+}
+HATCHES = {
+    "BBR-R": "",
+    "oBBR": "//",
+    "BBRv2+": "..",
+    "CUBIC": "xx",
+    "BBRv2": "\\\\",
+    "FBBR": "++",
+}
+MARKER_TIME_OFFSETS_S = {
+    label: offset
+    for label, offset in zip(
+        ALGORITHMS,
+        (-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75),
+    )
+}
+PAPER_STYLE = {
+    "font.family": "Times New Roman",
+    "font.size": 8.0,
+    "axes.titlesize": 8.5,
+    "axes.labelsize": 8.0,
+    "xtick.labelsize": 8.0,
+    "ytick.labelsize": 8.0,
+    "legend.fontsize": 8.0,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+}
+MARKER_INTERVAL_S = 10.0
 
 
 def resolve_path(manifest_path: Path, value: object) -> Path:
@@ -221,62 +278,326 @@ def rolling_metrics(frame: pd.DataFrame, window_s: float) -> tuple[np.ndarray, n
     return times, goodput, fairness
 
 
+def plot_series_with_markers(
+    axis: plt.Axes,
+    times: np.ndarray,
+    values: pd.Series | np.ndarray,
+    algorithm: str,
+    show_markers: bool = True,
+    drawstyle: str = "default",
+) -> None:
+    numeric_values = np.asarray(values, dtype=float)
+    axis.plot(
+        times,
+        numeric_values,
+        color=COLORS[algorithm],
+        linestyle=LINESTYLES[algorithm],
+        linewidth=1.25,
+        drawstyle=drawstyle,
+        zorder=3,
+    )
+    if not show_markers:
+        return
+    marker_step = max(1, int(round(MARKER_INTERVAL_S / np.median(np.diff(times)))))
+    marker_indices = np.arange(0, len(times), marker_step)
+    axis.plot(
+        times[marker_indices] + MARKER_TIME_OFFSETS_S[algorithm],
+        numeric_values[marker_indices],
+        color=COLORS[algorithm],
+        linestyle="None",
+        marker=MARKERS[algorithm],
+        markerfacecolor=COLORS[algorithm],
+        markeredgecolor="none",
+        markeredgewidth=0.0,
+        markersize=3.6,
+        zorder=4,
+    )
+
+
+def queue_stage_statistics(
+    frame: pd.DataFrame,
+    profile: pd.DataFrame,
+    settle_guard_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    means: list[float] = []
+    minima: list[float] = []
+    p95_values: list[float] = []
+    for stage in profile.itertuples():
+        steady_start_s = min(float(stage.stage_end_s), float(stage.stage_start_s) + settle_guard_s)
+        values = frame.loc[
+            (frame.time_s >= steady_start_s) & (frame.time_s < float(stage.stage_end_s)),
+            "queue_delay_ms",
+        ].astype(float)
+        if values.empty:
+            means.append(float("nan"))
+            minima.append(float("nan"))
+            p95_values.append(float("nan"))
+            continue
+        means.append(float(values.mean()))
+        minima.append(float(values.min()))
+        p95_values.append(float(values.quantile(0.95)))
+    return np.asarray(means), np.asarray(minima), np.asarray(p95_values)
+
+
+def rtprop_gap_statistics(
+    frame: pd.DataFrame,
+    profile: pd.DataFrame,
+    settle_guard_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    times = frame.time_s.to_numpy(dtype=float)
+    sample_interval_s = float(np.median(np.diff(times)))
+    filter_samples = max(1, int(round(10.0 / sample_interval_s)))
+    latest_rtt_ms = frame.mean_latest_rtt_us.where(
+        frame.mean_latest_rtt_us > 0
+    ) / 1000.0
+    estimated_rtprop_ms = latest_rtt_ms.rolling(
+        filter_samples, min_periods=1
+    ).min()
+    true_rtprop_ms = frame.configured_base_rtt_ms.astype(float)
+    relative_gap_pct = (
+        (estimated_rtprop_ms - true_rtprop_ms).abs() / true_rtprop_ms * 100.0
+    )
+    medians: list[float] = []
+    minima: list[float] = []
+    p95_values: list[float] = []
+    for stage in profile.itertuples():
+        steady_start_s = min(float(stage.stage_end_s), float(stage.stage_start_s) + settle_guard_s)
+        values = relative_gap_pct[
+            (frame.time_s >= steady_start_s) & (frame.time_s < float(stage.stage_end_s))
+        ].dropna()
+        if values.empty:
+            medians.append(float("nan"))
+            minima.append(float("nan"))
+            p95_values.append(float("nan"))
+            continue
+        medians.append(float(values.median()))
+        minima.append(float(values.min()))
+        p95_values.append(float(values.quantile(0.95)))
+    return np.asarray(medians), np.asarray(minima), np.asarray(p95_values)
+
+
 def render_figure(
     all_series: dict[str, pd.DataFrame],
     profile: pd.DataFrame,
+    settle_guard_s: float,
     output_path: Path,
 ) -> None:
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 9,
-            "axes.titlesize": 10,
-            "axes.labelsize": 9,
-            "legend.fontsize": 8,
-        }
+    plt.rcParams.update(PAPER_STYLE)
+    figure, axes = plt.subplots(
+        2,
+        1,
+        figsize=(3.5, 4.2),
+        sharex=False,
+        gridspec_kw={"height_ratios": [0.8, 1.2]},
     )
-    figure, axes = plt.subplots(3, 1, figsize=(10.6, 7.2), sharex=True)
-    for algorithm in ALGORITHMS:
-        frame = all_series.get(algorithm)
-        if frame is None or frame.empty:
-            continue
-        times, goodput_mbps, fairness = rolling_metrics(frame, 5.0)
-        axes[0].plot(times, goodput_mbps, color=COLORS[algorithm], linewidth=1.25, label=algorithm)
-        queue_smoothed = frame.queue_delay_ms.rolling(10, min_periods=1).mean()
-        axes[1].plot(frame.time_s, queue_smoothed, color=COLORS[algorithm], linewidth=1.15)
-        axes[2].plot(times, fairness, color=COLORS[algorithm], linewidth=1.15)
+    present_algorithms = [
+        algorithm
+        for algorithm in ALGORITHMS
+        if algorithm in all_series and not all_series[algorithm].empty
+    ]
+    for algorithm in present_algorithms:
+        frame = all_series[algorithm]
+        times, goodput_mbps, _ = rolling_metrics(frame, 5.0)
+        plot_series_with_markers(axes[0], times, goodput_mbps, algorithm)
+
     stage_starts = profile.stage_start_s.to_numpy(dtype=float)
     stage_ends = profile.stage_end_s.to_numpy(dtype=float)
-    for axis in axes:
-        for start_s in stage_starts[1:]:
-            axis.axvline(start_s, color="#777777", linestyle=(0, (2, 2)), linewidth=0.8, zorder=0)
-        axis.grid(axis="y", alpha=0.2, linewidth=0.5)
-    for start_s, end_s, rtt_ms in zip(
-        stage_starts, stage_ends, profile.configured_base_rtt_ms.to_numpy(dtype=float)
-    ):
-        axes[0].annotate(
-            f"{rtt_ms:g} ms",
-            xy=((start_s + end_s) / 2.0, 1.0),
-            xycoords=("data", "axes fraction"),
-            xytext=(0, -3),
-            textcoords="offset points",
-            ha="center",
-            va="top",
-            fontsize=8,
+    stage_boundaries = np.concatenate(
+        (stage_starts, np.asarray([stage_ends[-1]], dtype=float))
+    )
+    for start_s in stage_starts[1:]:
+        axes[0].axvline(
+            start_s,
+            color="#777777",
+            linestyle=(0, (2, 2)),
+            linewidth=0.8,
+            zorder=0,
         )
-    axes[0].set_title("(a) Aggregate goodput: 5 s rolling window", loc="left")
-    axes[0].set_ylabel("Goodput (Mbit/s)")
-    axes[0].set_ylim(bottom=0.0)
-    axes[1].set_title("(b) Queue delay: 1 s rolling mean", loc="left")
-    axes[1].set_ylabel("Delay (ms)")
-    axes[1].set_ylim(bottom=0.0)
-    axes[2].set_title("(c) Flow fairness: 5 s rolling window", loc="left")
-    axes[2].set_ylabel("Jain index")
-    axes[2].set_xlabel("Time (s)")
-    axes[2].set_ylim(0.0, 1.05)
-    axes[0].legend(loc="lower left", ncol=4, frameon=False, columnspacing=0.8)
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=220, bbox_inches="tight", pad_inches=0.03)
+    axes[0].grid(axis="y", alpha=0.13, linewidth=0.45)
+    axes[0].set_title("(a) Aggregate goodput", loc="left")
+    axes[0].set_ylabel("Rate (Mbit/s)")
+    axes[0].set_xlabel("Time (s)", labelpad=1.0)
+    axes[0].set_ylim(0.0, 100.0)
+    axes[0].set_xlim(stage_boundaries[0], stage_boundaries[-1])
+    axes[0].set_xticks(stage_boundaries)
+    axes[0].yaxis.labelpad = 1.0
+    axes[0].tick_params(axis="both", which="major", length=2.2, width=0.6)
+
+    stage_positions = np.arange(len(profile), dtype=float)
+    bar_width = 0.12
+    algorithm_offsets = (
+        np.arange(len(present_algorithms), dtype=float)
+        - (len(present_algorithms) - 1.0) / 2.0
+    ) * bar_width
+    maximum_queue = 0.0
+    maximum_error = 0.0
+    stage_statistics = {}
+    for algorithm in present_algorithms:
+        queue_means, queue_minima, queue_p95_values = queue_stage_statistics(
+            all_series[algorithm], profile, settle_guard_s
+        )
+        rtprop_medians, rtprop_minima, rtprop_p95_values = rtprop_gap_statistics(
+            all_series[algorithm], profile, settle_guard_s
+        )
+        stage_statistics[algorithm] = {
+            "queue_means": queue_means,
+            "queue_minima": queue_minima,
+            "queue_p95_values": queue_p95_values,
+            "rtprop_medians": rtprop_medians,
+            "rtprop_minima": rtprop_minima,
+            "rtprop_p95_values": rtprop_p95_values,
+        }
+        finite_queue = queue_p95_values[np.isfinite(queue_p95_values)]
+        if finite_queue.size > 0:
+            maximum_queue = max(maximum_queue, float(finite_queue.max()))
+        finite_error = rtprop_p95_values[np.isfinite(rtprop_p95_values)]
+        if finite_error.size > 0:
+            maximum_error = max(maximum_error, float(finite_error.max()))
+
+    queue_limit = max(10.0, np.ceil(maximum_queue * 1.15 / 10.0) * 10.0)
+    error_limit = max(50.0, np.ceil(maximum_error * 1.10 / 50.0) * 50.0)
+    queue_scale = 100.0 / queue_limit
+    error_scale = 100.0 / error_limit
+    for algorithm, offset in zip(present_algorithms, algorithm_offsets):
+        statistics = stage_statistics[algorithm]
+        queue_means = statistics["queue_means"]
+        queue_lower_errors = queue_means - statistics["queue_minima"]
+        queue_upper_errors = statistics["queue_p95_values"] - queue_means
+        axes[1].bar(
+            stage_positions + offset,
+            queue_means * queue_scale,
+            width=bar_width * 0.88,
+            color=COLORS[algorithm],
+            alpha=0.82,
+            edgecolor="none",
+            zorder=3,
+        )
+        axes[1].errorbar(
+            stage_positions + offset,
+            queue_means * queue_scale,
+            yerr=np.vstack((queue_lower_errors, queue_upper_errors)) * queue_scale,
+            fmt="none",
+            ecolor="#777777",
+            elinewidth=0.9,
+            capsize=2.2,
+            capthick=0.8,
+            zorder=4,
+        )
+        rtprop_medians = statistics["rtprop_medians"]
+        rtprop_lower_errors = statistics["rtprop_p95_values"] - rtprop_medians
+        rtprop_upper_errors = rtprop_medians - statistics["rtprop_minima"]
+        axes[1].bar(
+            stage_positions + offset,
+            -rtprop_medians * error_scale,
+            width=bar_width * 0.88,
+            color="#8a8a8a",
+            alpha=0.88,
+            edgecolor="#555555",
+            linewidth=0.35,
+            hatch=HATCHES[algorithm],
+            zorder=3,
+        )
+        axes[1].errorbar(
+            stage_positions + offset,
+            -rtprop_medians * error_scale,
+            yerr=np.vstack((rtprop_lower_errors, rtprop_upper_errors)) * error_scale,
+            fmt="none",
+            ecolor="#777777",
+            elinewidth=0.9,
+            capsize=2.2,
+            capthick=0.8,
+            zorder=4,
+        )
+
+    axes[1].axhline(0.0, color="#222222", linewidth=0.9, zorder=2)
+    for boundary in stage_positions[:-1] + 0.5:
+        axes[1].axvline(
+            boundary,
+            color="#777777",
+            linestyle=(0, (2, 2)),
+            linewidth=0.8,
+            zorder=0,
+        )
+    axes[1].set_title("(b) Queue delay / RTprop error", loc="left", pad=2.0)
+    axes[1].set_ylabel("")
+    axes[1].set_ylim(-100.0, 100.0)
+    axes[1].set_xlim(-0.55, len(profile) - 0.45)
+    queue_ticks = np.arange(0.0, queue_limit + 0.1, 20.0)
+    error_ticks = np.arange(50.0, error_limit + 0.1, 50.0)
+    tick_positions = np.concatenate(
+        (
+            -error_ticks[::-1] * error_scale,
+            np.asarray([0.0]),
+            queue_ticks[1:] * queue_scale,
+        )
+    )
+    tick_labels = [f"{value:g}" for value in error_ticks[::-1]]
+    tick_labels += ["0"]
+    tick_labels += [f"{value:g}" for value in queue_ticks[1:]]
+    axes[1].set_yticks(tick_positions)
+    axes[1].set_yticklabels(tick_labels)
+    axes[1].text(
+        -0.10,
+        0.75,
+        "Delay (ms)",
+        transform=axes[1].transAxes,
+        rotation=90,
+        ha="center",
+        va="center",
+        fontsize=8.0,
+    )
+    axes[1].text(
+        -0.10,
+        0.25,
+        "Error (%)",
+        transform=axes[1].transAxes,
+        rotation=90,
+        ha="center",
+        va="center",
+        fontsize=8.0,
+    )
+    axes[1].set_xlabel("RTT stage")
+    axes[1].set_xticks(stage_positions)
+    axes[1].set_xticklabels(
+        [
+            f"{rtt:g} ms"
+            for rtt in profile.configured_base_rtt_ms.to_numpy(dtype=float)
+        ],
+    )
+    axes[1].grid(axis="y", alpha=0.13, linewidth=0.45)
+    axes[1].tick_params(axis="both", which="major", length=2.2, width=0.6)
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=COLORS[algorithm],
+            linestyle=LINESTYLES[algorithm],
+            linewidth=1.25,
+            marker=MARKERS[algorithm],
+            markerfacecolor=COLORS[algorithm],
+            markeredgecolor="none",
+            markeredgewidth=0.0,
+            markersize=3.6,
+            label=algorithm,
+        )
+        for algorithm in present_algorithms
+    ]
+    figure.subplots_adjust(left=0.15, right=0.995, top=0.97, bottom=0.18, hspace=0.34)
+    figure.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.035),
+        ncol=6,
+        frameon=False,
+        handlelength=1.0,
+        handletextpad=0.20,
+        columnspacing=0.65,
+        labelspacing=0.18,
+        borderaxespad=0.0,
+    )
+    figure.savefig(output_path, dpi=600, bbox_inches="tight", pad_inches=0.01)
+    figure.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight", pad_inches=0.01)
     plt.close(figure)
 
 
@@ -317,7 +638,7 @@ def main() -> None:
         summary = pd.read_csv(resolve_path(manifest_path, row.run_summary_path))
         metadata = json.loads(resolve_path(manifest_path, row.metadata_path).read_text(encoding="utf-8"))
         require_columns(profile, ["stage_index", "stage_start_s", "stage_end_s", "configured_base_rtt_ms", "expected_bdp_bytes"], "rtt profile")
-        require_columns(series, ["time_s", "stage_index", "queue_delay_ms", "aggregate_inflight_bytes", "expected_bdp_bytes", "snapshot_flow_count", "mean_srtt_us", "mean_min_rtt_us", *FLOW_COLUMNS], "rtt timeseries")
+        require_columns(series, ["time_s", "stage_index", "queue_delay_ms", "aggregate_inflight_bytes", "expected_bdp_bytes", "snapshot_flow_count", "mean_srtt_us", "mean_min_rtt_us", "mean_latest_rtt_us", *FLOW_COLUMNS], "rtt timeseries")
         require_columns(summary, ["algorithm", "mode", "validation_pass"], "run summary")
         valid = bool(int(summary.iloc[0].validation_pass)) and bool(metadata.get("validation_pass"))
         validation.append(
@@ -372,7 +693,12 @@ def main() -> None:
     overall.to_csv(summary_dir / "overall_metrics.csv", index=False)
 
     if canonical_profile is not None:
-        render_figure(all_series, canonical_profile, figure_dir / "dynamic_rtt_response.png")
+        render_figure(
+            all_series,
+            canonical_profile,
+            float(manifest.iloc[0].settle_guard_s),
+            figure_dir / "dynamic_rtt_response.png",
+        )
 
     rows = overall.sort_values("algorithm").copy()
     validation_rows = validation_frame.sort_values("algorithm")
@@ -484,7 +810,7 @@ def main() -> None:
             "- `summary/phase_metrics.csv`: settled metrics, including per-flow goodput and BBR-style SRTT/MinRTT snapshots where available.",
             "- `summary/transition_metrics.csv`: first 15 seconds after each RTT step.",
             "- `summary/overall_metrics.csv`: compact controller comparison.",
-            "- `figures/dynamic_rtt_response.png`: goodput, queue delay, and fairness over time.",
+            "- `figures/dynamic_rtt_response.png`: one left-right Fig.1-style figure with aggregate goodput and mirrored queue-delay/relative-RTprop-error stage statistics.",
             "- `raw/DYN-RTT/`: raw samples, per-run profiles, metadata, and controller logs.",
         ]
     )

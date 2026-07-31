@@ -127,6 +127,12 @@ class QUIC_EXPORT_PRIVATE Bbr2Sender : public SendAlgorithmInterface {
 
   // Returns the min of BDP and congestion window.
   QuicByteCount GetTargetBytesInflight() const;
+
+  // Experiment-only visibility into the two limits applied to cwnd_.  The
+  // mode limit carries BBRv2's inflight_hi/inflight_lo policy, while the
+  // global limit is the configured maximum congestion window.
+  QuicByteCount GetCwndModeUpperBoundForExperiment() const;
+  QuicByteCount GetCwndGlobalUpperBoundForExperiment() const;
   bool IsProbeRttEnabled() const { return enable_probe_rtt_; }
 
   // Optional ProbeRTT policy hooks.  Defaults preserve the native BBRv2

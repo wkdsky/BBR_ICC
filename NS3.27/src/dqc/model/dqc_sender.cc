@@ -845,6 +845,20 @@ bool DqcSender::GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) cons
     ByteCount cwnd = 0;
     sent_manager->InFlight(&in_flight, &cwnd);
 
+    const auto finite_delta_us = [](TimeDelta delta) -> uint64_t {
+        if (delta.IsZero() || delta.IsInfinite() ||
+            delta.ToMicroseconds() <= 0) {
+            return 0;
+        }
+        return static_cast<uint64_t>(delta.ToMicroseconds());
+    };
+    const auto time_seconds = [](QuicTime time) -> double {
+        if (time == QuicTime::Zero()) {
+            return 0.0;
+        }
+        return static_cast<double>(time.ToDebuggingValue()) / 1000000.0;
+    };
+
     snapshot->bbr_state = bbrv2->GetCurrentBbrModeIndex();
     snapshot->probe_phase = state.mode == Bbr2Mode::PROBE_BW
         ? Bbr2ProbePhaseName(state.probe_bw.phase)
@@ -854,10 +868,21 @@ bool DqcSender::GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) cons
         static_cast<uint64_t>(algo->PacingRate(in_flight).ToBitsPerSecond());
     snapshot->max_bw_bps = static_cast<uint64_t>(std::max<int64_t>(
         0, state.bandwidth_hi.ToBitsPerSecond()));
+    snapshot->bandwidth_estimate_bps = static_cast<uint64_t>(
+        std::max<int64_t>(0, state.bandwidth_est.ToBitsPerSecond()));
     snapshot->delivery_rate_bps =
         static_cast<uint64_t>(bbrv2->DeliveryRateLatest().ToBitsPerSecond());
     snapshot->cwnd_bytes = static_cast<uint64_t>(cwnd);
     snapshot->inflight_bytes = static_cast<uint64_t>(in_flight);
+    snapshot->model_min_rtt_us = finite_delta_us(state.min_rtt);
+    snapshot->model_min_rtt_timestamp_s =
+        time_seconds(state.min_rtt_timestamp);
+    snapshot->inflight_hi_bytes = static_cast<uint64_t>(state.inflight_hi);
+    snapshot->inflight_lo_bytes = static_cast<uint64_t>(state.inflight_lo);
+    snapshot->cwnd_mode_cap_bytes = static_cast<uint64_t>(
+        bbrv2->GetCwndModeUpperBoundForExperiment());
+    snapshot->cwnd_global_cap_bytes = static_cast<uint64_t>(
+        bbrv2->GetCwndGlobalUpperBoundForExperiment());
     const RttStats *rtt_stats = sent_manager->GetRttStats();
     TimeDelta srtt = rtt_stats->smoothed_rtt();
     if(srtt.IsZero()){
@@ -867,6 +892,8 @@ bool DqcSender::GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) cons
     if(min_rtt.IsZero()){
         min_rtt = state.min_rtt;
     }
+    snapshot->latest_rtt_us = static_cast<uint64_t>(std::max<int64_t>(
+        0, rtt_stats->latest_rtt().ToMicroseconds()));
     snapshot->srtt_us = static_cast<uint64_t>(srtt.ToMicroseconds());
     snapshot->min_rtt_us = static_cast<uint64_t>(min_rtt.ToMicroseconds());
     snapshot->delivered_bytes = static_cast<uint64_t>(bbrv2->TotalBytesAcked());
@@ -881,7 +908,58 @@ bool DqcSender::GetBbr2ExperimentSnapshot(Bbr2ExperimentSnapshot *snapshot) cons
     snapshot->probe_phase_start_time_s =
         static_cast<double>(state.probe_bw.phase_start_time.ToDebuggingValue()) /
         1000000.0;
+    snapshot->fbbr_beq_valid = false;
+    snapshot->fbbr_beq_bps = 0;
+    snapshot->fbbr_injection_baseline_bps = 0;
+    snapshot->fbbr_beq_source = "none";
+    snapshot->fbbr_waveform_last_action = "none";
+    if (IsFBBRAlgorithm(algo->GetCongestionControlType())) {
+        FBBRSender* fbbr = static_cast<FBBRSender*>(algo);
+        const FBBRSender::ExperimentState fbbr_state =
+            fbbr->ExportExperimentState();
+        snapshot->fbbr_beq_valid = fbbr_state.beq_valid;
+        snapshot->fbbr_beq_bps = static_cast<uint64_t>(std::max<int64_t>(
+            0, fbbr_state.beq.ToBitsPerSecond()));
+        snapshot->fbbr_injection_baseline_bps =
+            static_cast<uint64_t>(std::max<int64_t>(
+                0, fbbr_state.injection_baseline.ToBitsPerSecond()));
+        snapshot->fbbr_beq_source = fbbr_state.beq_source;
+        snapshot->fbbr_waveform_last_action =
+            fbbr_state.waveform_last_action;
+    }
     return true;
+}
+
+bool DqcSender::GetTransportRttSnapshot(uint64_t *srtt_us,
+                                        uint64_t *min_rtt_us,
+                                        uint64_t *latest_rtt_us) const
+{
+    if (srtt_us == nullptr || min_rtt_us == nullptr ||
+        latest_rtt_us == nullptr) {
+        return false;
+    }
+    *srtt_us = 0;
+    *min_rtt_us = 0;
+    *latest_rtt_us = 0;
+    SendPacketManager *sent_manager =
+        const_cast<ProtoCon&>(m_connection).GetSentPacketManager();
+    if (sent_manager == nullptr || sent_manager->GetRttStats() == nullptr) {
+        return false;
+    }
+    const RttStats *rtt_stats = sent_manager->GetRttStats();
+    TimeDelta srtt = rtt_stats->smoothed_rtt();
+    if (srtt.IsZero()) {
+        srtt = rtt_stats->SmoothedOrInitialRtt();
+    }
+    const TimeDelta min_rtt = rtt_stats->min_rtt();
+    const TimeDelta latest_rtt = rtt_stats->latest_rtt();
+    *srtt_us = static_cast<uint64_t>(std::max<int64_t>(
+        0, srtt.ToMicroseconds()));
+    *min_rtt_us = static_cast<uint64_t>(std::max<int64_t>(
+        0, min_rtt.ToMicroseconds()));
+    *latest_rtt_us = static_cast<uint64_t>(std::max<int64_t>(
+        0, latest_rtt.ToMicroseconds()));
+    return *srtt_us > 0 || *min_rtt_us > 0 || *latest_rtt_us > 0;
 }
 
 void DqcSender::SetBbr2ForcedProbeUp(double probe_up_time_s,
