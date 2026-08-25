@@ -559,7 +559,7 @@ def plot_estimator_panel(
         label="Fair share",
         zorder=2,
     )
-    axis.set_title("(d) Bandwidth estimates", loc="left", pad=5)
+    axis.set_title("(a) Bandwidth estimates", loc="left", pad=5)
     axis.set_ylabel("Estimate (Mbit/s)")
     beq_max_mbps = (
         float(plotted_beq.mean_held_beq_bps.max()) / 1e6
@@ -660,18 +660,18 @@ def main() -> None:
     plt.rcParams.update(PAPER_STYLE)
     figure = plt.figure(figsize=(15.25, 3.95))
     panel_grid = figure.add_gridspec(1, 4, wspace=0.28)
-    queue_grid = panel_grid[0].subgridspec(
-        2, 1, height_ratios=(1.45, 1.0), hspace=0.055
-    )
+    estimate_axis = figure.add_subplot(panel_grid[0])
     goodput_grid = panel_grid[1].subgridspec(
         2, 1, height_ratios=(1.75, 0.8), hspace=0.055
     )
-    queue_upper = figure.add_subplot(queue_grid[0])
-    queue_lower = figure.add_subplot(queue_grid[1], sharex=queue_upper)
+    queue_grid = panel_grid[2].subgridspec(
+        2, 1, height_ratios=(1.45, 1.0), hspace=0.055
+    )
     goodput_upper = figure.add_subplot(goodput_grid[0])
     goodput_lower = figure.add_subplot(goodput_grid[1], sharex=goodput_upper)
-    fairness_axis = figure.add_subplot(panel_grid[2])
-    estimate_axis = figure.add_subplot(panel_grid[3])
+    queue_upper = figure.add_subplot(queue_grid[0])
+    queue_lower = figure.add_subplot(queue_grid[1], sharex=queue_upper)
+    fairness_axis = figure.add_subplot(panel_grid[3])
 
     plot_broken_metric(
         queue_upper,
@@ -681,7 +681,7 @@ def main() -> None:
         (240.0, 1650.0),
         (0.0, 220.0),
         "Delay (ms)",
-        "(a) Queue dynamics",
+        "(c) Queue dynamics",
     )
     plot_broken_metric(
         goodput_upper,
@@ -697,7 +697,7 @@ def main() -> None:
     fairness_axis.set_ylim(0.4, 1.05)
     fairness_axis.set_yticks([0.6, 0.8, 1.0])
     fairness_axis.set_ylabel("Jain index")
-    fairness_axis.set_title("(c) Flow fairness", loc="left", pad=5)
+    fairness_axis.set_title("(d) Flow fairness", loc="left", pad=5)
     configure_flow_stage_axis(fairness_axis)
     fairness_axis.grid(axis="y", alpha=0.13, linewidth=0.45)
     fairness_axis.tick_params(axis="y", which="major", length=3, width=0.7)

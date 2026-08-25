@@ -343,7 +343,7 @@ def rtprop_gap_statistics(
     frame: pd.DataFrame,
     profile: pd.DataFrame,
     settle_guard_s: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> np.ndarray:
     times = frame.time_s.to_numpy(dtype=float)
     sample_interval_s = float(np.median(np.diff(times)))
     filter_samples = max(1, int(round(10.0 / sample_interval_s)))
@@ -357,23 +357,17 @@ def rtprop_gap_statistics(
     relative_gap_pct = (
         (estimated_rtprop_ms - true_rtprop_ms).abs() / true_rtprop_ms * 100.0
     )
-    medians: list[float] = []
-    minima: list[float] = []
-    p95_values: list[float] = []
+    standard_deviations: list[float] = []
     for stage in profile.itertuples():
         steady_start_s = min(float(stage.stage_end_s), float(stage.stage_start_s) + settle_guard_s)
         values = relative_gap_pct[
             (frame.time_s >= steady_start_s) & (frame.time_s < float(stage.stage_end_s))
         ].dropna()
         if values.empty:
-            medians.append(float("nan"))
-            minima.append(float("nan"))
-            p95_values.append(float("nan"))
+            standard_deviations.append(float("nan"))
             continue
-        medians.append(float(values.median()))
-        minima.append(float(values.min()))
-        p95_values.append(float(values.quantile(0.95)))
-    return np.asarray(medians), np.asarray(minima), np.asarray(p95_values)
+        standard_deviations.append(float(values.std(ddof=0)))
+    return np.asarray(standard_deviations)
 
 
 def render_figure(
@@ -388,7 +382,7 @@ def render_figure(
         1,
         figsize=(3.5, 4.2),
         sharex=False,
-        gridspec_kw={"height_ratios": [0.8, 1.2]},
+        gridspec_kw={"height_ratios": [4.0, 6.0]},
     )
     present_algorithms = [
         algorithm
@@ -436,21 +430,21 @@ def render_figure(
         queue_means, queue_minima, queue_p95_values = queue_stage_statistics(
             all_series[algorithm], profile, settle_guard_s
         )
-        rtprop_medians, rtprop_minima, rtprop_p95_values = rtprop_gap_statistics(
+        rtprop_standard_deviations = rtprop_gap_statistics(
             all_series[algorithm], profile, settle_guard_s
         )
         stage_statistics[algorithm] = {
             "queue_means": queue_means,
             "queue_minima": queue_minima,
             "queue_p95_values": queue_p95_values,
-            "rtprop_medians": rtprop_medians,
-            "rtprop_minima": rtprop_minima,
-            "rtprop_p95_values": rtprop_p95_values,
+            "rtprop_standard_deviations": rtprop_standard_deviations,
         }
-        finite_queue = queue_p95_values[np.isfinite(queue_p95_values)]
+        finite_queue = queue_p95_values
+        finite_queue = finite_queue[np.isfinite(finite_queue)]
         if finite_queue.size > 0:
             maximum_queue = max(maximum_queue, float(finite_queue.max()))
-        finite_error = rtprop_p95_values[np.isfinite(rtprop_p95_values)]
+        finite_error = rtprop_standard_deviations
+        finite_error = finite_error[np.isfinite(finite_error)]
         if finite_error.size > 0:
             maximum_error = max(maximum_error, float(finite_error.max()))
 
@@ -483,12 +477,10 @@ def render_figure(
             capthick=0.8,
             zorder=4,
         )
-        rtprop_medians = statistics["rtprop_medians"]
-        rtprop_lower_errors = statistics["rtprop_p95_values"] - rtprop_medians
-        rtprop_upper_errors = rtprop_medians - statistics["rtprop_minima"]
+        rtprop_standard_deviations = statistics["rtprop_standard_deviations"]
         axes[1].bar(
             stage_positions + offset,
-            -rtprop_medians * error_scale,
+            -rtprop_standard_deviations * error_scale,
             width=bar_width * 0.88,
             color="#8a8a8a",
             alpha=0.88,
@@ -496,17 +488,6 @@ def render_figure(
             linewidth=0.35,
             hatch=HATCHES[algorithm],
             zorder=3,
-        )
-        axes[1].errorbar(
-            stage_positions + offset,
-            -rtprop_medians * error_scale,
-            yerr=np.vstack((rtprop_lower_errors, rtprop_upper_errors)) * error_scale,
-            fmt="none",
-            ecolor="#777777",
-            elinewidth=0.9,
-            capsize=2.2,
-            capthick=0.8,
-            zorder=4,
         )
 
     axes[1].axhline(0.0, color="#222222", linewidth=0.9, zorder=2)
@@ -523,7 +504,7 @@ def render_figure(
     axes[1].set_ylim(-100.0, 100.0)
     axes[1].set_xlim(-0.55, len(profile) - 0.45)
     queue_ticks = np.arange(0.0, queue_limit + 0.1, 20.0)
-    error_ticks = np.arange(50.0, error_limit + 0.1, 50.0)
+    error_ticks = np.arange(10.0, error_limit + 0.1, 10.0)
     tick_positions = np.concatenate(
         (
             -error_ticks[::-1] * error_scale,
@@ -556,7 +537,7 @@ def render_figure(
         va="center",
         fontsize=8.0,
     )
-    axes[1].set_xlabel("RTT stage")
+    axes[1].set_xlabel("Propagation RTT stage")
     axes[1].set_xticks(stage_positions)
     axes[1].set_xticklabels(
         [
@@ -718,11 +699,11 @@ def main() -> None:
         "",
         f"- Propagation RTT schedule: {profile_schedule}.",
         "- The bottleneck one-way propagation delay remains 10 ms; capacity, queue bytes, and flow population do not change.",
-        "- Settled metrics exclude the first 15 seconds of each RTT stage. Transition metrics cover those excluded 15 seconds; recovery is the first full 5-second interval reaching 90% bottleneck utilization.",
+        "- Settled metrics exclude the first 15 seconds of each propagation RTT stage. Transition metrics cover those excluded 15 seconds; recovery is the first full 5-second interval reaching 90% bottleneck utilization.",
         "",
         "## Raw Validation",
         "",
-        "| Algorithm | Mode | Samples | RTT stages | Passed |",
+        "| Algorithm | Mode | Samples | Propagation RTT stages | Passed |",
         "| --- | --- | ---: | ---: | --- |",
     ]
     for row in validation_rows.itertuples():
@@ -798,7 +779,7 @@ def main() -> None:
                 "",
                 "## FBBR Observation",
                 "",
-                f"With the configured FBBR defaults, the lowest settled FBBR utilization is {lowest_fbbr.utilization_pct:.2f}% in the {lowest_fbbr.configured_base_rtt_ms:.0f} ms RTT stage. FBBR reaches 90% utilization in {int(rows.loc[rows['algorithm'] == 'FBBR', 'transitions_reaching_90pct'].iloc[0])}/4 transitions.",
+                f"With the configured FBBR defaults, the lowest settled FBBR utilization is {lowest_fbbr.utilization_pct:.2f}% in the {lowest_fbbr.configured_base_rtt_ms:.0f} ms propagation RTT stage. FBBR reaches 90% utilization in {int(rows.loc[rows['algorithm'] == 'FBBR', 'transitions_reaching_90pct'].iloc[0])}/4 transitions.",
                 "This is a single-seed controller comparison, so it identifies a reproducible behavior to investigate rather than a confidence interval.",
             ]
         )
@@ -810,7 +791,7 @@ def main() -> None:
             "- `summary/phase_metrics.csv`: settled metrics, including per-flow goodput and BBR-style SRTT/MinRTT snapshots where available.",
             "- `summary/transition_metrics.csv`: first 15 seconds after each RTT step.",
             "- `summary/overall_metrics.csv`: compact controller comparison.",
-            "- `figures/dynamic_rtt_response.png`: one left-right Fig.1-style figure with aggregate goodput and mirrored queue-delay/relative-RTprop-error stage statistics.",
+            "- `figures/dynamic_rtt_response.png`: one left-right Fig.1-style figure with queue-delay stage means and downward relative-RTprop-error standard deviations.",
             "- `raw/DYN-RTT/`: raw samples, per-run profiles, metadata, and controller logs.",
         ]
     )

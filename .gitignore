@@ -16,6 +16,7 @@ NS3.27/showcase_results
 /experiments
 NS3.27/results
 NS3.27/docs
+paper
 
 # oBBR build artifacts (sources are tracked)
 oBBR/boringssl/build/

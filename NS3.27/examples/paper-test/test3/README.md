@@ -39,8 +39,12 @@ limits, pacing, and FBBR BEQ state. The analyzer produces
 `results/test3/RESULTS.md`, per-stage and transition CSV summaries, and
 `results/test3/figures/dynamic_rtt_response.png` contains one Fig.1-style figure with left-right subplots for aggregate throughput and mirrored queue-delay/relative-RTprop-error stage statistics.
 
-For each 60-second RTT stage, settled metrics exclude its first 15 seconds:
+For each 60-second propagation RTT stage, settled metrics exclude its first 15 seconds:
 aggregate goodput, utilization, per-flow goodput, Jain fairness, queue delay,
 inflight/expected-BDP, and BBR-style SRTT/MinRTT when available. The transition
 table covers the excluded 15 seconds and records queue behavior and the first
 full five-second interval to reach 90% of bottleneck capacity.
+
+In figure (b), the colored queue-delay bars retain their stage means and
+min-to-p95 ranges. The downward gray bars show the population standard
+deviation of relative RTprop error against the configured true propagation RTT.
