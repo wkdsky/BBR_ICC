@@ -1,328 +1,405 @@
-ICC（Inter-flow Congestion Control）的发送速率波动与频域检测相关算法主要位于以下位置：
-
-  核心文件位置
-
-  | 实现版本    | 文件路径
-                              |
-  |---------|-------------------------------------------
-  --------------------|
-  | 用户空间实现  | /home/wkd/BBR_ICC/GenericCC/ICC.cc
-                            |
-  | NS3仿真实现 | /home/wkd/BBR_ICC/NS3.27/src/internet/
-  model/tcp-periodicDC.cc |
+# FBBR：基于固定频率 CRUISE 调制的 BBRv2 拥塞控制实现
+
+本仓库的当前研究主线是 FBBR。FBBR 是一个基于 BBRv2 的 ns-3.27/DQC 拥塞控制实现：它在 `PROBE_BW` 的 `PROBE_CRUISE` 阶段注入已知频率的三角 pacing 波，观测发送速率、交付速率和 SRTT 对该激励的响应，判断路径处于欠载、满载还是过载状态，并据此更新后续 pacing 使用的带宽基线。
+
+FBBR 的目标是在保持较高链路利用率的同时减少持续排队和丢包。它不读取显式公平份额，不修改原生 BBRv2 的拥塞窗口上限，也不维护独立的 FBBR RTprop；当前实现直接复用 BBRv2 的 `MinRtt`、`cwnd_`、ProbeRTT、丢包/ECN 响应和主状态机。
+
+本文只描述当前工作树中的 FBBR。旧的 ICC、FreqCC、FreqCCv2、FreqCCv3 代码仍保留在仓库中用于历史追踪或对比，但不是当前 FBBR 算法的实现依据。
+
+## 核心文件位置
+
+| 内容 | 文件 |
+| --- | --- |
+| FBBR 控制器接口与状态 | [`fbbr_sender.h`](NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.h) |
+| FBBR 核心控制逻辑 | [`fbbr_sender.cc`](NS3.27/src/dqc/model/thirdparty/congestion/fbbr_sender.cc) |
+| FBBR 配置结构与解析声明 | [`fbbr_config_loader.h`](NS3.27/src/dqc/model/thirdparty/congestion/fbbr_config_loader.h) |
+| FBBR 严格配置解析器 | [`fbbr_config_loader.cc`](NS3.27/src/dqc/model/thirdparty/congestion/fbbr_config_loader.cc) |
+| DQC 发送端接入与配置下发 | [`dqc_sender.cc`](NS3.27/src/dqc/model/dqc_sender.cc) |
+| 拥塞控制器工厂注册 | [`proto_send_algorithm_interface.cc`](NS3.27/src/dqc/model/thirdparty/congestion/proto_send_algorithm_interface.cc) |
+| 当前统一实验配置 | [`fbbr_default.conf`](NS3.27/examples/CCconfig/fbbr_default.conf) |
+| 完整算法说明 | [`FBBR_ALGORITHM.md`](FBBR_ALGORITHM.md) |
+| 三组实验操作手册 | [`实验运行操作手册.md`](NS3.27/examples/paper-test/实验运行操作手册.md) |
+
+## FBBR 与原生 BBRv2 的关系
+
+FBBR 继承 `Bbr2Sender`，默认通过 DQC 的 `kFBBR` 类型创建。当前控制边界如下：
+
+| 模块 | 当前 FBBR 行为 |
+| --- | --- |
+| STARTUP / DRAIN | 使用原生 BBRv2 行为。 |
+| PROBE_BW 状态转换 | 保留原生 DOWN、CRUISE、REFILL、UP 转换；活动波形期间可把正常 CRUISE 退出延迟到完整周期边界。 |
+| ProbeRTT | `kFBBR` 默认保留；工厂另有 `kFBBRNoProbeRtt` 供专门实验使用。 |
+| 带宽模型 | 复用 BBRv2 的 `MinBandwidth()`、`MaxBandwidth()` 和 `BandwidthEstimate()`。 |
+| RTprop | 直接使用 BBRv2 `model_.MinRtt()`，没有独立 FBBR RTprop。 |
+| 拥塞窗口 | `GetCongestionWindow()` 直接返回原生 `cwnd_`。 |
+| 丢包与 ECN | 使用原生 BBRv2 的处理路径。 |
+| FBBR 扩展 | CRUISE 固定频率激励、响应采集、负载分类、基线调整、BEQ 发布与 pacing 基线选择。 |
+
+当前版本已经移除旧的 inflight 服务包络、`plan_inflight`、`service_inflight`、正向探测 credit 和额外 inflight cap。因此，FBBR 的低排队效果来自 pacing 基线和波形控制，而不是额外收紧拥塞窗口。
+
+## 总体执行链
+
+```text
+BBRv2 STARTUP / DRAIN / PROBE_BW
+                 |
+                 v
+          进入 PROBE_CRUISE
+                 |
+                 +-- 选择注入基线 B：上一轮有效 BEQ 或原生 MaxBw
+                 +-- 计算幅度 A 与有效幅度 Aeff
+                 +-- 注入 0 -> -1 -> 0 -> +1 -> 0 三角波
+                 |
+                 v
+          等待 1 个 SRTT 完成 settle
+                 |
+                 v
+          收集 sender-rate、delivery-rate、SRTT
+                 |
+                 +-- 重采样、覆盖率和 app-limited 检查
+                 +-- 在已知频率上执行 Goertzel 检测
+                 +-- 检查 SRTT 活动、肩部、水平段和重复裁剪
+                 |
+                 v
+       Regime I / II / III / INCONCLUSIVE
+                 |
+                 +-- I：提高基线 B
+                 +-- II：保持基线 B
+                 +-- III：降低基线 B
+                 +-- 不确定：扩窗或放大激励后重试
+                 |
+                 v
+          离开 CRUISE 时发布 BEQ
+                 |
+                 v
+       REFILL / UP / DOWN 使用新鲜 BEQ
+```
+
+发生丢包、ECN、recovery 或其他安全退出条件时，FBBR 不会为了等待波形周期完整而阻止原生安全路径。
+
+## CRUISE 三角波注入
+
+### 关键记号
+
+| 记号 | 当前实现含义 |
+| --- | --- |
+| `B` | 当前 CRUISE 注入基线 `current_injection_baseline_bw_`。 |
+| `A` | 请求的单边三角波幅度。 |
+| `Aeff` | 经过最低 pacing 速率保护后的实际幅度。 |
+| `f` | 固定调制频率，当前默认 5 Hz。 |
+| `F` | 最低 pacing 速率，当前默认 0.2 Mbit/s。 |
+| `R` | BBRv2 的 `MinRtt()`。 |
+| `M` | MaxBw 更新时刻附近观测到的最大 SRTT。 |
+| `BEQ` | 当前 CRUISE 结束时发布、供后续 pacing 使用的带宽基线。 |
+
+### 波形公式
+
+CRUISE 活动窗口中的 pacing 为：
 
-  ---
-  频域检测算法 (find_fm 函数)
+```text
+Pacing(t) = max(F, B + Aeff * triangle(t))
+```
 
-  用户空间版本
+设一个周期内的归一化相位为 `q`：
 
-  - 文件: GenericCC/ICC.cc
-  - 行号: 120-185
+```text
+0.00 <= q < 0.25: triangle(q) = -4q
+0.25 <= q < 0.75: triangle(q) = 4q - 2
+0.75 <= q < 1.00: triangle(q) = 4 - 4q
+```
 
-  NS3仿真版本
-
-  - 文件: NS3.27/src/internet/model/tcp-periodicDC.cc
-  - 行号: 965-1052
-
-  算法核心步骤：
-
-  1. 使用 FFTW3
-  库对拥塞窗口(CWND)和排队延迟(Qd)序列做FFT变换
-  2. 提取主导频率 fm
-  3. 计算CWND和RTT频谱的相似度 (similarity)
-  4. 根据相似度阈值判断周期性状态
-
-  ---
-  发送速率波动检测
-
-  数据采集 (时域)
-
-  - 用户空间 (ICC.cc:312-318):
-  P_cwnd.push_back(_the_window);   // 拥塞窗口样本
-  P_qd.push_back(rtt_measured);    // 排队延迟样本
-  - NS3 (tcp-periodicDC.cc:391-392):
-  QdArray.push_back(Qd);
-  CwndArray.push_back(tcb->m_cWnd);
-
-  周期性检测逻辑 (tcp-periodicDC.cc:435-439)
-
-  if(fm>0 && oldFm-std::min(5*fmth,2.0)<=fm &&
-     fm<=oldFm+std::min(5*fmth,2.0) &&
-     curAm0>=0.9*preAm0 && curAm0<=1.1*preAm0)
-    // 检测到周期性状态
-
-  ---
-  关键参数
-
-  - fm: 主导频率 (Hz)
-  - fs: 采样频率 = n/cycle
-  - similarity: FFT频谱归一化差异
-  - simiD: 时域指标，判断Qd和CWND变化的相关性
-
-
-
-  BBRv2 PROBE_BW 各阶段退出条件
-
-  关键变量/默认值（来源：quic_bbr2_misc.h + quic_bbr2_probe_bw.cc）：
-  - end_of_round_trip：一轮 RTT 结束时置 true（BBRv2 的 round 计数器判定完成一轮）
-  - cycle_start_time：进入 PROBE_DOWN 时设置，用于衡量本轮探测周期时长
-  - probe_wait_time = probe_bw_probe_base_duration + Rand[0, probe_bw_probe_max_rand_duration]
-    - 默认：2s + Rand[0,1s]，即 2~3 秒
-  - rounds_since_probe：每轮 RTT 结束时递增；进入 PROBE_DOWN 时随机初始化为 [0, probe_bw_max_probe_rand_rounds)（默认 0 或 1）
-  - reno_rounds = probe_bw_probe_reno_gain * target_bytes_inflight / MSS（默认 probe_bw_probe_reno_gain=1.0）
-  - probe_bw_full_loss_count = 2，loss_threshold = 0.02（2%）
-  - inflight_hi_with_headroom = inflight_hi * (1 - inflight_hi_headroom)，默认 headroom=0.15
-
-  1. PROBE_DOWN (探测下降阶段) 退出条件
-
-  1) 退出到 PROBE_REFILL（quic_bbr2_probe_bw.cc:126-180）：
-  1.1) 快速退出（网络状态：上一轮因“风险探测”提前退出，但未发生实际过高探测）：
-    - 条件：last_cycle_stopped_risky_probe=true 且 last_cycle_probed_too_high=false
-    - 触发时机：进入 PROBE_DOWN 后第一轮 RTT 结束（rounds_in_phase==1 且 end_of_round_trip）
-    - 这些标记的来源：
-      - last_cycle_stopped_risky_probe 仅在 PROBE_UP 因 is_risky 退出时被置 true
-      - last_cycle_probed_too_high 仅在 PROBE_UP 因丢包/ECN 过高退出时置 true
-  1.2) 时间/共存触发（网络状态：周期运行足够久，或为了与 Reno 共存触发探测）：
-    - 条件：IsTimeToProbeBandwidth() 为 true
-    - 触发方式：
-      - 周期时长 > probe_wait_time（默认 2~3s，从 PROBE_DOWN 开始计）
-      - 或 rounds_since_probe >= min(probe_bw_probe_max_rounds, reno_rounds)
-
-  2) 退出到 PROBE_CRUISE（quic_bbr2_probe_bw.cc:155-179）：
-  2.1) 比例时间退出（网络状态：已在 PROBE_DOWN 待满一段最小 RTT）：
-    - 条件：HasStayedLongEnoughInProbeDown() 为 true
-    - 具体时间：phase_duration > MinRtt
-  2.2) 排空完成（网络状态：inflight 已排空到目标以下，队列基本清空）：
-    - 条件：prior_in_flight <= inflight_hi_with_headroom 且 prior_in_flight < BDP
-
-  ---
-  2. PROBE_CRUISE (巡航阶段) 退出条件
-
-  1) 退出到 PROBE_REFILL（quic_bbr2_probe_bw.cc:379-389）：
-  - IsTimeToProbeBandwidth() 为 true
-    - 周期时长 > probe_wait_time（默认 2~3s，从 PROBE_DOWN 开始计）
-    - 或 rounds_since_probe >= min(probe_bw_probe_max_rounds, reno_rounds)
-
-  --- 
-  3. PROBE_REFILL (填充阶段) 退出条件
-
-  1) 退出到 PROBE_UP（quic_bbr2_probe_bw.cc:391-401）：
-  - rounds_in_phase > 0 且 end_of_round_trip = true
-  - 网络状态：至少经历一个完整 RTT 轮次的确认后进入 PROBE_UP
-
-  ---
-  4. PROBE_UP (探测上升阶段) 退出条件
-
-  1) 退出到 PROBE_DOWN（quic_bbr2_probe_bw.cc:403-450）：
-
-  1.1) 探测过高（网络状态：本轮出现“明显过载”丢包/ECN）：
-    - 条件：loss_events_in_round >= probe_bw_full_loss_count (=2)
-      且 IsInflightTooHigh() 为 true
-    - IsInflightTooHigh 判定：
-      - bytes_lost_in_round > inflight_at_send * loss_threshold（默认 2%）
-      - 或（启用 ECN 时）delivered_ce >= delivered * ecn_thresh（默认 0.5）
-    - 结果：触发 ADAPTED_PROBED_TOO_HIGH，退出到 PROBE_DOWN，并设置 last_cycle_probed_too_high=true
-  
-  1.2) 风险探测（is_risky，网络状态：上周期已证明“探测过高”，当前仍顶着 inflight_hi）：
-    - 条件：last_cycle_probed_too_high=true 且 prior_in_flight >= inflight_hi
-    - 结果：退出到 PROBE_DOWN，并设置 last_cycle_stopped_risky_probe=true
-  
-  1.3) 队列堆积（is_queuing，网络状态：inflight 超过“排队阈值”，出现明显排队）：
-    - 条件：rounds_in_phase > 0 且 prior_in_flight >= queuing_threshold
-    - queuing_threshold = probe_bw_probe_inflight_gain * BDP + 2*MSS + MaxAckHeight
-      - probe_bw_probe_inflight_gain 默认 1.25
-      - add_ack_height_to_queueing_threshold 默认 true，会把 MaxAckHeight 计入阈值
-
-  状态转换图：
-
-  PROBE_DOWN ──┬──> PROBE_REFILL ──> PROBE_UP ──┐
-               │                                 │
-               └──> PROBE_CRUISE ──> PROBE_REFILL│
-                                                 │
-               <─────────────────────────────────┘
-
-  ---
-  inflight_hi 与 BDP 的关系
-
-  1. 初始值
-
-  - inflight_hi 初始值为 std::numeric_limits<QuicByteCount>::max()（无穷大）
-  - 在 STARTUP 退出时首次被设置为 BDP：
-  // quic_bbr2_startup.cc:96, 128
-  model_->set_inflight_hi(bdp);
-
-  2. 运行时的动态变化
-
-  | 场景                    | inflight_hi 的变化                                    | 与 BDP
-  的关系                  |
-  |-----------------------|----------------------------------------------------|---------------
-  -------------|
-  | STARTUP 退出            | 设为 BDP                                             |
-  inflight_hi = BDP          |
-  | PROBE_UP 探测成功         | 逐渐增加（每轮 +1 MSS 起步，指数增长）
-     | inflight_hi > BDP          |
-  | PROBE_UP 探测过高         | 降低为 max(inflight_at_send, target * (1-β))，其中 β=0.3 |
-  inflight_hi ≈ 0.7 * target |
-  | PROBE_DOWN/CRUISE 无丢包 | 如果 inflight_at_send > inflight_hi，则提升              | 可能
-  > BDP                   |
-
-  3. 通常谁更小？
-
-  在稳态下，inflight_hi 通常略大于或等于 BDP：
-
-  inflight_hi ≥ BDP  （正常情况）
-
-  原因：
-  1. BBRv2 的目标是让 inflight_hi 略高于 BDP，以便在 PROBE_UP 阶段探测更多带宽
-  2. PROBE_UP 阶段会持续增加 inflight_hi，直到检测到丢包/拥塞
-  3. 检测到拥塞后，inflight_hi 被削减，但通常仍 ≥ BDP
-
-  特殊情况（inflight_hi < BDP）：
-  - 刚经历严重丢包，inflight_hi 被大幅削减
-  - 网络带宽突然增加，BDP 变大但 inflight_hi 还未来得及探测上去
-
-  设计意图：inflight_hi 代表"不会导致过度丢包的最大 inflight 量"，它应该略高于
-  BDP，以便充分利用带宽，同时通过 headroom 预留空间避免持续排队。
-
-原版中，inflight_hi（即被认为会导致拥塞的在途数据量上限）的更新主要发生在
-  PROBE_BW 模式的各个子阶段中。具体的更新时机和逻辑如下：
-
-  1. 任意 PROBE_BW 子阶段 (DOWN, CRUISE, REFILL, UP)
-  在这些阶段收到 ACK 处理拥塞事件时，都会调用 MaybeAdaptUpperBounds 尝试更新。
-
-   * 因拥塞而减少 (被动调整)：
-       * 条件：检测到由 inflight 过高导致的丢包（loss_events >= 2）或 ECN 标记。
-       * 操作：将 inflight_hi 大幅减少。
-       * 公式：inflight_hi = max(inflight_at_send, target_inflight * (1 -
-         beta))。其中 beta 通常为 0.3，意味着这是一种类似乘性减小（Multiplicative
-         Decrease）的操作。
-
-   * 因 BDP 增长而增加 (被动调整)：
-       * 条件：没有发生拥塞，但当前发送时的
-         inflight（inflight_at_send）实际上已经超过了记录的 inflight_hi。
-       * 操作：这说明网络状况变好了，之前的上限过低。将 inflight_hi
-         更新（提升）为当前的 inflight_at_send。
-
-  2. 仅在 PROBE_UP 阶段 (主动探测)
-  这是 BBRv2 主动寻找更高 inflight 容量的核心阶段，调用 ProbeInflightHighUpward。
-
-   * 主动增加 (Active Increase)：
-       * 前提条件：
-           1. CWND Limited：当前的发送受限于拥塞窗口（说明管道已填满）。
-           2. Inflight Hi Used：当前的 inflight_hi 已经被充分利用（prior_cwnd >=
-              inflight_hi）。
-       * 操作：根据成功确认的数据量逐步增加 inflight_hi。
-       * 逻辑：inflight_hi += delta *
-         MSS。这是一种试探性的增长（通常呈指数级或线性级），试图在不造成严重拥塞的
-         前提下，推高系统的吞吐量上限。
-
-  总结
-   * PROBE_UP：既可能主动增加（探测成功），也可能大幅减少（探测失败，触发丢包）。
-   * CRUISE / REFILL / DOWN：主要负责监控和减少（如果由于某种原因 inflight
-     依然过高导致丢包），或者在 BDP 自然增长时被动提升上限。
-
-     
-freqccv2，以BBRv2为蓝本，但down的pacing gain小一些，改为0.5，退出条件改为当前RTT小于等于1.05倍的min RTT或至少运行了两个min rtt的时间，up的pacing gain小一些，改为1.1（这些都不要改动原来的BBRv2），此外，让其也在新的BBRv2上进行波动，波动方式和模式与freqcc相同，但给波动模式增加一个 refill_up模式，即让波动只存在于refill和up阶段，其他参数和选项与freqcc一致
-
- * FreqCCv2 features:
- *  Amplitude mode : 2miu,3miu,4miu,8miu,2sr,3sr,4sr,8sr or Mbps value
- *   - PROBE_DOWN pacing gain: 0.5 (vs BBRv2's 0.75)
- *   - PROBE_UP pacing gain: 1.1 (vs BBRv2's 1.25)
- *   - PROBE_DOWN exit: RTT <= 1.05*min_RTT OR duration >= 2*min_RTT
- *   - Supports oscillation modes: after_drain, only_probeBW, refill_up
-  1. after_drain -  在Drain阶段结束后开始波动，所有模式都波动
-  2. only_probeBW - 仅在ProbeBW阶段波动
-  3. refill_up -  仅在PROBE_REFILL和PROBE_UP阶段波动
-
-  kFixed,      // Fixed amplitude in bps
-  kMiu2,       // 1/2 of max bandwidth (miu)
-  kMiu3,       // 1/3 of max bandwidth
-  kMiu4,       // 1/4 of max bandwidth
-  kMiu8,       // 1/8 of max bandwidth
-  kSR2,        // 1/2 of current sending rate
-  kSR3,        // 1/3 of current sending rate
-  kSR4,        // 1/4 of current sending rate
-  kSR8,        // 1/8 of current sending rate
-
-
-freqccv3：Cruise阶段结束时，用new_refill替换原来的refill阶段，在new_refill中检查inflight与BDP的情况：
-- 若Inflight > 0.75*BDP + 2*MSS + MaxAckHeight ，则更新参数，且设置pacing_gain=0.75，直到inflight<=0.75*BDP + 2*MSS + MaxAckHeight 时退出；
-- 若inflight<=0.70*BDP + 2*MSS + MaxAckHeight ，更新参数，设置pacing_gain与原refill一致，直到inflight>=0.75*BDP + 2*MSS + MaxAckHeight 时退出；
-- 若以上两个条件都不满足，更新参数后直接退出；
-- 更新参数按原refill规则更新。
-
-  与原版 BBRv2 REFILL 的区别
-
-  | 特性              | 原版 BBRv2 REFILL | FreqCCv3 NEW_REFILL
-  |
-  |-----------------|-----------------|---------------------|
-  | pacing_gain     | 固定 1.0          | 动态 (0.75 或 1.0)
-   |
-  | 持续时间            | 固定 1 RTT        | 根据 inflight
-  动态调整    |
-  | 进入时 inflight 过高 | 继续以 1.0 发送      | 先用 0.75 排空
-            |
-  | 进入时 inflight 过低 | 继续以 1.0 发送      | 用 1.0 填充
-           |
-  | 进入时 inflight 合适 | 等待 1 RTT        | 立即退出
-         |
-
-  设计目的
-
-  1. 避免 PROBE_UP 时 inflight 过高：如果从 CRUISE 出来时
-  inflight 已经偏高，先用 pacing_gain=0.75 排空，避免进入
-  PROBE_UP 后立即触发拥塞
-  2. 加速 PROBE_UP 的到来：如果 inflight
-  已经在合适范围（0.70~0.75 BDP），不需要等待完整的 1
-  RTT，可以立即进入 PROBE_UP
-  3. 确保 PROBE_UP 起点一致：无论从什么状态进入，都尽量让
-  inflight 稳定在 ~0.75*BDP 附近再开始探测
-
-new_refill退出后进入up阶段，在up阶段按freqccv2 的波动方式进行周期性波动（只在up阶段波动，其余阶段不波动，即没有波动模式这个参数，但有其他参数，包括频率和幅度），Up阶段的退出条件与原方案保持一致
-
-  # 使用默认参数（所有流相同）
-  ./waf --run "8_freqccv3"
-
-  # 为不同流设置不同频率
-  ./waf --run "8_freqccv3 --freq1=1.0 --freq2=2.0 --freq3=1.5 
-  --freq4=0.5"
-
-  # 为不同流设置不同振幅模式
-  ./waf --run "8_freqccv3 --amp1=miu2 --amp2=miu4 --amp3=sr2 
-  --amp4=miu8"
-
-  # 混合配置
-  ./waf --run "8_freqccv3 --freq1=1.0 --amp1=miu2 --freq2=2.0 
-  --amp2=miu4 --sim_time=100"
-
-接收速率是 BandwidthEstimate()记录的，它是BBR的带宽窗口估计，是一个平滑的、持久的值，不会跟随发送速率快速振荡。ICC中分析的是瞬时ACK速率。
-
-速率对比画图：python3 scripts/analyze_oscillation.py 2>&1
-
-  | 文件            | 表头
-                         |
-  |---------------|----------------------------------------------
-  -------------------|
-  | _rtt.txt      | #time(s) seq rtt(ms) smoothed_rtt(ms)
-                     |
-  | _recvrate.txt | #time(s) instant_recv_rate(kbps) 
-  bw_estimate(kbps)              |
-  | _upphase.txt  | #start_time(s) duration(ms) freq(Hz) cycles 
-  bw_estimate(kbps)   |
-  | _sendrate.txt | #time(s) pacing_rate(kbps)
-                     |
-  | _bw.txt       | #time(s) bandwidth(kbps)
-                     |
-  | _bbrmode.txt  | #time(s) mode
-                     |
-  | _owd.txt      | #time(s) seq owd(ms) size(bytes)
-                     |
-  | _good.txt     | #time(s) goodput(kbps)
-                     |
-  | _stats.txt    | #loss_rate(%) avg_throughput(kbps) 
-  avg_owd(ms) total_recv_bytes |
-
-
-对比方案：
-BBRv2+：https://github.com/yangfurong/BBRv2plus.git
-oBBR：https://github.com/bpq233/oBBR.git
+因此相位顺序是：
+
+```text
+0 -> -1 -> 0 -> +1 -> 0
+```
+
+负半波先出现，用于先观察降低发送速率时交付速率和 RTT 是否同步下降，再观察正半波是否触发交付增长或排队响应。
+
+当前默认幅度模式为 `4sr`：
+
+```text
+A = 当前原生发送 pacing rate / 4
+Aeff = min(A, B - F)
+```
+
+如果 `B <= F`，则 `Aeff=0`，避免负半波把发送速率压到最低速率以下。
+
+### 支持的幅度模式
+
+| 模式 | 含义 |
+| --- | --- |
+| `Nsr` | 当前发送速率除以 `N`，`N` 支持 1～20；例如 `4sr=SR/4`。 |
+| `fixed_mbps` | 使用配置项 `default_fixed_amplitude_mbps`。 |
+| 正数 Mbps | 直接作为固定幅度。 |
+| `miu2/miu3/miu4/miu8` | 为兼容旧实验保留的带宽估计比例模式。 |
+
+每流覆盖参数使用从 0 开始的流 ID，例如 `flow.0.modulation_freq_hz`。
+
+## 信号采集与频率检测
+
+FBBR 在 CRUISE 中维护三类历史：
+
+| 信号 | 采集时机 | 用途 |
+| --- | --- | --- |
+| sender-rate | 每次发送 | 确认实际命令 pacing 中存在注入频率。 |
+| delivery-rate | 有效 ACK 到达 | 观察路径交付速率是否响应注入。 |
+| SRTT | 有效 ACK 到达 | 观察排队和传播时延响应。 |
+
+默认先等待 1 个 SRTT，再采集 2 个完整调制周期。结果不确定时，窗口可扩展到 3 个周期。重采样步长根据周期计算，并限制在 1～5 ms；超过允许插值空洞、覆盖率不足或 app-limited 样本过多时，本次输入会被判为无效。
+
+### Goertzel 目标频率检测
+
+FBBR 已知注入频率 `f`，因此不需要在整个频谱中搜索主频。它直接在 sender-rate 和 delivery-rate 上计算 generalized Goertzel 分量：
+
+```text
+omega = 2*pi*f*sample_step
+s[n] = (x[n] - mean) + 2*cos(omega)*s[n-1] - s[n-2]
+
+coherent_power_ratio = |X(f)|^2 / (N * sum((x[n]-mean)^2))
+```
+
+当前配置要求：
+
+```text
+coherent_power_ratio >= 0.10
+```
+
+sender-rate 和 delivery-rate 都存在目标频率分量时，才把交付速率视为对注入波形产生了同频响应。
+
+### SRTT 时域证据
+
+SRTT 不只检查目标频率，还分析波形形状和裁剪特征，包括：
+
+- p95-p05 活动幅度、显著变化步数和斜率反转；
+- 顶部或底部连续水平段；
+- 正肩部和负肩部；
+- 两周期重复顶部或底部裁剪；
+- 中部序列扰动和掩码后的周期一致性；
+- `SRTTmax` 与 MaxBw 周围最大 SRTT `M` 的关系；
+- `SRTTmin` 与 BBRv2 `MinRtt` `R` 的关系。
+
+完整的 N01～N16 判定树见 [`FBBR_ALGORITHM.md`](FBBR_ALGORITHM.md)。
+
+## Regime 判定与基线调整
+
+FBBR 将有效窗口分为四类：
+
+| 分类 | Regime | 解释 | 基线动作 |
+| --- | --- | --- | --- |
+| `UNDERLOAD` | I | 路径仍有可利用带宽，或交付速率能较好跟随激励且 RTT 未表现出持续过载。 | 提高 `B`。 |
+| `FULL_LOAD` | II | 当前基线接近可用服务能力。 | 保持 `B`。 |
+| `OVERLOAD` | III | 出现 RTT 上涨、顶部裁剪或交付响应受限等过载证据。 | 降低 `B`。 |
+| `INCONCLUSIVE` | 无 | 样本不足、证据冲突或波形质量不够。 | 保持 `B`，扩窗或放大信号重试。 |
+
+### Regime I：提高基线
+
+优先级为：
+
+1. 若 `Dmax` 位于当前 `B` 与 BBRv2 `MaxBw` 之间，使用 `Dmax`；
+2. 否则尝试使用 `(Dmax + MaxBw) / 2`；
+3. 仍无合法候选时使用 `1.02 * B`；
+4. 最终结果不得低于最低 pacing 速率 `F`。
+
+### Regime III：降低基线
+
+优先级为：
+
+1. 若 `Dmin` 位于 BBRv2 `MinBw` 与当前 `B` 之间，使用 `Dmin`；
+2. 否则尝试使用 `MinBw + (Dmin - MinBw) / 2`；
+3. 仍无合法候选时使用 `0.98 * B`；
+4. 最终结果不得低于 `F`。
+
+### Regime II：保持基线
+
+当前版本已经移除 inflight 服务包络和对应的区间交付率计算，因此 Regime II 不再生成新的区间速率候选，直接保持当前基线并重新进入 settle。
+
+### 不确定窗口
+
+首次 `INCONCLUSIVE` 会延长观察窗口。持续不确定时，FBBR 可依据交付速率响应幅度提高激励；若响应幅度不可用，则以当前 `B` 的一定比例作为放大基数。放大仍受初始幅度倍数上限和最低 pacing 速率保护。
+
+## BEQ 选择与应用
+
+BEQ 是 FBBR 在一轮 CRUISE 结束时发布的服务基线估计。它不是显式公平份额，控制器也不会读取实验中的理想公平份额作为输入。
+
+当前 BEQ 选择优先级为：
+
+1. 使用本轮 CRUISE 产生的合法波形 BEQ；
+2. 否则，对 SRTT 位于 `[1.05R, 1.10R]` 的 delivery-rate 样本做时间加权平均；
+3. 若没有符合该 SRTT 区间的样本，对整个 CRUISE 的有效 delivery-rate 做时间加权平均；
+4. 若仍无有效样本，依次回退到原生 MaxBw、初始 CRUISE 基线、BandwidthEstimate 和最低 pacing 速率。
+
+时间加权平均定义为：
+
+```text
+BEQ = sum(delivery_rate_i * duration_i) / sum(duration_i)
+```
+
+新鲜且有效的 BEQ 可在 `PROBE_REFILL`、`PROBE_UP`、`PROBE_DOWN` 等非 CRUISE 阶段参与 pacing。活动 CRUISE 仍使用当前注入基线 `B`；上一轮有效 BEQ 可以作为下一轮 CRUISE 的初始基线。
+
+## MaxBw-flat 安全试验
+
+当原生 `MaxBw` 高于当前 CRUISE 初始基线时，FBBR 可以暂时停止三角波，以 MaxBw 平速发送并观察若干 RTT：
+
+- 出现丢包、ECN、recovery 或 app-limited 时拒绝；
+- SRTT 明显高于 RTprop 或进入试验时的 SRTT 时拒绝；
+- 交付速率无法接近试验速率时拒绝；
+- 连续 3 个合格 RTT 后接受，把 CRUISE 基线提升到该 MaxBw。
+
+试验期间的 ACK 不参与普通波形分类、收敛轮次或 CRUISE 时间加权 BEQ，避免把安全验证过程污染为常规响应样本。
+
+## 当前默认配置
+
+权威配置文件为 [`NS3.27/examples/CCconfig/fbbr_default.conf`](NS3.27/examples/CCconfig/fbbr_default.conf)。配置加载器采用严格模式：未知 key、非法幅度模式、格式错误或越界值会导致加载失败，而不是静默忽略。
+
+### 主要生效参数
+
+| 参数 | 当前值 | 作用 |
+| --- | ---: | --- |
+| `default_modulation_freq_hz` | 5.0 | CRUISE 三角波频率，周期 0.2 s。 |
+| `default_amplitude_mode` | `4sr` | 幅度为当前原生发送速率的 1/4。 |
+| `default_fixed_amplitude_mbps` | 10.0 | 仅 `fixed_mbps` 模式使用。 |
+| `pacing.minimum_rate_mbps` | 0.2 | 最低 pacing 速率和负半波保护下限。 |
+| `waveform.initial_window_periods` | 2.0 | 初始观察窗口。 |
+| `waveform.extended_window_periods` | 3.0 | 不确定结果的扩展窗口。 |
+| `waveform.max_window_periods` | 3.0 | 最大观察窗口。 |
+| `waveform.min_cycle_coverage_ratio` | 0.85 | 最低重采样覆盖率。 |
+| `waveform.max_app_limited_sample_ratio` | 0.25 | delivery-rate 窗口允许的最大 app-limited 比例。 |
+| `goertzel.min_coherent_power_ratio` | 0.10 | 目标频率分量存在阈值。 |
+| `stability.single_round_exit_threshold` | 0.25 | 单轮交付率变化退出稳定状态的阈值。 |
+| `stability.consecutive_exit_threshold` | 0.15 | 连续两轮变化退出稳定状态的阈值。 |
+| `stability.stable_rounds` | 3 | 回到稳定状态所需轮次。 |
+
+配置文件还包含活动检测、水平段、肩部、重复裁剪、中部扰动和 Regime 周期性判断参数。完整解释见 [`FBBR_ALGORITHM.md`](FBBR_ALGORITHM.md)。
+
+### 收敛门控说明
+
+FBBR 会持续计算 BBR 稳定/非稳定状态并输出诊断信息。当前 paper-test runner 默认没有开启 `enable_convergence_gate_control`，因此稳定状态不会自动关闭 CRUISE 波形；门控状态默认只用于观测。
+
+配置中的部分 `trace.*` 字段由解析器接受，但 paper-test 的 `ConfigureFBBR()` 路径并未应用全部 trace 开关。需要精确诊断采样粒度时，应同时检查 runner 是否调用了 `ConfigureFBBRConvergenceGate()`；详见算法文档的 trace 说明。
+
+记录配置版本：
+
+```bash
+sha256sum NS3.27/examples/CCconfig/fbbr_default.conf
+```
+
+## 编译与运行
+
+### 环境
+
+当前实现运行在 Linux、ns-3.27 和 DQC 上。分析脚本使用 Python 3，并依赖：
+
+```text
+pandas
+matplotlib
+numpy
+```
+
+检查 Python 依赖：
+
+```bash
+python3 -c 'import pandas, matplotlib, numpy; print("analysis dependencies: OK")'
+```
+
+仓库根目录的 [`install_deps.sh`](install_deps.sh) 和 [`NS3.27/README.md`](NS3.27/README.md) 保留了 ns-3.27 的依赖说明，其中部分包名面向较老 Linux 发行版；新系统应安装对应的等价软件包。
+
+### 只运行 FBBR
+
+Test 3 支持算法筛选，是最直接的 FBBR 单算法入口。运行脚本会自动配置、编译、执行仿真并生成分析结果：
+
+```bash
+cd NS3.27
+examples/paper-test/test3/run_test3.sh --algorithm=FBBR --jobs=1
+```
+
+结果写入：
+
+```text
+NS3.27/results/test3/
+```
+
+### 运行完整论文实验
+
+从 `NS3.27` 目录依次执行：
+
+```bash
+examples/paper-test/test1/run_test1.sh --jobs=4
+examples/paper-test/test2/run_test2.sh --jobs=4
+examples/paper-test/test3/run_test3.sh --jobs=4
+```
+
+详细的环境检查、结果备份、筛选参数、重分析命令和故障排查见 [`实验运行操作手册.md`](NS3.27/examples/paper-test/实验运行操作手册.md)。
+
+## 三组 paper-test 实验
+
+| 实验 | 场景 | 主要目的 | 说明 |
+| --- | --- | --- | --- |
+| Test 1 | 100 Mbit/s、40 ms RTT、40 BDP，流数 `2→4→8→16→8→4→2` | 观察动态增减流下的吞吐、排队、公平性和带宽估计 | [`test1/README.md`](NS3.27/examples/paper-test/test1/README.md) |
+| Test 2 | 固定 4 流，组合 10/100/1000 Mbit/s、10/40/200 ms RTT 和 0.5/2 BDP | 比较固定场景中的容量、RTT 和缓冲敏感性 | [`test2/README.md`](NS3.27/examples/paper-test/test2/README.md) |
+| Test 3 | 固定 4 流和 100 Mbit/s，RTT 按 `40→120→30→80→40 ms` 变化 | 隔离动态传播 RTT 对控制器的影响 | [`test3/README.md`](NS3.27/examples/paper-test/test3/README.md) |
+
+三组实验的主要对比算法为：
+
+```text
+BBR-R, oBBR, BBRv2+, CUBIC, BBRv2-formal/BBRv2-ideal, BBRv2, FBBR
+```
+
+Test 1 的形式化 BBRv2 参数名为 `BBRv2-ideal`，Test 2 和 Test 3 使用 `BBRv2-formal`。
+
+### 当前结果应如何解读
+
+现有实验总体显示，FBBR 在多组场景中能够维持接近瓶颈容量的 goodput，并明显降低原始 BBRv2 的排队和丢包；其主要代价是部分多流、低带宽、长 RTT 或动态阶段中的 Jain 公平性和收敛速度。
+
+这些结果具有以下边界：
+
+- paper-test 主要是 `seed=1` 的确定性运行，不代表跨 seed 统计显著性；
+- Test 1 的最终展示数据可能使用单独重跑选择，应以该目录的 `selection.json` 和 README 为准；
+- 深缓冲、浅缓冲、固定 RTT 和动态 RTT 的结果不能相互替代；
+- 公平性、排队、吞吐和丢包必须一起解读，不能只用单一指标判断算法优劣。
+
+## 输出与调试
+
+标准实验输出位于 `NS3.27/results/test1`、`test2` 和 `test3`：
+
+```text
+raw/                 原始 CSV/JSON 和本次运行 manifest
+logs/                每个场景、算法的模拟器日志
+summary/             聚合指标、校验结果和绘图中间数据
+figures/             Test 1/Test 3 的 PNG/PDF 图
+RESULTS.md            自动生成的结果报告
+```
+
+诊断 FBBR 时重点查看：
+
+| 问题 | 关键字段或事件 |
+| --- | --- |
+| 为什么进入 I/II/III | `decision_rule`、分类结果、SRTT/DRate 波形有效性、裁剪类型、`M`、`R`、`Dmin`、`Dmax`。 |
+| 为什么调整基线 | `waveform_last_action`、`delta_source`、原始/应用后的 baseline delta。 |
+| 为什么发布该 BEQ | `beq_source`、`beq_valid`、`beq_fresh`、`beq_application_valid`。 |
+| 为什么没有分类 | `invalid_reason`、coverage、app-limited ratio、Goertzel reason 和 retry 状态。 |
+| pacing 最终采用什么基线 | `pacing_base_source`、`native_pacing_bps`、`final_pacing_rate_bps`、`triangle_wave`。 |
+| 稳定门控是否影响控制 | `bbr_stable`、`freq_tool_needed`、`freq_tool_on` 和门控控制开关。 |
+
+Test 3 的每流 `controller_trace.csv` 会记录 BBR 状态、pacing、RTT、BEQ 和 FBBR 动作，适合检查动态 RTT 下的控制过程。
+
+## 对比实现
+
+| 算法 | 本仓库入口或说明 |
+| --- | --- |
+| BBR-R | [`README_BBR_R_MIGRATION.md`](NS3.27/README_BBR_R_MIGRATION.md) |
+| oBBR | [`README_OBBR_MIGRATION.md`](NS3.27/README_OBBR_MIGRATION.md) |
+| BBRv2+ | [`README_DQC_BBRV2PLUS.md`](NS3.27/README_DQC_BBRV2PLUS.md) |
+| CUBIC | [`README_CUBIC_NS3_47_MIGRATION.md`](NS3.27/README_CUBIC_NS3_47_MIGRATION.md) |
+| BBRv2 | DQC 原生 `Bbr2Sender` 控制路径 |
+| FBBR | `FBBRSender`，DQC 类型 `kFBBR` |
+
+## 文档索引
+
+- [`FBBR_ALGORITHM.md`](FBBR_ALGORITHM.md)：当前 FBBR 的完整状态、判定树、执行器、BEQ 和配置说明。
+- [`实验运行操作手册.md`](NS3.27/examples/paper-test/实验运行操作手册.md)：Test 1～3 的完整运行流程。
+- [`Test 1 README`](NS3.27/examples/paper-test/test1/README.md)：动态流数实验及当前选定结果。
+- [`Test 2 README`](NS3.27/examples/paper-test/test2/README.md)：固定四流场景矩阵。
+- [`Test 3 README`](NS3.27/examples/paper-test/test3/README.md)：动态传播 RTT 实验。
+- [`FBBR-internet测试.md`](FBBR-internet测试.md)：已有互联网路径实验记录。
+
+若源码、配置和文档出现不一致，优先级依次为：当前 `fbbr_sender.*` 源码、`fbbr_config_loader.*`、实际运行使用的 `fbbr_default.conf`、本 README 和其他实验记录。
